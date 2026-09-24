@@ -122,11 +122,7 @@ _last_console_line = ""
 
 
 def console_h3(message: str, *args: object) -> None:
-    """Print an h3 line to the server log when console debug is on."""
-    if not debug_console():
-        return
-    import logging
-
+    """Mirror an h3 line into the UI console buffer; also log when DEBUG is on."""
     text = message % args if args else message
     text = " ".join(str(text).split())
     if not text:
@@ -135,6 +131,16 @@ def console_h3(message: str, *args: object) -> None:
     if text == _last_console_line:
         return
     _last_console_line = text
+    try:
+        from h3_console import append_console
+
+        append_console("%s", text[:500])
+    except Exception:
+        pass
+    if not debug_console():
+        return
+    import logging
+
     logging.getLogger("h3").info("%s", text[:300])
 
 

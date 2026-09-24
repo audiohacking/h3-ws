@@ -11,6 +11,7 @@ import { ModelsManager } from "./components/media/ModelsManager";
 import { ComposerPanel } from "./components/composer/ComposerPanel";
 import { isTurboPreset, pickDefaultTurboId } from "./components/composer/TurboToggle";
 import { FeaturesPopup } from "./components/composer/FeaturesPopup";
+import { ConsoleModal } from "./components/ConsoleModal";
 import { RefinePanel } from "./components/composer/RefinePanel";
 import { ProjectSwitcher, type Project } from "./components/ProjectSwitcher";
 import { compilePrompt } from "./compile";
@@ -322,6 +323,7 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckPublic | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [featuresOpen, setFeaturesOpen] = useState(false);
+  const [consoleOpen, setConsoleOpen] = useState(false);
   const [refineOpen, setRefineOpen] = useState(false);
   const [refineBusy, setRefineBusy] = useState(false);
   const [refineError, setRefineError] = useState<string | null>(null);
@@ -1218,26 +1220,6 @@ export default function App() {
     ]);
   }
 
-  async function pickStartFile(file: File) {
-    const up = await uploadFile(file, "image");
-    setRefs([]);
-    setImagePath(up.path);
-    setImageName(file.name);
-    setRouting("fl2va");
-    if (!endImagePath) setMode("first_frame");
-    else setMode("fl2va");
-  }
-
-  async function pickEndFile(file: File) {
-    const up = await uploadFile(file, "image");
-    setRefs([]);
-    setEndImagePath(up.path);
-    setEndImageName(file.name);
-    setRouting("fl2va");
-    if (!imagePath) setMode("last_frame");
-    else setMode("fl2va");
-  }
-
   function applyFrameAsInput(frame: LibraryFrame, which: "start" | "end") {
     if (mode === "ref2va") {
       if (refs.some((r) => r.path === frame.path)) return;
@@ -1649,6 +1631,9 @@ export default function App() {
               Models
             </button>
           )}
+          <button type="button" className="btn-secondary" onClick={() => setConsoleOpen(true)} title="Backend console for bug reports">
+            Console
+          </button>
           <ProjectSwitcher
             projects={projects}
             activeProjectId={activeProjectId}
@@ -1748,7 +1733,19 @@ export default function App() {
                 </button>
               )}
             </div>
-            {error && <div className="error-banner">{error}</div>}
+            {error && (
+              <div className="error-banner" role="alert">
+                <pre className="error-banner__text">{error}</pre>
+                <button
+                  type="button"
+                  className="error-banner__copy"
+                  onClick={() => void navigator.clipboard.writeText(error).catch(() => undefined)}
+                  title="Copy error"
+                >
+                  Copy
+                </button>
+              </div>
+            )}
             {showChainPicker && (
               <div className="player-context">
                 <div className="player-context-body">
@@ -1833,19 +1830,21 @@ export default function App() {
               config={config}
               imageName={imageName}
               endImageName={endImageName}
-              onPickStartFile={(file) => void pickStartFile(file)}
-              onPickEndFile={(file) => void pickEndFile(file)}
-              onPickStartFrame={(frame) => {
+              onPickStartImage={(item) => {
                 setRefs([]);
-                setImagePath(frame.path);
-                setImageName(frame.label);
+                setImagePath(item.path);
+                setImageName(item.name);
                 setRouting("fl2va");
+                if (!endImagePath) setMode("first_frame");
+                else setMode("fl2va");
               }}
-              onPickEndFrame={(frame) => {
+              onPickEndImage={(item) => {
                 setRefs([]);
-                setEndImagePath(frame.path);
-                setEndImageName(frame.label);
+                setEndImagePath(item.path);
+                setEndImageName(item.name);
                 setRouting("fl2va");
+                if (!imagePath) setMode("last_frame");
+                else setMode("fl2va");
               }}
               onClearStart={() => { setImagePath(null); setImageName(null); }}
               onClearEnd={() => { setEndImagePath(null); setEndImageName(null); }}
@@ -2133,6 +2132,8 @@ export default function App() {
         networkInitial={networkSettings}
         onNetworkSaved={setNetworkSettings}
       />
+
+      <ConsoleModal open={consoleOpen} api={API} onClose={() => setConsoleOpen(false)} />
 
       <RefinePanel
         open={refineOpen}

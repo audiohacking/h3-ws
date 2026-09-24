@@ -20,6 +20,7 @@ static void usage(const char *program) {
         "Options:\n"
         "  -d, --model-dir PATH   MiniMax-H3 local directory\n"
         "  -p, --prompt TEXT      Raw H3 prompt\n"
+        "      --prompt-file PATH Read UTF-8 prompt from file (long Continuity prompts)\n"
         "  -o, --output PATH      Output MP4 (default: outputs/h3.mp4)\n"
         "      --width N          Output width (default: 864)\n"
         "      --height N         Output height (default: 480)\n"
@@ -255,10 +256,11 @@ int main(int argc, char **argv) {
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_PREVIEW_LATENT, OPT_SHOW, OPT_ZOOM,
-           OPT_PROFILE, OPT_INFO };
+           OPT_PROFILE, OPT_INFO, OPT_PROMPT_FILE };
     static const struct option options[] = {
         {"model-dir", required_argument, NULL, 'd'},
         {"prompt", required_argument, NULL, 'p'},
+        {"prompt-file", required_argument, NULL, OPT_PROMPT_FILE},
         {"output", required_argument, NULL, 'o'},
         {"width", required_argument, NULL, OPT_WIDTH},
         {"height", required_argument, NULL, OPT_HEIGHT},
@@ -316,6 +318,7 @@ int main(int argc, char **argv) {
     };
     const char *model_dir = NULL;
     const char *prompt = NULL;
+    char *prompt_owned = NULL;
     const char *output = "outputs/h3.mp4";
     h3_params params = H3_PARAMS_DEFAULT;
     h3_reference references[12];
@@ -332,6 +335,48 @@ int main(int argc, char **argv) {
         switch (option) {
             case 'd': model_dir = optarg; break;
             case 'p': prompt = optarg; break;
+            case OPT_PROMPT_FILE: {
+                FILE *file = fopen(optarg, "rb");
+                if (!file) {
+                    fprintf(stderr, "h3: cannot open prompt file %s: %s\n",
+                            optarg, strerror(errno));
+                    return 1;
+                }
+                if (fseek(file, 0, SEEK_END) != 0) {
+                    fclose(file);
+                    fprintf(stderr, "h3: cannot seek prompt file %s\n", optarg);
+                    return 1;
+                }
+                long size = ftell(file);
+                if (size < 0 || size > 1024L * 1024L) {
+                    fclose(file);
+                    fprintf(stderr, "h3: prompt file empty or larger than 1 MiB\n");
+                    return 1;
+                }
+                if (fseek(file, 0, SEEK_SET) != 0) {
+                    fclose(file);
+                    return 1;
+                }
+                prompt_owned = malloc((size_t)size + 1);
+                if (!prompt_owned) {
+                    fclose(file);
+                    fprintf(stderr, "h3: out of memory reading prompt file\n");
+                    return 1;
+                }
+                size_t n = fread(prompt_owned, 1, (size_t)size, file);
+                fclose(file);
+                prompt_owned[n] = '\0';
+                while (n > 0 && (prompt_owned[n - 1] == '\n' ||
+                                 prompt_owned[n - 1] == '\r'))
+                    prompt_owned[--n] = '\0';
+                if (!n) {
+                    free(prompt_owned);
+                    fprintf(stderr, "h3: prompt file is empty\n");
+                    return 1;
+                }
+                prompt = prompt_owned;
+                break;
+            }
             case 'o': output = optarg; break;
             case 'h': usage(argv[0]); return 0;
             case OPT_WIDTH: params.width = parse_int(optarg, "width"); break;
@@ -512,6 +557,7 @@ int main(int argc, char **argv) {
     h3_ctx *ctx = h3_load_dir(model_dir);
     if (!ctx) {
         fprintf(stderr, "h3: %s\n", h3_last_error(NULL));
+        free(prompt_owned);
         return 1;
     }
     if (info) print_info(ctx);
@@ -537,6 +583,7 @@ int main(int argc, char **argv) {
             if (cli.active) fputc('\n', stderr);
             fprintf(stderr, "h3: %s\n", h3_last_error(ctx));
             h3_free(ctx);
+            free(prompt_owned);
             return 1;
         }
         h3_result_free(result);
@@ -546,8 +593,10 @@ int main(int argc, char **argv) {
     } else if (!info) {
         int cli_status = h3_cli_run(ctx, model_dir, &params, show, seed_given);
         h3_free(ctx);
+        free(prompt_owned);
         return cli_status;
     }
     h3_free(ctx);
+    free(prompt_owned);
     return 0;
 }

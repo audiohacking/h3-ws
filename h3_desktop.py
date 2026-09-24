@@ -817,6 +817,8 @@ def open_webview() -> None:
         min_size=(1024, 720),
         confirm_close=False,
         focus=True,
+        # Default is False — blocks selecting/copying red error banners for reports.
+        text_select=True,
     )
     try:
         window.events.closed += on_closed

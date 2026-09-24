@@ -1,7 +1,8 @@
 """Resident interactive ``./h3`` session (PTY). One-shot spawn remains the fallback.
 
 h3.c's REPL uses linenoise, which needs a TTY. We drive it over a PTY, apply
-``!`` commands, then send the prompt.
+``!`` commands, then generate via ``!prompt-file`` so Continuity-length Context-IR
+prompts never hit linenoise's line buffer or deadlock the PTY.
 
 Warm-session rules (must not regress oneshot behavior):
 
@@ -16,6 +17,8 @@ Warm-session rules (must not regress oneshot behavior):
 * SessionError → caller falls back to full one-shot.
 * After every job: wipe latent dumps + session MP4 temps; keep the warm preview
   *directory* and interactive process for the next resident run.
+* Prompts: written to a temp UTF-8 file and run with ``!prompt-file`` (ceiling
+  ``MAX_PROMPT_CHARS``, Continuity-class; newlines preserved).
 """
 
 from __future__ import annotations
@@ -45,7 +48,7 @@ from h3_backend import (
     uses_ref2va,
 )
 from h3_media import require_ui_canvas, snap_frames
-from h3_paths import console_h3
+from h3_paths import console_h3, mk_scratch_dir
 
 log = logging.getLogger("h3-session")
 
@@ -92,12 +95,22 @@ def parse_outputs_dir(text: str) -> Path | None:
     return Path(match.group(1).strip())
 
 
-def _echo_pty(chunk: str) -> None:
+def _echo_pty(chunk: str, *, on_progress: ProgressCallback | None = None) -> None:
+    last_status = ""
     for line in strip_ansi(chunk).replace("\r", "\n").splitlines():
         text = line.strip()
         if not text or text == "h3>" or _PROGRESS_RE.search(text):
             continue
         console_h3("%s", text)
+        if on_progress and text != last_status and len(text) >= 6:
+            last_status = text
+            # Weight load / tokenizer init often print lines without N/M counters.
+            on_progress(
+                {
+                    "stage": "loading",
+                    "label": text[:160],
+                }
+            )
 
 
 def parse_cli_progress(chunk: str) -> dict[str, Any] | None:
@@ -317,10 +330,35 @@ def build_session_argv(
 
 
 def session_prompt_line(prompt: str) -> str:
+    """Normalize a prompt for the linenoise one-liner path (short prompts only)."""
     text = " ".join((prompt or "").split())
     if text.startswith("!"):
         text = " " + text
     return text
+
+
+# Continuity has no hard UI char cap; H3 tokenizer accepts long Context-IR text.
+# Keep a generous server-side ceiling so a runaway paste cannot OOM the process.
+MAX_PROMPT_CHARS = 100_000
+# Above this, prefer !prompt-file so linenoise / PTY never see the body.
+PROMPT_FILE_THRESHOLD = 512
+
+
+def write_session_prompt_file(directory: Path | None, prompt: str) -> Path:
+    """Persist the exact prompt (newlines kept) for ``!prompt-file``."""
+    text = (prompt or "").strip()
+    if not text:
+        raise ValueError("prompt is required")
+    if len(text) > MAX_PROMPT_CHARS:
+        raise ValueError(
+            f"prompt is {len(text)} characters; max supported is {MAX_PROMPT_CHARS} "
+            "(same Continuity-class ceiling)"
+        )
+    root = Path(directory) if directory is not None else Path(mk_scratch_dir("h3_prompt_"))
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"prompt-{os.getpid()}-{time.time_ns()}.txt"
+    path.write_text(text, encoding="utf-8")
+    return path.resolve()
 
 
 class H3InteractiveSession:
@@ -338,6 +376,7 @@ class H3InteractiveSession:
         env: dict[str, str] | None = None,
         cwd: Path | str | None = None,
         timeout_s: float = SESSION_START_TIMEOUT_S,
+        on_progress: ProgressCallback | None = None,
     ) -> None:
         master, slave = pty.openpty()
         try:
@@ -367,11 +406,28 @@ class H3InteractiveSession:
         os.close(slave)
         self._master = master
         self._proc = proc
+        last_emit = [0.0]
+
+        def on_chunk(chunk: str) -> None:
+            progress = parse_cli_progress(chunk)
+            now = time.time()
+            if progress and on_progress:
+                if now - last_emit[0] >= 0.25:
+                    last_emit[0] = now
+                    on_progress(progress)
+                _echo_pty(chunk)
+                return
+            if on_progress and now - last_emit[0] >= 0.75:
+                last_emit[0] = now
+                _echo_pty(chunk, on_progress=on_progress)
+            else:
+                _echo_pty(chunk)
+
         try:
             boot = self._read_until(
                 has_repl_prompt,
                 timeout_s,
-                on_chunk=lambda chunk: _echo_pty(chunk),
+                on_chunk=on_chunk,
             )
         except Exception:
             self.stop()
@@ -396,36 +452,47 @@ class H3InteractiveSession:
         on_progress: ProgressCallback | None = None,
         timeout_s: float = GENERATE_TIMEOUT_S,
     ) -> Path:
-        line = session_prompt_line(prompt)
-        if not line:
+        text = (prompt or "").strip()
+        if not text:
             raise ValueError("prompt is required")
-        self._send_line(line)
-        collected: list[str] = []
+        # Long Continuity Context-IR prompts hang linenoise/PTY when pasted as a
+        # single line. Always feed via !prompt-file (short command; body on disk).
+        prompt_path = write_session_prompt_file(self.output_dir, text)
+        try:
+            self._send_line(f"!prompt-file {prompt_path}")
+            collected: list[str] = []
 
-        def ready(buf: str) -> bool:
-            text = normalize_pty(buf)
-            return bool(_DONE_RE.search(text) and _PROMPT_RE.search(text)) or bool(
-                _ERROR_RE.search(text) and _PROMPT_RE.search(text) and "unknown command" not in text
-            )
+            def ready(buf: str) -> bool:
+                body = normalize_pty(buf)
+                return bool(_DONE_RE.search(body) and _PROMPT_RE.search(body)) or bool(
+                    _ERROR_RE.search(body)
+                    and _PROMPT_RE.search(body)
+                    and "unknown command" not in body
+                )
 
-        def on_chunk(chunk: str) -> None:
-            collected.append(chunk)
-            _echo_pty(chunk)
-            progress = parse_cli_progress(chunk)
-            if progress and on_progress:
-                on_progress(progress)
+            def on_chunk(chunk: str) -> None:
+                collected.append(chunk)
+                _echo_pty(chunk)
+                progress = parse_cli_progress(chunk)
+                if progress and on_progress:
+                    on_progress(progress)
 
-        buf = self._read_until(ready, timeout_s, on_chunk=on_chunk)
-        text = strip_ansi(buf)
-        done = parse_done_path(text)
-        if done and done.is_file():
-            return done
-        err = _ERROR_RE.findall(text)
-        if err:
-            raise RuntimeError(err[-1].strip())
-        if done:
-            raise RuntimeError(f"h3 reported {done} but the file is missing")
-        raise SessionError("interactive generate finished without Done -> path")
+            buf = self._read_until(ready, timeout_s, on_chunk=on_chunk)
+            body = strip_ansi(buf)
+            done = parse_done_path(body)
+            if done and done.is_file():
+                return done
+            err = _ERROR_RE.findall(body)
+            if err:
+                raise RuntimeError(err[-1].strip())
+            if done:
+                raise RuntimeError(f"h3 reported {done} but the file is missing")
+            raise SessionError("interactive generate finished without Done -> path")
+        finally:
+            try:
+                prompt_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def stop(self) -> None:
         self.alive = False
@@ -471,11 +538,52 @@ class H3InteractiveSession:
             raise SessionError("interactive h3 is not running")
         payload = (line.rstrip("\r\n") + "\r").encode("utf-8")
         console_h3("h3> %s", line.rstrip("\r\n")[:200])
+        self._write_pty(payload)
+
+    def _write_pty(self, payload: bytes) -> None:
+        """Write to the PTY while draining echo so long lines cannot deadlock."""
+        if self._master is None:
+            raise SessionError("interactive h3 is not running")
+        master = self._master
+        # Non-blocking so a full PTY buffer yields instead of hanging forever.
+        flags = fcntl.fcntl(master, fcntl.F_GETFL)
+        fcntl.fcntl(master, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         try:
-            os.write(self._master, payload)
-        except OSError as exc:
-            self.alive = False
-            raise SessionError(f"interactive h3 stdin closed: {exc}") from exc
+            offset = 0
+            deadline = time.time() + 120.0
+            while offset < len(payload):
+                if self._cancel is not None and self._cancel.is_set():
+                    raise GenerationCancelledError("cancelled")
+                if self._proc is not None and self._proc.poll() is not None:
+                    self.alive = False
+                    raise SessionError(f"interactive h3 exited {self._proc.returncode}")
+                if time.time() > deadline:
+                    raise SessionError("timed out writing to interactive h3")
+                readable, writable, _ = select.select([master], [master], [], 0.25)
+                if readable:
+                    try:
+                        data = os.read(master, 65536)
+                    except BlockingIOError:
+                        data = b""
+                    except OSError as exc:
+                        self.alive = False
+                        raise SessionError(f"interactive h3 pty closed: {exc}") from exc
+                    if data:
+                        _echo_pty(data.decode("utf-8", errors="replace"))
+                if writable and offset < len(payload):
+                    chunk = payload[offset : offset + 256]
+                    try:
+                        n = os.write(master, chunk)
+                    except BlockingIOError:
+                        continue
+                    except OSError as exc:
+                        self.alive = False
+                        raise SessionError(f"interactive h3 stdin closed: {exc}") from exc
+                    if n <= 0:
+                        raise SessionError("interactive h3 stdin closed")
+                    offset += n
+        finally:
+            fcntl.fcntl(master, fcntl.F_SETFL, flags)
 
     def _read_until(
         self,

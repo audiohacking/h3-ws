@@ -24,12 +24,28 @@ export type LibraryAsset = {
 
 type Capacity = { used: number; max: number; label: string };
 
+export type LibraryPickPurpose = "refs" | "start_frame" | "end_frame";
+
+export type LibraryPickItem = {
+  kind: RefKind;
+  path: string;
+  name: string;
+  durationS?: number;
+  previewUrl?: string;
+};
+
 type Props = {
   open: boolean;
   initialTab?: LibraryTab;
   /** When attaching from Video/Renders, prefer keep-audio vs silent. */
   videoAttachKind?: "video" | "silent_video";
-  /** Current refs — drives the slot counter. */
+  /**
+   * ``refs`` (default) = multi-select for Ref2VA.
+   * ``start_frame`` / ``end_frame`` = single image pick for FL2VA anchors
+   * (uploads + captured frames from the Image tab).
+   */
+  purpose?: LibraryPickPurpose;
+  /** Current refs — drives the slot counter (ignored for frame picks). */
   refs: ReferenceItem[];
   disabled?: boolean;
   onClose: () => void;
@@ -38,14 +54,10 @@ type Props = {
     durationS?: number;
     filename?: string;
   }>;
-  /** Attach selected library assets as new references. */
-  onAdd: (items: Array<{
-    kind: RefKind;
-    path: string;
-    name: string;
-    durationS?: number;
-    previewUrl?: string;
-  }>) => void;
+  /** Attach selected library assets as new references (purpose=refs). */
+  onAdd: (items: LibraryPickItem[]) => void;
+  /** Single image chosen as start/end frame (purpose=start_frame|end_frame). */
+  onPickImage?: (item: { path: string; name: string; previewUrl?: string }) => void;
 };
 
 const TABS: { id: LibraryTab; label: string }[] = [
@@ -110,13 +122,16 @@ export function MediaLibraryModal({
   open,
   initialTab = "image",
   videoAttachKind = "video",
+  purpose = "refs",
   refs,
   disabled,
   onClose,
   onUpload,
   onAdd,
+  onPickImage,
 }: Props) {
-  const [tab, setTab] = useState<LibraryTab>(initialTab);
+  const framePick = purpose === "start_frame" || purpose === "end_frame";
+  const [tab, setTab] = useState<LibraryTab>(framePick ? "image" : initialTab);
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<LibraryAsset[]>([]);
   const [loading, setLoading] = useState(false);
@@ -126,7 +141,17 @@ export function MediaLibraryModal({
   const fileRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  const capacity = useMemo(() => capacityForTab(tab, refs), [tab, refs]);
+  const visibleTabs = useMemo(
+    () => (framePick ? TABS.filter((t) => t.id === "image") : TABS),
+    [framePick],
+  );
+
+  const capacity = useMemo((): Capacity => {
+    if (framePick) {
+      return { used: 0, max: 1, label: purpose === "end_frame" ? "end frame" : "start frame" };
+    }
+    return capacityForTab(tab, refs);
+  }, [framePick, purpose, tab, refs]);
   const slotsLeft = Math.max(0, capacity.max - capacity.used);
   const filled = capacity.used + selected.length;
 
@@ -149,14 +174,15 @@ export function MediaLibraryModal({
 
   useEffect(() => {
     if (!open) return;
-    setTab(initialTab);
+    const bootTab: LibraryTab = framePick ? "image" : initialTab;
+    setTab(bootTab);
     setQuery("");
     setSelected([]);
     setError(null);
-    void load(initialTab, "");
+    void load(bootTab, "");
     const t = window.setTimeout(() => searchRef.current?.focus(), 50);
     return () => window.clearTimeout(t);
-  }, [open, initialTab, load]);
+  }, [open, initialTab, framePick, load]);
 
   useEffect(() => {
     if (!open) return;
@@ -176,9 +202,11 @@ export function MediaLibraryModal({
   if (!open) return null;
 
   function toggle(asset: LibraryAsset) {
+    if (framePick && asset.kind !== "image") return;
     setSelected((prev) => {
       const exists = prev.some((a) => a.id === asset.id);
       if (exists) return prev.filter((a) => a.id !== asset.id);
+      if (framePick) return [asset];
       if (prev.length >= slotsLeft) return prev;
       return [...prev, asset];
     });
@@ -203,6 +231,7 @@ export function MediaLibraryModal({
       };
       setItems((prev) => [asset, ...prev.filter((a) => a.path !== asset.path)]);
       setSelected((prev) => {
+        if (framePick) return [asset];
         if (prev.length >= slotsLeft) return prev;
         if (prev.some((a) => a.id === asset.id)) return prev;
         return [...prev, asset];
@@ -217,6 +246,16 @@ export function MediaLibraryModal({
 
   function confirmAdd() {
     if (selected.length === 0) return;
+    if (framePick) {
+      const a = selected[0];
+      onPickImage?.({
+        path: a.path,
+        name: a.name,
+        previewUrl: a.thumb_url || a.media_url || undefined,
+      });
+      onClose();
+      return;
+    }
     onAdd(
       selected.map((a) => {
         let kind: RefKind = a.kind as RefKind;
@@ -237,6 +276,16 @@ export function MediaLibraryModal({
 
   const uploadLabel =
     tab === "image" ? "Upload image" : tab === "audio" ? "Upload audio" : "Upload video";
+  const confirmLabel = framePick
+    ? purpose === "end_frame"
+      ? "Use as end frame"
+      : "Use as start frame"
+    : `Add${selected.length > 0 ? ` (${selected.length})` : ""}`;
+  const dialogLabel = framePick
+    ? purpose === "end_frame"
+      ? "Choose end frame"
+      : "Choose start frame"
+    : "Media library";
 
   return (
     <div className="media-lib-overlay" role="presentation" onClick={onClose}>
@@ -244,12 +293,12 @@ export function MediaLibraryModal({
         className="media-lib"
         role="dialog"
         aria-modal="true"
-        aria-label="Media library"
+        aria-label={dialogLabel}
         onClick={(e) => e.stopPropagation()}
       >
         <header className="media-lib__head">
           <nav className="media-lib__tabs" aria-label="Media kind">
-            {TABS.map((t) => (
+            {visibleTabs.map((t) => (
               <button
                 key={t.id}
                 type="button"
@@ -274,7 +323,7 @@ export function MediaLibraryModal({
             ref={searchRef}
             className="media-lib__search"
             type="search"
-            placeholder="Search…"
+            placeholder="Search uploads and captured frames…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -293,7 +342,7 @@ export function MediaLibraryModal({
             type="file"
             accept={acceptForTab(tab === "renders" ? "video" : tab)}
             hidden
-            multiple
+            multiple={!framePick}
             onChange={(e) => {
               const files = Array.from(e.target.files ?? []);
               e.target.value = "";
@@ -326,6 +375,15 @@ export function MediaLibraryModal({
                 disabled={blocked}
                 title={asset.name}
                 onClick={() => toggle(asset)}
+                onDoubleClick={() => {
+                  if (!framePick || asset.kind !== "image") return;
+                  onPickImage?.({
+                    path: asset.path,
+                    name: asset.name,
+                    previewUrl: asset.thumb_url || asset.media_url || undefined,
+                  });
+                  onClose();
+                }}
               >
                 {asset.kind === "image" && asset.thumb_url ? (
                   <img className="media-lib__thumb" src={asset.thumb_url} alt="" loading="lazy" />
@@ -352,7 +410,11 @@ export function MediaLibraryModal({
 
         <footer className="media-lib__foot">
           <span className="media-lib__slots">
-            {filled} / {capacity.max} slots filled
+            {framePick
+              ? selected.length === 0
+                ? "Pick an image (uploads + captured frames)"
+                : `Selected · ${selected[0]?.name ?? "image"}`
+              : `${filled} / ${capacity.max} slots filled`}
           </span>
           <button type="button" className="media-lib__ghost" onClick={onClose}>
             Cancel
@@ -363,7 +425,7 @@ export function MediaLibraryModal({
             disabled={selected.length === 0 || disabled}
             onClick={confirmAdd}
           >
-            Add{selected.length > 0 ? ` (${selected.length})` : ""}
+            {confirmLabel}
           </button>
         </footer>
       </div>

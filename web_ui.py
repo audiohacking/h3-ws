@@ -1569,6 +1569,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        from h3_console import install_console_logging
+
+        install_console_logging()
         state.ensure_worker()
         loop = asyncio.get_running_loop()
 
@@ -1640,6 +1643,20 @@ def create_app(
             "web_url": state.http_url,
             "engine": info,
         }
+
+    @app.get("/api/console")
+    async def api_console(limit: int = 800):
+        """Ring-buffer + log-file tail for the in-app Console panel."""
+        from h3_console import console_snapshot
+
+        return console_snapshot(limit=limit)
+
+    @app.post("/api/console/clear")
+    async def api_console_clear():
+        from h3_console import clear_console
+
+        clear_console()
+        return {"ok": True}
 
     @app.get("/api/config")
     async def api_config(request: Request):

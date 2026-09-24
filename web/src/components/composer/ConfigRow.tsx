@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { activeRefs, handleForRef, nearestDurationId } from "../../compile";
-import type { LibraryFrame, PresetOption, ReferenceItem, RoutingMode } from "../../types";
-import { MediaPickerGrid } from "./MediaPicker";
+import type { PresetOption, ReferenceItem, RoutingMode } from "../../types";
+import { MediaLibraryModal, type LibraryPickPurpose } from "./MediaLibraryModal";
 
 type Props = {
   disabled?: boolean;
@@ -16,13 +16,15 @@ type Props = {
   refs: ReferenceItem[];
   imageName: string | null;
   endImageName: string | null;
-  onPickStartFile: (file: File) => void;
-  onPickEndFile: (file: File) => void;
-  onPickStartFrame: (frame: LibraryFrame) => void;
-  onPickEndFrame: (frame: LibraryFrame) => void;
+  onUpload: (file: File, kind: "image" | "video" | "audio") => Promise<{
+    path: string;
+    durationS?: number;
+    filename?: string;
+  }>;
+  onPickStartImage: (item: { path: string; name: string }) => void;
+  onPickEndImage: (item: { path: string; name: string }) => void;
   onClearStart: () => void;
   onClearEnd: () => void;
-  frames: LibraryFrame[];
   engineNote?: string;
 };
 
@@ -51,24 +53,17 @@ export function ConfigRow({
   refs,
   imageName,
   endImageName,
-  onPickStartFile,
-  onPickEndFile,
-  onPickStartFrame,
-  onPickEndFrame,
+  onUpload,
+  onPickStartImage,
+  onPickEndImage,
   onClearStart,
   onClearEnd,
-  frames,
   engineNote,
 }: Props) {
-  const startRef = useRef<HTMLInputElement>(null);
-  const endRef = useRef<HTMLInputElement>(null);
-  const startAnchor = useRef<HTMLDivElement>(null);
-  const endAnchor = useRef<HTMLDivElement>(null);
   const aspectAnchor = useRef<HTMLDivElement>(null);
   const resAnchor = useRef<HTMLDivElement>(null);
   const durAnchor = useRef<HTMLDivElement>(null);
-  const [startOpen, setStartOpen] = useState(false);
-  const [endOpen, setEndOpen] = useState(false);
+  const [framePicker, setFramePicker] = useState<LibraryPickPurpose | null>(null);
   const [aspectOpen, setAspectOpen] = useState(false);
   const [resOpen, setResOpen] = useState(false);
   const [durOpen, setDurOpen] = useState(false);
@@ -76,8 +71,6 @@ export function ConfigRow({
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       const t = e.target as Node;
-      if (startAnchor.current && !startAnchor.current.contains(t)) setStartOpen(false);
-      if (endAnchor.current && !endAnchor.current.contains(t)) setEndOpen(false);
       if (aspectAnchor.current && !aspectAnchor.current.contains(t)) setAspectOpen(false);
       if (resAnchor.current && !resAnchor.current.contains(t)) setResOpen(false);
       if (durAnchor.current && !durAnchor.current.contains(t)) setDurOpen(false);
@@ -115,8 +108,6 @@ export function ConfigRow({
       : `${resolution.width}×${resolution.height}`
     : resolutionId;
 
-  const frameItems = frames.map((f) => ({ id: f.id, label: f.label, thumbUrl: f.image_url }));
-
   return (
     <>
       <div className="config-card__row">
@@ -129,76 +120,50 @@ export function ConfigRow({
         >
           {ROUTING_LABEL[routing]}
         </button>
-        <div className="popover-anchor" ref={startAnchor}>
+        <div className="frame-chip-group">
           <button
             type="button"
             className={`chip-btn${imageName ? " is-on" : ""}`}
             disabled={disabled}
-            title={imageName ?? "Start frame"}
-            onClick={() => setStartOpen((v) => !v)}
+            title={imageName ?? "Choose start frame from library or upload"}
+            onClick={() => setFramePicker("start_frame")}
           >
-            Start frame
+            {imageName ? `Start · ${imageName}` : "Start frame"}
           </button>
-          {startOpen && (
-            <div className="frame-popover">
-              <div className="frame-popover__actions">
-                <button type="button" className="chip-btn" onClick={() => startRef.current?.click()}>
-                  Upload
-                </button>
-                {imageName && (
-                  <button type="button" className="chip-btn" onClick={() => { onClearStart(); setStartOpen(false); }}>
-                    Clear
-                  </button>
-                )}
-              </div>
-              <MediaPickerGrid
-                items={frameItems}
-                emptyHint="Capture a frame from the player first."
-                onPick={(id) => {
-                  const frame = frames.find((f) => f.id === id);
-                  if (frame) {
-                    onPickStartFrame(frame);
-                    setStartOpen(false);
-                  }
-                }}
-              />
-            </div>
+          {imageName && (
+            <button
+              type="button"
+              className="chip-btn chip-btn--clear"
+              disabled={disabled}
+              title="Clear start frame"
+              aria-label="Clear start frame"
+              onClick={onClearStart}
+            >
+              ×
+            </button>
           )}
         </div>
-        <div className="popover-anchor" ref={endAnchor}>
+        <div className="frame-chip-group">
           <button
             type="button"
             className={`chip-btn${endImageName ? " is-on" : ""}`}
             disabled={disabled}
-            title={endImageName ?? "End frame"}
-            onClick={() => setEndOpen((v) => !v)}
+            title={endImageName ?? "Choose end frame from library or upload"}
+            onClick={() => setFramePicker("end_frame")}
           >
-            End frame
+            {endImageName ? `End · ${endImageName}` : "End frame"}
           </button>
-          {endOpen && (
-            <div className="frame-popover">
-              <div className="frame-popover__actions">
-                <button type="button" className="chip-btn" onClick={() => endRef.current?.click()}>
-                  Upload
-                </button>
-                {endImageName && (
-                  <button type="button" className="chip-btn" onClick={() => { onClearEnd(); setEndOpen(false); }}>
-                    Clear
-                  </button>
-                )}
-              </div>
-              <MediaPickerGrid
-                items={frameItems}
-                emptyHint="Capture a frame from the player first."
-                onPick={(id) => {
-                  const frame = frames.find((f) => f.id === id);
-                  if (frame) {
-                    onPickEndFrame(frame);
-                    setEndOpen(false);
-                  }
-                }}
-              />
-            </div>
+          {endImageName && (
+            <button
+              type="button"
+              className="chip-btn chip-btn--clear"
+              disabled={disabled}
+              title="Clear end frame"
+              aria-label="Clear end frame"
+              onClick={onClearEnd}
+            >
+              ×
+            </button>
           )}
         </div>
         <div className="popover-anchor" ref={durAnchor}>
@@ -322,22 +287,24 @@ export function ConfigRow({
         </div>
       </div>
       {engineNote && <p className="engine-note">{engineNote}</p>}
-      <input ref={startRef} type="file" accept="image/*" hidden onChange={(e) => {
-        const f = e.target.files?.[0];
-        e.target.value = "";
-        if (f) {
-          onPickStartFile(f);
-          setStartOpen(false);
-        }
-      }} />
-      <input ref={endRef} type="file" accept="image/*" hidden onChange={(e) => {
-        const f = e.target.files?.[0];
-        e.target.value = "";
-        if (f) {
-          onPickEndFile(f);
-          setEndOpen(false);
-        }
-      }} />
+
+      <MediaLibraryModal
+        open={framePicker != null}
+        purpose={framePicker ?? "start_frame"}
+        initialTab="image"
+        refs={refs}
+        disabled={disabled}
+        onClose={() => setFramePicker(null)}
+        onUpload={onUpload}
+        onAdd={() => {
+          /* frame pick uses onPickImage */
+        }}
+        onPickImage={(item) => {
+          if (framePicker === "end_frame") onPickEndImage(item);
+          else onPickStartImage(item);
+          setFramePicker(null);
+        }}
+      />
     </>
   );
 }

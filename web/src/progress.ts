@@ -30,11 +30,17 @@ export function formatProgressMessage(
   mp?: ModelProgress | null,
   _elapsed_s?: number,
 ): string {
-  if (!mp?.stage && mp?.step == null) {
+  if (!mp?.stage && mp?.step == null && !mp?.label) {
     return "Generating…";
   }
+  const stage = (mp?.stage || "generating").toLowerCase();
+  if (stage === "starting" || stage === "loading") {
+    const label = (mp?.label || "").trim();
+    if (label) return label;
+    return "Loading model weights…";
+  }
+
   const parts: string[] = [];
-  const stage = mp?.stage || "generating";
   parts.push(stage.charAt(0).toUpperCase() + stage.slice(1));
 
   if (mp?.step != null && mp?.total != null) {
@@ -65,7 +71,7 @@ export function applyProgressEvent(
     typeof msg.phase === "string"
       ? msg.phase
       : mp?.stage ?? prev?.phase ?? "generating";
-  const hasStepData = Boolean(mp?.stage || mp?.step != null);
+  const hasStepData = Boolean(mp?.stage || mp?.step != null || mp?.label);
   const message = hasStepData
     ? formatProgressMessage(mp, wall_elapsed)
     : prev?.message ?? formatProgressMessage(mp, wall_elapsed);

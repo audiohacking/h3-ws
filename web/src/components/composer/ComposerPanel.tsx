@@ -64,10 +64,8 @@ export type ComposerPanelProps = {
   config: Config;
   imageName: string | null;
   endImageName: string | null;
-  onPickStartFile: (file: File) => void;
-  onPickEndFile: (file: File) => void;
-  onPickStartFrame: (frame: LibraryFrame) => void;
-  onPickEndFrame: (frame: LibraryFrame) => void;
+  onPickStartImage: (item: { path: string; name: string }) => void;
+  onPickEndImage: (item: { path: string; name: string }) => void;
   onClearStart: () => void;
   onClearEnd: () => void;
   frames: LibraryFrame[];
@@ -336,13 +334,11 @@ export function ComposerPanel(props: ComposerPanelProps) {
           refs={refs}
           imageName={props.imageName}
           endImageName={props.endImageName}
-          onPickStartFile={props.onPickStartFile}
-          onPickEndFile={props.onPickEndFile}
-          onPickStartFrame={props.onPickStartFrame}
-          onPickEndFrame={props.onPickEndFrame}
+          onUpload={props.onUpload}
+          onPickStartImage={props.onPickStartImage}
+          onPickEndImage={props.onPickEndImage}
           onClearStart={props.onClearStart}
           onClearEnd={props.onClearEnd}
-          frames={props.frames}
           engineNote={props.config.engine_ok === false ? (props.config.engine_error ?? undefined) : undefined}
         />
         <SamplerRow

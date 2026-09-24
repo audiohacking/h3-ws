@@ -591,25 +591,44 @@ def build_h3_argv(
     if req.mode == "ref2va" and not req.refs:
         raise ValueError("ref2va requires at least one image, video, or audio reference")
 
+    from h3_session import MAX_PROMPT_CHARS, PROMPT_FILE_THRESHOLD, write_session_prompt_file
+
+    prompt_text = (req.prompt or "").strip()
+    if not prompt_text:
+        raise ValueError("prompt is required")
+    if len(prompt_text) > MAX_PROMPT_CHARS:
+        raise ValueError(
+            f"prompt is {len(prompt_text)} characters; max supported is {MAX_PROMPT_CHARS}"
+        )
+
     cmd: list[str] = [
         str(h3_bin),
         "-d",
         str(model_dir),
-        "-p",
-        req.prompt,
-        "--width",
-        str(width),
-        "--height",
-        str(height),
-        "--frames",
-        str(frames),
-        "--steps",
-        str(q["steps"]),
-        "--layers",
-        str(q["layers"]),
-        "-o",
-        str(req.output_path),
     ]
+    # Long Continuity prompts: avoid ARG_MAX / shell limits via --prompt-file.
+    if len(prompt_text) >= PROMPT_FILE_THRESHOLD or "\n" in (req.prompt or ""):
+        prompt_path = write_session_prompt_file(None, prompt_text)
+        cmd.extend(["--prompt-file", str(prompt_path)])
+        setattr(req, "_prompt_file", prompt_path)
+    else:
+        cmd.extend(["-p", prompt_text])
+    cmd.extend(
+        [
+            "--width",
+            str(width),
+            "--height",
+            str(height),
+            "--frames",
+            str(frames),
+            "--steps",
+            str(q["steps"]),
+            "--layers",
+            str(q["layers"]),
+            "-o",
+            str(req.output_path),
+        ]
+    )
     if q.get("core_reuse"):
         cmd.extend(["--core-reuse", str(q["core_reuse"])])
     elif q.get("reuse"):
@@ -921,7 +940,17 @@ class H3Engine:
         self._cancel.clear()
         self._t0 = time.time()
         self._eta.reset()
-        self._progress = {"stage": "starting", "elapsed_s": 0, "total": q["steps"]}
+        loading_msg = (
+            "Loading Ref2VA weights (first run can take several minutes)…"
+            if uses_ref2va(req)
+            else "Loading model weights…"
+        )
+        self._progress = {
+            "stage": "loading",
+            "label": loading_msg,
+            "elapsed_s": 0,
+            "total": q["steps"],
+        }
         if on_progress:
             on_progress(self._progress)
 
@@ -930,7 +959,7 @@ class H3Engine:
             mp["elapsed_s"] = round(time.time() - self._t0, 1)
             self._eta.enrich(mp)
             self._progress = mp
-            console_h3("%s", progress_console_line(mp))
+            console_h3("%s", progress_console_line(mp) if mp.get("step") is not None else mp.get("label") or mp.get("stage") or "")
             if on_progress:
                 on_progress(mp)
 
@@ -956,7 +985,12 @@ class H3Engine:
             if req.profile:
                 env["H3_PROFILE"] = "1"
             session = H3InteractiveSession(cancel=self._cancel)
-            session.start(argv, env=env, cwd=h3_process_cwd(self.h3_bin))
+            session.start(
+                argv,
+                env=env,
+                cwd=h3_process_cwd(self.h3_bin),
+                on_progress=_on_progress,
+            )
             self._session = session
             self._session_boot_key = boot_key
         try:
@@ -995,58 +1029,90 @@ class H3Engine:
         self._cancel.clear()
         self._t0 = time.time()
         self._eta.reset()
-        self._progress = {"stage": "starting", "elapsed_s": 0, "total": q["steps"]}
+        loading_msg = (
+            "Loading Ref2VA weights (first run can take several minutes)…"
+            if uses_ref2va(req)
+            else "Loading model weights…"
+        )
+        self._progress = {
+            "stage": "loading",
+            "label": loading_msg,
+            "elapsed_s": 0,
+            "total": q["steps"],
+        }
         if on_progress:
             on_progress(self._progress)
 
         env = h3_media_env()
         log.info("h3 muxer: %s", env.get("H3_FFMPEG") or env.get("H3_AV"))
         try:
-            with self._lock:
-                proc = subprocess.Popen(
-                    argv,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    env=env,
-                    cwd=str(h3_process_cwd(self.h3_bin)),
-                )
-                self._proc = proc
-        except OSError as exc:
-            raise RuntimeError(f"failed to spawn h3: {exc}") from exc
+            try:
+                with self._lock:
+                    proc = subprocess.Popen(
+                        argv,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        env=env,
+                        cwd=str(h3_process_cwd(self.h3_bin)),
+                    )
+                    self._proc = proc
+            except OSError as exc:
+                raise RuntimeError(f"failed to spawn h3: {exc}") from exc
 
-        assert proc.stdout is not None
-        tail: list[str] = []
-        try:
-            for line in proc.stdout:
-                if self._cancel.is_set():
-                    proc.terminate()
-                    raise GenerationCancelledError("cancelled")
-                self._parse_line(line, int(q["steps"]))
-                if on_progress:
-                    on_progress(self._progress)
-                stripped = line.rstrip()
-                if stripped:
-                    tail.append(stripped)
-                    if len(tail) > 80:
-                        del tail[:-80]
-                    if self._progress.get("step") is not None:
-                        console_h3("%s", progress_console_line(self._progress))
-                    else:
-                        console_h3("%s", stripped)
-            rc = proc.wait()
+            assert proc.stdout is not None
+            tail: list[str] = []
+            try:
+                for line in proc.stdout:
+                    if self._cancel.is_set():
+                        proc.terminate()
+                        raise GenerationCancelledError("cancelled")
+                    self._parse_line(line, int(q["steps"]))
+                    # Before the first N/M progress line, surface raw load status.
+                    if self._progress.get("step") is None:
+                        stripped_pre = line.strip()
+                        if stripped_pre and len(stripped_pre) >= 6:
+                            self._progress = {
+                                **self._progress,
+                                "stage": "loading",
+                                "label": stripped_pre[:160],
+                                "elapsed_s": round(time.time() - self._t0, 1),
+                            }
+                    if on_progress:
+                        on_progress(self._progress)
+                    stripped = line.rstrip()
+                    if stripped:
+                        tail.append(stripped)
+                        if len(tail) > 80:
+                            del tail[:-80]
+                        if self._progress.get("step") is not None:
+                            console_h3("%s", progress_console_line(self._progress))
+                        else:
+                            console_h3("%s", stripped)
+                rc = proc.wait()
+            finally:
+                self._proc = None
+
+            if self._cancel.is_set():
+                raise GenerationCancelledError("cancelled")
+            if rc != 0:
+                detail = "\n".join(tail[-40:]) if tail else "(h3 printed nothing)"
+                raise RuntimeError(f"h3 exited {rc}\n{detail}")
+            if not req.output_path.is_file() or req.output_path.stat().st_size < 32:
+                raise RuntimeError(f"h3 did not write an MP4 at {req.output_path}")
+            return str(req.output_path)
         finally:
-            self._proc = None
-
-        if self._cancel.is_set():
-            raise GenerationCancelledError("cancelled")
-        if rc != 0:
-            detail = "\n".join(tail[-40:]) if tail else "(h3 printed nothing)"
-            raise RuntimeError(f"h3 exited {rc}\n{detail}")
-        if not req.output_path.is_file() or req.output_path.stat().st_size < 32:
-            raise RuntimeError(f"h3 did not write an MP4 at {req.output_path}")
-        return str(req.output_path)
+            prompt_file = getattr(req, "_prompt_file", None)
+            if prompt_file is not None:
+                try:
+                    Path(prompt_file).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                try:
+                    delattr(req, "_prompt_file")
+                except AttributeError:
+                    pass
 
 
 def scratch_output(prefix: str = "h3_") -> Path:

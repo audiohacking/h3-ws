@@ -174,6 +174,7 @@ static void print_help(void) {
     puts("  !output [DIR]            Set or show the output directory");
     puts("  !save [PATH]             Copy the last generated video");
     puts("  !again                   Repeat the last prompt");
+    puts("  !prompt-file PATH        Generate from a UTF-8 prompt file");
     puts("  !cache                   Show reusable-session cache state");
     puts("  !cache clear             Clear reusable-session caches");
     puts("  !quit                    Exit");
@@ -422,6 +423,49 @@ static void open_video(const char *path) {
         fprintf(stderr, "h3: cannot open %s: %s\n", path, strerror(status));
 }
 
+static int generate(h3_cli_state *state, const char *prompt); /* forward */
+
+static char *load_prompt_file(const char *path) {
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        fprintf(stderr, "h3: cannot open prompt file %s: %s\n", path,
+                strerror(errno));
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fprintf(stderr, "h3: cannot seek prompt file %s\n", path);
+        fclose(file);
+        return NULL;
+    }
+    long size = ftell(file);
+    if (size < 0 || size > 1024L * 1024L) {
+        fprintf(stderr, "h3: prompt file is empty or larger than 1 MiB\n");
+        fclose(file);
+        return NULL;
+    }
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
+        return NULL;
+    }
+    char *text = malloc((size_t)size + 1);
+    if (!text) {
+        fclose(file);
+        fprintf(stderr, "h3: out of memory reading prompt file\n");
+        return NULL;
+    }
+    size_t n = fread(text, 1, (size_t)size, file);
+    fclose(file);
+    text[n] = '\0';
+    while (n > 0 && (text[n - 1] == '\n' || text[n - 1] == '\r'))
+        text[--n] = '\0';
+    if (!n) {
+        free(text);
+        fprintf(stderr, "h3: prompt file is empty\n");
+        return NULL;
+    }
+    return text;
+}
+
 static int generate(h3_cli_state *state, const char *prompt) {
     char output[H3_CLI_PATH];
     unsigned number = ++state->output_count;
@@ -496,6 +540,16 @@ static int process_command(h3_cli_state *state, char *line, int *repeat) {
     else if (!strcasecmp(command, "again")) {
         if (!state->last_prompt) fprintf(stderr, "h3: no previous prompt\n");
         else *repeat = 1;
+    } else if (!strcasecmp(command, "prompt-file")) {
+        if (!*argument) {
+            fprintf(stderr, "h3: usage: !prompt-file PATH\n");
+        } else {
+            char *prompt = load_prompt_file(argument);
+            if (prompt) {
+                generate(state, prompt);
+                free(prompt);
+            }
+        }
     } else if (!strcasecmp(command, "seed")) {
         if (!*argument) {
             if (state->random_seed) puts("Seed: random");

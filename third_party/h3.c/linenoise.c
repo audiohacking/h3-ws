@@ -119,7 +119,9 @@
 #include "linenoise.h"
 
 #define LINENOISE_DEFAULT_HISTORY_MAX_LEN 100
-#define LINENOISE_MAX_LINE 4096
+/* Continuity / Context-IR prompts are often multi-KB; 4K was truncating and
+ * (with multiline refresh) deadlocking the session PTY on long pastes. */
+#define LINENOISE_MAX_LINE 65536
 static char *unsupported_term[] = {"dumb","cons25","emacs",NULL};
 static linenoiseCompletionCallback *completionCallback = NULL;
 static linenoiseHintsCallback *hintsCallback = NULL;
