@@ -599,6 +599,43 @@
   width: 40px;
 }
 
+.stepper-pill__value--btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  margin: 0;
+  width: 40px;
+  height: 100%;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.stepper-pill__value--btn:hover:not(:disabled) {
+  background: var(--color-accent-soft);
+}
+
+.stepper-pill__value--btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.aspect-menu--duration {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 2px;
+  min-width: 220px;
+  max-height: none;
+  padding: 8px;
+}
+
+.aspect-menu--duration button {
+  text-align: center;
+  padding: 8px 4px;
+  font-variant-numeric: tabular-nums;
+}
+
 .seed-pill {
   display: inline-flex;
   align-items: center;

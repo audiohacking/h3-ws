@@ -36,9 +36,10 @@ const BLOB_VIDEO_PREFIX = "blob:";
 const NOTIFY_READY_KEY = "h3-ws-notify-on-ready";
 const NOTIFY_ASKED_KEY = "h3-ws-notify-permission-asked";
 
-function isHttpsContext(): boolean {
+/** localhost / 127.0.0.1 count as secure; https-only checks broke desktop notifications. */
+function isNotifyCapableContext(): boolean {
   try {
-    return typeof location !== "undefined" && location.protocol === "https:";
+    return typeof window !== "undefined" && Boolean(window.isSecureContext);
   } catch {
     return false;
   }
@@ -53,8 +54,17 @@ function persistNotifyDecision(enabled: boolean) {
   }
 }
 
-async function maybeRequestNotifyPermissionOnHttps(): Promise<void> {
-  if (!isHttpsContext()) return;
+function notificationsWanted(): boolean {
+  try {
+    return localStorage.getItem(NOTIFY_READY_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Ask once, preferably from a click (Generate). Safe no-op if unsupported. */
+async function ensureNotifyPermission(): Promise<void> {
+  if (!isNotifyCapableContext()) return;
   if (typeof Notification === "undefined") return;
   try {
     if (localStorage.getItem(NOTIFY_ASKED_KEY) === "1") return;
@@ -77,19 +87,23 @@ async function maybeRequestNotifyPermissionOnHttps(): Promise<void> {
   }
 }
 
-function notifyGenerationReady(body = "Your video is ready to play.") {
-  if (!isHttpsContext()) return;
-  try {
-    if (localStorage.getItem(NOTIFY_READY_KEY) !== "1") return;
-  } catch {
-    return;
-  }
+function notifyApp(body: string, tag: string) {
+  if (!isNotifyCapableContext()) return;
+  if (!notificationsWanted()) return;
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   try {
-    new Notification("H3-WS", { body, tag: "h3-ws-generation-ready" });
+    new Notification("H3-WS", { body, tag });
   } catch {
-    /* ignore */
+    /* pywebview / older WebKit may lack Notification */
   }
+}
+
+function notifyGenerationReady(body = "Your video is ready to play.") {
+  notifyApp(body, "h3-ws-generation-ready");
+}
+
+function notifyGenerationError(body: string) {
+  notifyApp(body || "Generation failed", "h3-ws-generation-error");
 }
 
 function revokeClipBlob(clip: Clip) {
@@ -378,7 +392,8 @@ export default function App() {
   );
 
   useEffect(() => {
-    void maybeRequestNotifyPermissionOnHttps();
+    // Best-effort warm ask; Generate also requests (needs a user gesture in some WebKits).
+    void ensureNotifyPermission();
     fetchConfig()
       .then((cfg) => {
         setConfig(cfg);
@@ -1323,12 +1338,14 @@ export default function App() {
         } else if (msg.type === "error" || msg.type === "clip_failed") {
           const message = String(msg.error || msg.message || "Failed");
           setError(message);
+          notifyGenerationError(message);
           finishRun(message);
         }
       };
       es.onerror = () => {
         const message = "Lost connection to server while waiting for progress.";
         setError((prev) => prev ?? message);
+        notifyGenerationError(message);
         finishRun(message);
       };
     });
@@ -1484,6 +1501,7 @@ export default function App() {
 
   async function handleGenerate() {
     if (!canSubmit || !prompt.trim() || busy) return;
+    await ensureNotifyPermission();
     try {
       await postGenerate(
         generateBody({
@@ -1642,13 +1660,15 @@ export default function App() {
                 )
               ) : activeClip?.video_url ? (
                 <video
+                  key={activeClip.id}
                   ref={playerVideoRef}
                   className="player"
                   src={activeClip.video_url}
+                  poster={activeClip.thumb_url || undefined}
                   controls
                   loop
                   playsInline
-                  preload="metadata"
+                  preload="auto"
                 />
               ) : (
                 <div className="player placeholder">

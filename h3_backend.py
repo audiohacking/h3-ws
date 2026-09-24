@@ -1,4 +1,4 @@
-"""One-shot h3.c process manager plus a warm FL2VA interactive session."""
+"""One-shot h3.c process manager plus a warm interactive session (FL2VA + Ref2VA)."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from h3_paths import (
     default_model_dir,
     h3_media_env,
     h3_process_cwd,
+    mk_scratch_dir,
     mk_scratch_file,
 )
 
@@ -660,7 +661,8 @@ class H3Engine:
         self._progress: dict[str, Any] = {}
         self._t0 = 0.0
         self._session: Any | None = None
-        self._session_lora_key: tuple[tuple[str, float], ...] = ()
+        self._session_boot_key: tuple[Any, ...] | None = None
+        self._preview_latent_dir: Path | None = None
         self._eta = ProgressEta()
 
     def model_progress_for_ws(self) -> dict[str, Any] | None:
@@ -679,16 +681,19 @@ class H3Engine:
             except Exception:
                 pass
             self._session = None
+            self._session_boot_key = None
 
     def shutdown(self, wait: bool = True) -> None:
         self.request_cancel()
         session = self._session
         self._session = None
+        self._session_boot_key = None
         if session is not None:
             try:
                 session.stop()
             except Exception:
                 pass
+        self._destroy_preview_latent_dir()
         proc = self._proc
         if proc is None:
             return
@@ -794,28 +799,93 @@ class H3Engine:
         req.output_path.parent.mkdir(parents=True, exist_ok=True)
         req.int8_row_fc2 = resolve_int8_row_fc2(req, metal4=self.metal4)
 
-        # Latent preview dumps need a fresh one-shot argv (--preview-latent);
-        # the warm interactive session does not re-bind that flag per prompt.
-        if need_ref or req.preview_latent_dir:
-            self._stop_session()
-            return self._generate_oneshot(req, on_progress=on_progress)
+        # Normalize preview dumps onto the engine-owned warm dir so interactive
+        # argv stays stable across jobs (web_ui must watch this same path).
+        if req.preview_latent_dir is not None:
+            req.preview_latent_dir = self.ensure_preview_latent_dir()
 
         from h3_session import SessionError
 
         try:
             return self._generate_session(req, on_progress=on_progress)
         except GenerationCancelledError:
+            self._cleanup_job_temps(req)
             self._stop_session()
             raise
         except SessionError as exc:
             log.warning("warm session unavailable (%s) — one-shot fallback", exc)
+            self._cleanup_job_temps(req)
             self._stop_session()
-            return self._generate_oneshot(req, on_progress=on_progress)
+            try:
+                return self._generate_oneshot(req, on_progress=on_progress)
+            finally:
+                self._cleanup_job_temps(req)
+        except Exception:
+            self._cleanup_job_temps(req)
+            raise
+
+    def ensure_preview_latent_dir(self) -> Path:
+        """Stable ``--preview-latent`` directory for the life of this engine."""
+        path = self._preview_latent_dir
+        if path is None or not path.is_dir():
+            path = Path(mk_scratch_dir("h3_prev_warm_"))
+            self._preview_latent_dir = path
+        return path
+
+    def clear_preview_latent_dumps(self) -> None:
+        """Wipe latent dump *files* but keep the warm preview directory.
+
+        Call only after generation has fully finished or failed, and after any
+        LatentPreviewWatcher has been stopped — never mid-run.
+        """
+        from h3_session import clear_directory_contents
+
+        clear_directory_contents(self._preview_latent_dir)
+
+    def _destroy_preview_latent_dir(self) -> None:
+        path = self._preview_latent_dir
+        self._preview_latent_dir = None
+        if path is None:
+            return
+        try:
+            import shutil
+
+            shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+
+    def _cleanup_job_temps(self, req: GenerateRequest | None = None) -> None:
+        """Wipe session MP4 scratch only — never touch preview latents here.
+
+        Preview dumps are owned by web_ui and cleared only after the run is
+        complete or fully failed (watcher stopped first).
+        """
+        session = self._session
+        if session is not None:
+            try:
+                session.cleanup_job_temps()
+            except Exception as exc:
+                log.debug("session job cleanup: %s", exc)
+        # Legacy per-job scratch preview dirs (not the warm engine dir).
+        if req is not None and req.preview_latent_dir is not None:
+            warm = self._preview_latent_dir
+            try:
+                preview = Path(req.preview_latent_dir).resolve()
+            except OSError:
+                return
+            if warm is not None and preview == warm.resolve():
+                return
+            try:
+                import shutil
+
+                shutil.rmtree(preview, ignore_errors=True)
+            except OSError:
+                pass
 
     def _stop_session(self) -> None:
         session = self._session
         self._session = None
-        self._session_lora_key = ()
+        self._session_boot_key = None
         if session is None:
             return
         try:
@@ -833,6 +903,7 @@ class H3Engine:
             H3InteractiveSession,
             build_session_argv,
             copy_session_output,
+            session_boot_key,
         )
 
         q = expand_quality(
@@ -863,12 +934,12 @@ class H3Engine:
             if on_progress:
                 on_progress(mp)
 
-        lora_key = tuple((str(item.path), float(item.scale)) for item in req.loras)
+        boot_key = session_boot_key(req)
         session = self._session
         if (
             session is None
             or not getattr(session, "alive", False)
-            or self._session_lora_key != lora_key
+            or self._session_boot_key != boot_key
         ):
             self._stop_session()
             argv = build_session_argv(
@@ -887,13 +958,18 @@ class H3Engine:
             session = H3InteractiveSession(cancel=self._cancel)
             session.start(argv, env=env, cwd=h3_process_cwd(self.h3_bin))
             self._session = session
-            self._session_lora_key = lora_key
-        session.apply_request(req)
-        produced = session.generate(req.prompt, on_progress=_on_progress)
-        copy_session_output(produced, req.output_path)
-        if not req.output_path.is_file() or req.output_path.stat().st_size < 32:
-            raise RuntimeError(f"h3 did not write an MP4 at {req.output_path}")
-        return str(req.output_path)
+            self._session_boot_key = boot_key
+        try:
+            session.apply_request(req)
+            produced = session.generate(req.prompt, on_progress=_on_progress)
+            copy_session_output(produced, req.output_path)
+            if not req.output_path.is_file() or req.output_path.stat().st_size < 32:
+                raise RuntimeError(f"h3 did not write an MP4 at {req.output_path}")
+            return str(req.output_path)
+        finally:
+            # Session MP4 scratch only — preview latents stay until web_ui
+            # stops the watcher after the job fully completes or fails.
+            self._cleanup_job_temps(req)
 
     def _generate_oneshot(
         self,

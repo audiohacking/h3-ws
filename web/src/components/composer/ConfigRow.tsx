@@ -66,10 +66,12 @@ export function ConfigRow({
   const endAnchor = useRef<HTMLDivElement>(null);
   const aspectAnchor = useRef<HTMLDivElement>(null);
   const resAnchor = useRef<HTMLDivElement>(null);
+  const durAnchor = useRef<HTMLDivElement>(null);
   const [startOpen, setStartOpen] = useState(false);
   const [endOpen, setEndOpen] = useState(false);
   const [aspectOpen, setAspectOpen] = useState(false);
   const [resOpen, setResOpen] = useState(false);
+  const [durOpen, setDurOpen] = useState(false);
 
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
@@ -78,6 +80,7 @@ export function ConfigRow({
       if (endAnchor.current && !endAnchor.current.contains(t)) setEndOpen(false);
       if (aspectAnchor.current && !aspectAnchor.current.contains(t)) setAspectOpen(false);
       if (resAnchor.current && !resAnchor.current.contains(t)) setResOpen(false);
+      if (durAnchor.current && !durAnchor.current.contains(t)) setDurOpen(false);
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
@@ -198,22 +201,52 @@ export function ConfigRow({
             </div>
           )}
         </div>
-        <div className="stepper-pill" title="Duration (snapped to H3 5+17n @ 24fps)">
-          <button
-            type="button"
-            disabled={disabled || durIndex <= 0}
-            onClick={() => onDurationId(durationPresets[durIndex - 1].id)}
-          >
-            −
-          </button>
-          <span className="stepper-pill__value stepper-pill__value--dur">{durLabel}</span>
-          <button
-            type="button"
-            disabled={disabled || durIndex >= durationPresets.length - 1}
-            onClick={() => onDurationId(durationPresets[durIndex + 1].id)}
-          >
-            +
-          </button>
+        <div className="popover-anchor" ref={durAnchor}>
+          <div className="stepper-pill" title="Duration 1–15s (H3 snaps to 5+17n @ 24fps)">
+            <button
+              type="button"
+              disabled={disabled || durIndex <= 0}
+              onClick={() => onDurationId(durationPresets[durIndex - 1].id)}
+            >
+              −
+            </button>
+            <button
+              type="button"
+              className="stepper-pill__value stepper-pill__value--dur stepper-pill__value--btn"
+              disabled={disabled}
+              aria-expanded={durOpen}
+              title="Pick any length 1–15s"
+              onClick={() => setDurOpen((v) => !v)}
+            >
+              {durLabel}
+            </button>
+            <button
+              type="button"
+              disabled={disabled || durIndex >= durationPresets.length - 1}
+              onClick={() => onDurationId(durationPresets[durIndex + 1].id)}
+            >
+              +
+            </button>
+          </div>
+          {durOpen && (
+            <div className="aspect-menu aspect-menu--duration" role="listbox">
+              {durationPresets.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  role="option"
+                  aria-selected={p.id === durationId}
+                  className={p.id === durationId ? "is-active" : ""}
+                  onClick={() => {
+                    onDurationId(p.id);
+                    setDurOpen(false);
+                  }}
+                >
+                  {p.id}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         {matchRef && matchHandle && matchRef.durationS != null && (
           <button

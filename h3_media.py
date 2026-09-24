@@ -36,14 +36,26 @@ def frames_to_seconds(num_frames: int, fps: int = FPS) -> float:
     return float(num_frames) / float(fps)
 
 
-# Rounded UI lengths → legal ``5+17n`` frame counts (not the exact 24 fps math).
-UI_DURATION_FRAMES: dict[int, int] = {
+# Canonical rounded lengths keep the historical H3-friendly frame counts;
+# every other integer second (1–15) snaps up via ``5+17n``.
+_UI_DURATION_CANONICAL: dict[int, int] = {
     1: 22,
     2: 56,
     5: 107,
     10: 243,
     15: 362,
 }
+
+
+def _frames_for_ui_seconds(rounded_s: int, fps: int = FPS) -> int:
+    s = max(1, min(15, int(rounded_s)))
+    if s in _UI_DURATION_CANONICAL:
+        return _UI_DURATION_CANONICAL[s]
+    return snap_frames(int(math.ceil(s * fps)))
+
+
+# Full clip-length ladder shown in the Web UI stepper / picker.
+UI_DURATION_FRAMES: dict[int, int] = {s: _frames_for_ui_seconds(s) for s in range(1, 16)}
 
 
 def seconds_to_frames(seconds: float, fps: int = FPS) -> int:
@@ -90,11 +102,12 @@ def duration_preset(
 
 
 DURATION_PRESETS = [
-    duration_preset(1, num_frames=UI_DURATION_FRAMES[1], note="dev"),
-    duration_preset(2, num_frames=UI_DURATION_FRAMES[2]),
-    duration_preset(5, num_frames=UI_DURATION_FRAMES[5]),
-    duration_preset(10, num_frames=UI_DURATION_FRAMES[10]),
-    duration_preset(15, num_frames=UI_DURATION_FRAMES[15]),
+    duration_preset(
+        s,
+        num_frames=UI_DURATION_FRAMES[s],
+        note="dev" if s == 1 else "",
+    )
+    for s in range(1, 16)
 ]
 
 

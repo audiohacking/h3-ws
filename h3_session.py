@@ -1,8 +1,21 @@
 """Resident interactive ``./h3`` session (PTY). One-shot spawn remains the fallback.
 
 h3.c's REPL uses linenoise, which needs a TTY. We drive it over a PTY, apply
-``!`` commands, then send the prompt. Ref2VA video/audio refs are not exposed as
-interactive commands (only ``!ref-image``), so those jobs stay one-shot.
+``!`` commands, then send the prompt.
+
+Warm-session rules (must not regress oneshot behavior):
+
+* FL2VA (no refs): reuse process; ``!first`` / ``!last`` / sampler ``!`` cmds each job.
+* Ref2VA **image-only**: reuse process; ``!refs clear`` + ``!ref-image`` each job.
+* Ref2VA with video/audio: reuse only while the ref fingerprint matches; refs are
+  passed on argv at session start (REPL has no ``!ref-video``). Never ``!refs clear``
+  on a sticky session — changing refs restarts the process.
+* ``--preview-latent`` is argv-only → part of the boot key; use the engine's stable
+  preview dir so the watcher and h3 dump to the same path.
+* LoRA fuse is load-time → LoRA set is part of the boot key.
+* SessionError → caller falls back to full one-shot.
+* After every job: wipe latent dumps + session MP4 temps; keep the warm preview
+  *directory* and interactive process for the next resident run.
 """
 
 from __future__ import annotations
@@ -22,7 +35,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from h3_backend import GenerateRequest, GenerationCancelledError, expand_quality
+from h3_backend import (
+    GenerateRequest,
+    GenerationCancelledError,
+    RefItem,
+    append_ref_flags,
+    expand_quality,
+    uses_fl2va_anchors,
+    uses_ref2va,
+)
 from h3_media import require_ui_canvas, snap_frames
 from h3_paths import console_h3
 
@@ -102,8 +123,66 @@ def parse_cli_progress(chunk: str) -> dict[str, Any] | None:
     return last
 
 
+def refs_are_image_only(refs: list[RefItem]) -> bool:
+    """True when every ref can be (re)applied via ``!ref-image``."""
+    return bool(refs) and all(item.kind == "image" for item in refs)
+
+
+def refs_need_sticky_argv(refs: list[RefItem]) -> bool:
+    """Video/audio refs have no REPL setters — pin them on session argv."""
+    return bool(refs) and not refs_are_image_only(refs)
+
+
+def refs_fingerprint(refs: list[RefItem]) -> tuple[tuple[str, str, str], ...]:
+    """Stable identity for sticky Ref2VA argv refs (order matters)."""
+    out: list[tuple[str, str, str]] = []
+    for item in refs:
+        audio = str(item.audio_path.resolve()) if item.audio_path else ""
+        out.append((item.kind, str(item.path.resolve()), audio))
+    return tuple(out)
+
+
+def lora_fingerprint(req: GenerateRequest) -> tuple[tuple[str, float], ...]:
+    return tuple((str(item.path.resolve()), float(item.scale)) for item in req.loras)
+
+
+def session_boot_key(req: GenerateRequest) -> tuple[Any, ...]:
+    """Process identity — mismatch means stop and respawn interactive h3.
+
+    Excludes prompt/seed/steps/size/image-only refs (``!`` commands). Includes
+    argv-only state: family, LoRAs, preview flag+path, sticky video/audio refs.
+    """
+    family = "ref2va" if uses_ref2va(req) else "fl2va"
+    sticky = refs_fingerprint(req.refs) if refs_need_sticky_argv(req.refs) else ()
+    preview = bool(req.preview_latent_dir)
+    preview_path = (
+        str(Path(req.preview_latent_dir).resolve()) if req.preview_latent_dir else ""
+    )
+    return (family, lora_fingerprint(req), preview, preview_path, sticky)
+
+
+def clear_directory_contents(path: Path | None) -> None:
+    """Delete files/subdirs inside ``path`` but keep the directory itself."""
+    if path is None:
+        return
+    root = Path(path)
+    if not root.is_dir():
+        return
+    for child in root.iterdir():
+        try:
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                child.unlink(missing_ok=True)
+        except OSError as exc:
+            log.debug("cleanup %s: %s", child, exc)
+
+
 def session_commands_for_request(req: GenerateRequest) -> list[str]:
-    """``!`` commands that align a warm session with this job (FL2VA only)."""
+    """``!`` commands that align a warm session with this job."""
+    if uses_ref2va(req) and uses_fl2va_anchors(req):
+        raise ValueError("Ref2VA references cannot be mixed with first/last-frame anchors")
+
     width, height = require_ui_canvas(req.width, req.height)
     frames = snap_frames(req.num_frames)
     q = expand_quality(
@@ -118,6 +197,9 @@ def session_commands_for_request(req: GenerateRequest) -> list[str]:
         render_width=req.render_width,
         render_height=req.render_height,
     )
+    sticky = refs_need_sticky_argv(req.refs)
+    image_refs = refs_are_image_only(req.refs)
+
     cmds = [
         f"!size {width}x{height}",
         f"!frames {frames}",
@@ -125,7 +207,6 @@ def session_commands_for_request(req: GenerateRequest) -> list[str]:
         f"!layers {q['layers']}",
         "!show off",
         "!open off",
-        "!refs clear",
     ]
     if q.get("core_reuse"):
         cmds.append("!reuse 1")
@@ -149,14 +230,28 @@ def session_commands_for_request(req: GenerateRequest) -> list[str]:
         cmds.append(f"!seed {int(req.seed)}")
     else:
         cmds.append("!seed random")
-    if req.first_frame:
-        cmds.append(f"!first {req.first_frame}")
-    else:
+
+    if sticky:
+        # Argv-owned video/audio refs — clearing would strand the session.
         cmds.append("!first clear")
-    if req.last_frame:
-        cmds.append(f"!last {req.last_frame}")
-    else:
         cmds.append("!last clear")
+    elif image_refs:
+        # Anchors block !ref-image; clear them before rewriting the ref list.
+        cmds.append("!first clear")
+        cmds.append("!last clear")
+        cmds.append("!refs clear")
+        for item in req.refs:
+            cmds.append(f"!ref-image {item.path}")
+    else:
+        cmds.append("!refs clear")
+        if req.first_frame:
+            cmds.append(f"!first {req.first_frame}")
+        else:
+            cmds.append("!first clear")
+        if req.last_frame:
+            cmds.append(f"!last {req.last_frame}")
+        else:
+            cmds.append("!last clear")
     return cmds
 
 
@@ -214,6 +309,10 @@ def build_session_argv(
         cmd.extend(["--lora", f"{lora.path}:{lora.scale:.4g}"])
     if req.profile:
         cmd.append("--profile")
+    if req.preview_latent_dir:
+        cmd.extend(["--preview-latent", str(req.preview_latent_dir)])
+    if refs_need_sticky_argv(req.refs):
+        append_ref_flags(cmd, req.refs)
     return cmd
 
 
@@ -332,8 +431,10 @@ class H3InteractiveSession:
         self.alive = False
         proc = self._proc
         master = self._master
+        out_dir = self.output_dir
         self._proc = None
         self._master = None
+        self.output_dir = None
         if proc is not None and proc.poll() is None:
             try:
                 if master is not None:
@@ -353,6 +454,16 @@ class H3InteractiveSession:
                 os.close(master)
             except OSError:
                 pass
+        # Drop the interactive outputs scratch tree when the process dies.
+        if out_dir is not None:
+            try:
+                shutil.rmtree(out_dir, ignore_errors=True)
+            except OSError:
+                pass
+
+    def cleanup_job_temps(self) -> None:
+        """Remove MP4s left in the session outputs dir after a copied job."""
+        clear_directory_contents(self.output_dir)
 
     def _send_line(self, line: str) -> None:
         if self._master is None or self._proc is None or self._proc.poll() is not None:
@@ -411,4 +522,9 @@ def copy_session_output(src: Path, dest: Path) -> Path:
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
+    # Prefer deleting the session copy so /tmp/h3-* does not accumulate MP4s.
+    try:
+        Path(src).unlink(missing_ok=True)
+    except OSError:
+        pass
     return dest

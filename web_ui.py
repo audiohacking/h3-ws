@@ -1320,7 +1320,9 @@ async def _execute_run(state: AppState, run_id: str) -> None:
             preview_stem = state.output_dir / ".preview" / f"{run_id}_{clip_id}"
             watcher: LatentPreviewWatcher | None = None
             if taeh3_decode_ready():
-                preview_dir = Path(mk_scratch_dir("h3_prev_"))
+                # Engine-owned warm dir — same path every job so interactive
+                # ``--preview-latent`` stays valid without respawning h3.
+                preview_dir = state.engine.ensure_preview_latent_dir()
                 req.preview_latent_dir = preview_dir
 
                 def _on_preview(
@@ -1356,20 +1358,24 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                 await asyncio.to_thread(state.engine.generate, req, on_progress=_progress)
             except GenerationCancelledError:
                 if watcher is not None:
-                    watcher.stop(cleanup=True)
-                else:
-                    cleanup_preview_artifacts(preview_dir)
+                    watcher.stop(cleanup=False)
+                state.engine.clear_preview_latent_dumps()
                 _purge_preview_stem(preview_stem)
                 await _abort_run_cancelled(state, run_id)
                 return
-            finally:
-                # Drop latent dumps immediately; keep the looping clip until
-                # clip_done so the stage can hand off to the real video.
+            except Exception:
+                # Full failure — stop watcher, then drop all preview scratch.
                 if watcher is not None:
                     watcher.stop(cleanup=False)
-                    cleanup_preview_artifacts(preview_dir)
-                else:
-                    cleanup_preview_artifacts(preview_dir)
+                state.engine.clear_preview_latent_dumps()
+                _purge_preview_stem(preview_stem)
+                raise
+            else:
+                # Success — stop watcher and clear latent dumps only; keep the
+                # looping served preview until clip_done hands off to the MP4.
+                if watcher is not None:
+                    watcher.stop(cleanup=False)
+                state.engine.clear_preview_latent_dumps()
             elapsed = round(time.time() - t0, 2)
             size = dest.stat().st_size if dest.is_file() else 0
             clip.status = RunStatus.DONE.value

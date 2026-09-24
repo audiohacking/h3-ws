@@ -31,14 +31,25 @@ class SnapTests(unittest.TestCase):
         self.assertEqual(seconds_to_frames(10), 243)
         self.assertEqual(seconds_to_frames(15), 362)
 
-    def test_ui_duration_presets_are_rounded(self) -> None:
+    def test_ui_duration_presets_cover_1_to_15s(self) -> None:
         from h3_media import DURATION_PRESETS, UI_DURATION_FRAMES
 
-        self.assertEqual([p["id"] for p in DURATION_PRESETS], ["1s", "2s", "5s", "10s", "15s"])
+        self.assertEqual(
+            [p["id"] for p in DURATION_PRESETS],
+            [f"{s}s" for s in range(1, 16)],
+        )
+        self.assertEqual(set(UI_DURATION_FRAMES), set(range(1, 16)))
         for preset in DURATION_PRESETS:
             rounded = int(preset["seconds"])
             self.assertEqual(preset["seconds"], float(rounded))
             self.assertEqual(preset["num_frames"], UI_DURATION_FRAMES[rounded])
+            self.assertEqual(preset["num_frames"], snap_frames(preset["num_frames"]))
+        # Canonical rounded lengths keep their historical frame counts.
+        self.assertEqual(UI_DURATION_FRAMES[1], 22)
+        self.assertEqual(UI_DURATION_FRAMES[2], 56)
+        self.assertEqual(UI_DURATION_FRAMES[5], 107)
+        self.assertEqual(UI_DURATION_FRAMES[10], 243)
+        self.assertEqual(UI_DURATION_FRAMES[15], 362)
 
     def test_snap_spatial(self) -> None:
         self.assertEqual(snap_spatial(16), 32)
@@ -308,6 +319,78 @@ class SessionCommandTests(unittest.TestCase):
         self.assertIn("!seed 7", cmds)
         self.assertIn("!reuse 1", cmds)
         self.assertIn("!core-reuse 1", cmds)
+
+    def test_image_only_ref2va_uses_ref_image_commands(self) -> None:
+        from h3_session import (
+            build_session_argv,
+            session_boot_key,
+            session_commands_for_request,
+        )
+
+        img = Path("/tmp/person.png")
+        req = GenerateRequest(
+            prompt="wave",
+            output_path=Path("/tmp/out.mp4"),
+            mode="ref2va",
+            refs=[RefItem(kind="image", path=img)],
+        )
+        cmds = session_commands_for_request(req)
+        self.assertIn("!refs clear", cmds)
+        self.assertIn(f"!ref-image {img}", cmds)
+        self.assertLess(cmds.index("!first clear"), cmds.index("!refs clear"))
+        argv = build_session_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
+        self.assertNotIn("--ref-image", argv)
+        # Same boot key when only the prompt changes.
+        req2 = GenerateRequest(
+            prompt="other",
+            output_path=Path("/tmp/out2.mp4"),
+            mode="ref2va",
+            refs=[RefItem(kind="image", path=img)],
+        )
+        self.assertEqual(session_boot_key(req), session_boot_key(req2))
+
+    def test_sticky_video_refs_on_argv_not_cleared(self) -> None:
+        from h3_session import (
+            build_session_argv,
+            session_boot_key,
+            session_commands_for_request,
+        )
+
+        vid = Path("/tmp/clip.mp4")
+        req = GenerateRequest(
+            prompt="dance",
+            output_path=Path("/tmp/out.mp4"),
+            mode="ref2va",
+            refs=[RefItem(kind="silent_video", path=vid)],
+        )
+        cmds = session_commands_for_request(req)
+        self.assertNotIn("!refs clear", cmds)
+        self.assertIn("!first clear", cmds)
+        argv = build_session_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
+        self.assertIn("--ref-silent-video", argv)
+        self.assertIn(str(vid), argv)
+        other = GenerateRequest(
+            prompt="dance",
+            output_path=Path("/tmp/out.mp4"),
+            mode="ref2va",
+            refs=[RefItem(kind="silent_video", path=Path("/tmp/other.mp4"))],
+        )
+        self.assertNotEqual(session_boot_key(req), session_boot_key(other))
+
+    def test_preview_latent_in_session_argv_and_boot_key(self) -> None:
+        from h3_session import build_session_argv, session_boot_key
+
+        preview = Path("/tmp/h3_prev_warm_abc")
+        req = GenerateRequest(
+            prompt="fox",
+            output_path=Path("/tmp/out.mp4"),
+            preview_latent_dir=preview,
+        )
+        argv = build_session_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
+        self.assertIn("--preview-latent", argv)
+        self.assertIn(str(preview), argv)
+        cold = GenerateRequest(prompt="fox", output_path=Path("/tmp/out.mp4"))
+        self.assertNotEqual(session_boot_key(req), session_boot_key(cold))
 
     def test_session_argv_has_no_prompt(self) -> None:
         from h3_session import build_session_argv

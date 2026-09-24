@@ -173,5 +173,6 @@ app = BUNDLE(
             "NSAllowsLocalNetworking": True,
         },
         "NSMicrophoneUsageDescription": "H3-WS may attach audio references for generation.",
+        "NSUserNotificationsUsageDescription": "H3-WS can notify you when a video is ready or if generation fails.",
     },
 )
