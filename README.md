@@ -13,8 +13,8 @@ Local **MiniMax-H3** video+audio generation on Apple Silicon (Metal), driven by 
 
 1. Open [**Releases**](https://github.com/audiohacking/h3-ws/releases) and download the latest **H3-WS-macOS.dmg** (or `.app` zip if attached).
 2. Open the DMG and drag **H3-WS.app** into Applications.
-3. First launch: **right-click → Open → Open** (ad-hoc signed / not notarized — Gatekeeper may warn; this is expected, not “damaged”).
-4. **Weights:** on first launch, point the dialog at an existing `models/MiniMax-H3` tree from a previous clone if you have one (nothing is re-downloaded). Otherwise use the in-app **Models** panel to fetch FL2VA (~134 GB). Choice is saved in `~/Library/Application Support/H3-WS/config.json`.
+3. First launch: **right-click → Open → Open** (ad-hoc signed / not notarized — Gatekeeper may warn).
+4. **Weights:** on first launch, point at an existing `models/MiniMax-H3` or use the in-app **Models** panel
 
 Logs: `~/Library/Logs/H3-WS/`.
 
