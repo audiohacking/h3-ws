@@ -10,7 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from h3_paths import REPO_ROOT
+from h3_paths import is_frozen, resource_root
 
 # Import names that must load after ``requirements.txt`` is applied.
 # Install itself always uses that file — never this list as a package set.
@@ -31,7 +31,7 @@ _installed_this_process = False
 
 
 def requirements_file() -> Path:
-    return REPO_ROOT / "requirements.txt"
+    return resource_root() / "requirements.txt"
 
 
 def _stamp_path() -> Path:
@@ -90,6 +90,10 @@ def ensure_python_requirements() -> None:
     """Install ``requirements.txt`` when imports are missing or it changed."""
     global _installed_this_process
     if _installed_this_process:
+        return
+    # Frozen apps ship their own site-packages — never pip-install at runtime.
+    if is_frozen():
+        _installed_this_process = True
         return
     req = requirements_file()
     if not req.is_file():

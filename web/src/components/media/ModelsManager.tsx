@@ -12,7 +12,13 @@ interface ModelComponent {
 interface ModelsStatus {
   ok: boolean;
   model_dir: string;
+  repo_root?: string;
+  lora_dir?: string;
+  lora_count?: number;
+  lora_presets?: import("../../types").LoraPreset[];
   components: ModelComponent[];
+  candidates?: string[];
+  looks_valid?: boolean;
 }
 
 interface DownloadProgress {
@@ -35,6 +41,8 @@ interface ModelsManagerProps {
   onClose?: () => void;
   /** Called whenever a server-side download becomes active/inactive (App uses this to guard close). */
   onDownloadStateChange?: (active: boolean) => void;
+  /** Fired after a model-folder change so the app can refresh LoRA / path state. */
+  onPathApplied?: (status: ModelsStatus) => void;
 }
 
 /**
@@ -46,12 +54,14 @@ interface ModelsManagerProps {
  * modal is never hard-locked: closing it just detaches the SSE stream, and
  * progress re-attaches on reopen/reload.
  */
-export function ModelsManager({ api, onClose, onDownloadStateChange }: ModelsManagerProps) {
+export function ModelsManager({ api, onClose, onDownloadStateChange, onPathApplied }: ModelsManagerProps) {
   const [status, setStatus] = useState<ModelsStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
+  const [pathDraft, setPathDraft] = useState("");
+  const [pathBusy, setPathBusy] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   async function refresh() {
@@ -60,11 +70,54 @@ export function ModelsManager({ api, onClose, onDownloadStateChange }: ModelsMan
     try {
       const r = await fetch(`${api}/api/models`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setStatus(await r.json());
+      const data = (await r.json()) as ModelsStatus;
+      setStatus(data);
+      setPathDraft(data.model_dir || "");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function applyModelPath(path: string) {
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    setPathBusy(true);
+    setError(null);
+    try {
+      const r = await fetch(`${api}/api/models/path`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: trimmed }),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const data = (await r.json()) as ModelsStatus;
+      setStatus(data);
+      setPathDraft(data.model_dir || trimmed);
+      onPathApplied?.(data);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPathBusy(false);
+    }
+  }
+
+  async function browseModelPath() {
+    setPathBusy(true);
+    setError(null);
+    try {
+      const r = await fetch(`${api}/api/models/browse`, { method: "POST" });
+      if (!r.ok) throw new Error(await r.text());
+      const data = await r.json();
+      if (data.cancelled) return;
+      setStatus(data as ModelsStatus);
+      setPathDraft(String(data.model_dir || ""));
+      onPathApplied?.(data as ModelsStatus);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPathBusy(false);
     }
   }
 
@@ -194,8 +247,9 @@ export function ModelsManager({ api, onClose, onDownloadStateChange }: ModelsMan
       <div className="models-page__head">
         <div>
           <h2 className="models-page__title">Models</h2>
-          <p className="models-page__dir">
-            {status ? status.model_dir : "Loading model directory…"}
+          <p className="models-page__hint">
+            Point at an existing MiniMax-H3 folder (or h3-ws clone root) to reuse weights —
+            LoRAs under models/loras are picked up automatically.
           </p>
         </div>
         <div className="models-page__actions">
@@ -208,6 +262,66 @@ export function ModelsManager({ api, onClose, onDownloadStateChange }: ModelsMan
             </button>
           )}
         </div>
+      </div>
+
+      {status && (status.lora_dir || status.lora_count != null) && (
+        <p className="models-page__hint models-page__lora-hint">
+          LoRA folder: <code>{status.lora_dir || "—"}</code>
+          {status.lora_count != null ? ` · ${status.lora_count} on disk` : ""}
+        </p>
+      )}
+
+      <div className="models-page__path">
+        <label className="models-page__path-label" htmlFor="models-path-input">
+          Model folder
+        </label>
+        <div className="models-page__path-row">
+          <input
+            id="models-path-input"
+            className="models-page__path-input"
+            type="text"
+            value={pathDraft}
+            disabled={pathBusy || busyId !== null}
+            onChange={(e) => setPathDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void applyModelPath(pathDraft);
+            }}
+            spellCheck={false}
+          />
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={pathBusy || busyId !== null}
+            onClick={() => void browseModelPath()}
+          >
+            Browse…
+          </button>
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={pathBusy || busyId !== null || !pathDraft.trim()}
+            onClick={() => void applyModelPath(pathDraft)}
+          >
+            {pathBusy ? "Saving…" : "Apply"}
+          </button>
+        </div>
+        {status?.candidates && status.candidates.length > 0 && (
+          <div className="models-page__candidates">
+            <span className="models-page__candidates-label">Detected:</span>
+            {status.candidates.map((c) => (
+              <button
+                key={c}
+                type="button"
+                className={`models-page__candidate${c === status.model_dir ? " is-on" : ""}`}
+                disabled={pathBusy || busyId !== null}
+                title={c}
+                onClick={() => void applyModelPath(c)}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {error && <div className="error-banner">{error}</div>}

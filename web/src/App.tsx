@@ -9,6 +9,7 @@ import { LoraModal } from "./components/lora/LoraModal";
 import { TimelineStrip } from "./components/timeline/TimelineStrip";
 import { ModelsManager } from "./components/media/ModelsManager";
 import { ComposerPanel } from "./components/composer/ComposerPanel";
+import { isTurboPreset, pickDefaultTurboId } from "./components/composer/TurboToggle";
 import { FeaturesPopup } from "./components/composer/FeaturesPopup";
 import { RefinePanel } from "./components/composer/RefinePanel";
 import { ProjectSwitcher, type Project } from "./components/ProjectSwitcher";
@@ -281,6 +282,7 @@ export default function App() {
   const [turboEnabled, setTurboEnabled] = useState(false);
   const [turboTier, setTurboTier] = useState<TurboTier>(TURBO_CONFIG.DEFAULT_TIER);
   const [turboLoading, setTurboLoading] = useState(false);
+  const [turboLoraId, setTurboLoraId] = useState<string | null>(null);
   const [loraModalOpen, setLoraModalOpen] = useState(false);
   const [sceneQueue, setSceneQueue] = useState<SceneQueueItem[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
@@ -389,6 +391,7 @@ export default function App() {
         setTokenReduction(fields.tokenReduction);
         setSsdStreaming(false);
         setLoraPresets(cfg.lora_presets ?? []);
+        setTurboLoraId((prev) => prev ?? pickDefaultTurboId(cfg.lora_presets ?? []));
         if (cfg.refine) setRefineSettings(cfg.refine);
         const defRes =
           cfg.resolution_presets.find((r) => r.id === "512x512") ??
@@ -601,49 +604,88 @@ export default function App() {
     setSsdStreaming(false);
   }
 
+  async function applyTurboPreset(chosen: LoraPreset) {
+    if (busy) return;
+    if (chosen.cached === false) {
+      await ensureLoraSpec(chosen.spec, chosen.label);
+    }
+    setTurboLoraId(chosen.id);
+    setLoraPresetIds((prev) => {
+      const withoutTurbo = prev.filter((id) => {
+        const p = loraPresets.find((x) => x.id === id);
+        return !p || !isTurboPreset(p);
+      });
+      return withoutTurbo.includes(chosen.id) ? withoutTurbo : [...withoutTurbo, chosen.id];
+    });
+    const fixedSteps = chosen.steps;
+    const tierConfig = TURBO_CONFIG.TIERS[turboTier];
+    setNumSteps(fixedSteps && fixedSteps <= 4 ? fixedSteps : tierConfig.steps);
+    setLayers(chosen.layers ?? TURBO_CONFIG.LAYERS);
+    setReuse(chosen.reuse ?? TURBO_CONFIG.REUSE);
+    setTokenReduction(false);
+    setSsdStreaming(false);
+    setTurboEnabled(true);
+    setLoraActivity(`${chosen.label} enabled`);
+  }
+
+  async function handleTurboLoraSelect(id: string) {
+    if (busy) return;
+    const chosen = loraPresets.find((p) => p.id === id);
+    if (!chosen) return;
+    setTurboLoading(true);
+    try {
+      await applyTurboPreset(chosen);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setTurboLoading(false);
+    }
+  }
+
   async function handleTurboToggle(enabled: boolean) {
-    if (!FEATURES.TURBO_MODE) return;
+    if (!FEATURES.TURBO_MODE || busy) return;
 
     if (enabled) {
       setTurboLoading(true);
       try {
-        // Ensure the turbo LoRA is downloaded
-        await ensureLoraSpec(TURBO_CONFIG.LORA_SPEC, TURBO_CONFIG.LABEL);
+        let chosen: LoraPreset | undefined =
+          (turboLoraId ? loraPresets.find((p) => p.id === turboLoraId) : undefined) ??
+          [...loraPresets]
+            .filter(isTurboPreset)
+            .sort((a, b) => {
+              const rank = (p: LoraPreset) => {
+                const hay = `${p.label} ${p.spec}`.toLowerCase();
+                const i = TURBO_CONFIG.PREFERRED.findIndex((n) => hay.includes(n));
+                return i < 0 ? 99 : i;
+              };
+              return rank(a) - rank(b);
+            })[0];
 
-        // Find or create the turbo preset ID
-        const existingPreset = loraPresets.find((p) => p.spec === TURBO_CONFIG.LORA_SPEC);
-        if (existingPreset) {
-          // Enable the existing preset
-          setLoraPresetIds((prev) =>
-            prev.includes(existingPreset.id) ? prev : [...prev, existingPreset.id],
-          );
-        } else {
-          // Add as custom and enable
-          const r = await fetch(`${API}/api/loras/custom`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              spec: TURBO_CONFIG.LORA_SPEC,
-              label: TURBO_CONFIG.LABEL,
-              scale: TURBO_CONFIG.SCALE,
-            }),
-          });
-          if (r.ok) {
-            const data = (await r.json()) as { id: string; lora_presets?: LoraPreset[] };
-            if (data.lora_presets) setLoraPresets(data.lora_presets);
-            if (data.id) setLoraPresetIds((prev) => [...prev, data.id]);
+        if (!chosen) {
+          await ensureLoraSpec(TURBO_CONFIG.LORA_SPEC, TURBO_CONFIG.LABEL);
+          chosen = loraPresets.find((p) => p.spec === TURBO_CONFIG.LORA_SPEC);
+          if (!chosen) {
+            const r = await fetch(`${API}/api/loras/custom`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                spec: TURBO_CONFIG.LORA_SPEC,
+                label: TURBO_CONFIG.LABEL,
+                scale: TURBO_CONFIG.SCALE,
+              }),
+            });
+            if (r.ok) {
+              const data = (await r.json()) as { id: string; lora_presets?: LoraPreset[] };
+              if (data.lora_presets) setLoraPresets(data.lora_presets);
+              if (data.id) {
+                chosen = (data.lora_presets ?? []).find((p) => p.id === data.id);
+              }
+            }
           }
         }
 
-        // Apply turbo settings using selected tier
-        const tierConfig = TURBO_CONFIG.TIERS[turboTier];
-        setNumSteps(tierConfig.steps);
-        setLayers(TURBO_CONFIG.LAYERS);
-        setReuse(TURBO_CONFIG.REUSE);
-        setTokenReduction(false);
-        setSsdStreaming(false);
-        setTurboEnabled(true);
-        setLoraActivity(`${TURBO_CONFIG.LABEL} enabled`);
+        if (!chosen) throw new Error("No turbo LoRA available — add one under models/loras or HF hub");
+        await applyTurboPreset(chosen);
       } catch (e) {
         setError(String(e));
         setTurboEnabled(false);
@@ -651,15 +693,11 @@ export default function App() {
         setTurboLoading(false);
       }
     } else {
-      // Disable turbo - remove turbo LoRA from selection
-      const turboPreset = loraPresets.find((p) => p.spec === TURBO_CONFIG.LORA_SPEC);
-      if (turboPreset) {
-        setLoraPresetIds((prev) => prev.filter((id) => id !== turboPreset.id));
-      }
+      const turboIds = new Set(loraPresets.filter(isTurboPreset).map((p) => p.id));
+      setLoraPresetIds((prev) => prev.filter((id) => !turboIds.has(id)));
       setTurboEnabled(false);
       setLoraActivity(null);
 
-      // Restore default quality preset settings
       const preset = config?.quality_presets.find((p) => p.id === quality);
       if (preset) {
         const fields = fieldsFromPreset(preset);
@@ -671,11 +709,15 @@ export default function App() {
   }
 
   function handleTurboTierChange(tier: TurboTier) {
+    if (busy) return;
     setTurboTier(tier);
     if (turboEnabled) {
-      // Update step count when tier changes while turbo is active
-      const tierConfig = TURBO_CONFIG.TIERS[tier];
-      setNumSteps(tierConfig.steps);
+      const active = loraPresets.find((p) => p.id === turboLoraId);
+      if (active?.steps && active.steps <= 4) {
+        setNumSteps(active.steps);
+      } else {
+        setNumSteps(TURBO_CONFIG.TIERS[tier].steps);
+      }
     }
   }
 
@@ -965,6 +1007,7 @@ export default function App() {
   }
 
   async function toggleLoraPreset(id: string, checked: boolean) {
+    if (busy) return;
     const preset = loraPresets.find((p) => p.id === id);
     setLoraPresetIds((prev) => {
       const next = checked ? [...prev.filter((x) => x !== id), id] : prev.filter((x) => x !== id);
@@ -982,7 +1025,7 @@ export default function App() {
   }
 
   async function addCustomLora(spec: string, label: string, scale: number) {
-    if (!spec || addingCustomLora) return;
+    if (busy || !spec || addingCustomLora) return;
     setAddingCustomLora(true);
     try {
       const r = await fetch(`${API}/api/loras/custom`, {
@@ -1015,7 +1058,7 @@ export default function App() {
   }
 
   async function removeLoraPreset(preset: LoraPreset) {
-    if (!preset.custom) return;
+    if (busy || !preset.custom) return;
     if (!confirm(`Remove custom LoRA "${preset.label}"?`)) return;
     const r = await fetch(`${API}/api/loras/custom/${encodeURIComponent(preset.id)}`, {
       method: "DELETE",
@@ -1294,6 +1337,7 @@ export default function App() {
   async function postGenerate(body: Record<string, unknown>): Promise<void> {
     setError(null);
     setBusy(true);
+    setLoraModalOpen(false);
     setLivePreviewUrl(null);
     setLivePreviewMime("image/webp");
     setProgress({ phase: "starting", message: "Submitting…" });
@@ -1785,6 +1829,9 @@ export default function App() {
               turboEnabled={turboEnabled}
               turboTier={turboTier}
               turboLoading={turboLoading}
+              turboOptions={loraPresets}
+              turboLoraId={turboLoraId}
+              onTurboLoraId={(id) => void handleTurboLoraSelect(id)}
               loraBusy={loraBusy}
               onTurbo={(enabled) => void handleTurboToggle(enabled)}
               onTurboTier={handleTurboTierChange}
@@ -1851,9 +1898,22 @@ export default function App() {
                   onClick={() => applyClipSelection(clip)}
                   title={clip.prompt}
                 >
-                  {clip.video_url && (
-                    <video className="library-thumb" src={clip.video_url} muted playsInline preload="metadata" />
-                  )}
+                  {clip.thumb_url ? (
+                    <img
+                      className="library-thumb"
+                      src={clip.thumb_url}
+                      alt=""
+                      loading="lazy"
+                    />
+                  ) : clip.video_url ? (
+                    <video
+                      className="library-thumb"
+                      src={`${clip.video_url}#t=0.1`}
+                      muted
+                      playsInline
+                      preload="metadata"
+                    />
+                  ) : null}
                   <span className={`library-label ${clip.label.toLowerCase()}`}>{clip.label}</span>
                   <span className="library-prompt">{clipDisplayPrompt(clip.prompt)}</span>
                 </button>
@@ -1968,6 +2028,13 @@ export default function App() {
               api={API}
               onClose={closeModels}
               onDownloadStateChange={handleModelsDownloadStateChange}
+              onPathApplied={(status) => {
+                if (status.lora_presets?.length) setLoraPresets(status.lora_presets);
+                void fetchConfig().then((cfg) => {
+                  setConfig(cfg);
+                  if (cfg.lora_presets) setLoraPresets(cfg.lora_presets);
+                });
+              }}
             />
           </div>
         </div>

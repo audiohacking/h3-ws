@@ -11,7 +11,15 @@ env/
 # Distribution / packaging
 *.egg-info/
 dist/
-build/
+# PyInstaller work dir — keep build/macos/ release assets tracked
+/build/H3-WS/
+/build/h3_desktop/
+# Legacy catch-all for other build leftovers, but not build/macos/
+/build/*
+!/build/macos/
+!/build/macos/**
+# Generated icon sources — ship the .icns only
+/build/macos/H3-WS.iconset/
 
 # OS
 .DS_Store
@@ -42,3 +50,6 @@ third_party/h3.c/*.metallib
 .claude/
 .serena/
 web/.claude/
+
+# Local desktop/runtime config (machine-specific paths)
+config.json

@@ -43,7 +43,18 @@ from h3_backend import (  # noqa: E402
     ram_gb,
 )
 from h3_media import require_ui_canvas, snap_frames  # noqa: E402
-from h3_paths import REPO_ROOT, debug_console, default_h3_bin, default_model_dir, real_ffmpeg  # noqa: E402
+from h3_paths import (  # noqa: E402
+    apply_desktop_config_env,
+    debug_console,
+    default_h3_bin,
+    default_model_dir,
+    default_output_dir,
+    default_upload_dir,
+    ensure_writable_tree,
+    install_frozen_h3_av_wrapper,
+    is_frozen,
+    real_ffmpeg,
+)
 
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8765
@@ -404,13 +415,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ui = p.add_argument_group("web ui")
     ui.add_argument("--web-ui", action=argparse.BooleanOptionalAction, default=True)
-    ui.add_argument("--web-output-dir", type=Path, default=REPO_ROOT / "web_outputs")
+    ui.add_argument("--web-output-dir", type=Path, default=default_output_dir())
     misc = p.add_argument_group("misc")
     misc.add_argument("--verbose", action="store_true")
     return p
 
 
 def main() -> None:
+    apply_desktop_config_env()
+    ensure_writable_tree()
+    if is_frozen():
+        install_frozen_h3_av_wrapper()
     args = build_parser().parse_args()
     if args.verbose or debug_console():
         logging.getLogger().setLevel(logging.DEBUG)
@@ -477,7 +492,7 @@ def main() -> None:
     print(f"  Endpoint : {ws_url}")
     if args.web_ui:
         print(f"  Web UI   : {http_url}")
-        ensure_web_dist_built(auto_build=True)
+        ensure_web_dist_built(auto_build=not is_frozen())
     print(
         f"  Console  : h3 progress {'on (DEBUG=false to quiet)' if debug_console() else 'quiet'}"
     )
@@ -490,7 +505,7 @@ def main() -> None:
 
     state = AppState(
         output_dir=Path(args.web_output_dir).resolve(),
-        upload_dir=(REPO_ROOT / "web_uploads").resolve(),
+        upload_dir=default_upload_dir().resolve(),
         engine=engine,
         embedded=True,
         http_url=http_url,

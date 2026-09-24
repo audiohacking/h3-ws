@@ -7,6 +7,17 @@ Open **http://127.0.0.1:8765/** after starting the server.
 The UI starts in **Ref2VA** mode (add an image/video/audio reference to generate). See
 [`DEV.md`](DEV.md) for the current development state and [`ROADMAP.md`](ROADMAP.md) for the plan.
 
+## Download (macOS app)
+
+Apple Silicon only. Grab **H3-WS-macOS.dmg** from [GitHub Releases](https://github.com/lmangani/h3-ws/releases).
+
+1. Drag **H3-WS.app** into Applications.
+2. First open: **right-click → Open → Open** (ad-hoc signed; not notarized — expected Gatekeeper prompt, not “damaged”).
+3. **Already have weights from a git clone?** On first launch, point the dialog at your existing `models/MiniMax-H3` folder (or the clone root). The app will reuse them — nothing is re-downloaded. Choice is saved in `~/Library/Application Support/H3-WS/config.json`.
+4. Otherwise download FL2VA (~134 GB) from the in-app Models UI.
+
+Logs: `~/Library/Logs/H3-WS/`. Dev checkout users can still use `Start H3-WS.command` / `python server.py`.
+
 ## Requirements
 
 - Apple Silicon Mac (Metal)
@@ -15,10 +26,10 @@ The UI starts in **Ref2VA** mode (add an image/video/audio reference to generate
 - Xcode command-line tools (`make`)
 - Enough unified memory for the model (~40 GB peak). Use `--ssd-streaming` if you have under ~64 GB.
 
-## Install
+## Install (from source)
 
 ```bash
-git clone --recurse-submodules https://github.com/audiohacking/h3-ws.git
+git clone --recurse-submodules https://github.com/lmangani/h3-ws.git
 cd h3-ws
 
 # If you already cloned without submodules:
@@ -45,7 +56,7 @@ source .venv/bin/activate
 python server.py
 ```
 
-Or double-click `Start H3-WS.command`.
+Or double-click `Start H3-WS.command`. For a Dock app with crash-restart, use the DMG build above (`python h3_desktop.py` from a checkout also works if `pywebview` is installed).
 
 Default generate is 512×512, **1s** (22 frames), **fast** quality (token-reduction + 384 internal render). Lower RAM if a run is killed for memory (this makes denoise slower):
 

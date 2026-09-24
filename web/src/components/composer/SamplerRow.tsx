@@ -1,5 +1,5 @@
 import { TurboToggle } from "./TurboToggle";
-import type { PillOption } from "../../types";
+import type { LoraPreset, PillOption } from "../../types";
 import type { TurboTier } from "../../config";
 
 type Props = {
@@ -19,6 +19,9 @@ type Props = {
   turboEnabled: boolean;
   turboTier: TurboTier;
   turboLoading?: boolean;
+  turboOptions: LoraPreset[];
+  turboLoraId: string | null;
+  onTurboLoraId: (id: string) => void;
   loraBusy?: boolean;
   onTurbo: (enabled: boolean) => void;
   onTurboTier: (tier: TurboTier) => void;
@@ -85,6 +88,9 @@ export function SamplerRow({
   turboEnabled,
   turboTier,
   turboLoading,
+  turboOptions,
+  turboLoraId,
+  onTurboLoraId,
   loraBusy,
   onTurbo,
   onTurboTier,
@@ -160,6 +166,9 @@ export function SamplerRow({
             onChange={(enabled) => void onTurbo(enabled)}
             tier={turboTier}
             onTierChange={onTurboTier}
+            options={turboOptions}
+            selectedId={turboLoraId}
+            onSelectId={onTurboLoraId}
             disabled={disabled || loraBusy}
             loading={turboLoading}
           />

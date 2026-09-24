@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import type { CastMediaType, CastMember, Clip, Config, GenerationPreset, LibraryFrame, PillOption, ReferenceItem, RoutingMode, SceneQueueItem } from "../../types";
+import type { CastMediaType, CastMember, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, PillOption, ReferenceItem, RoutingMode, SceneQueueItem } from "../../types";
 import type { StyleEntry } from "../../styleAtlas";
 import { FEATURES, type TurboTier } from "../../config";
 import { mentionCandidates, type CompileResult } from "../../compile";
@@ -89,6 +89,9 @@ export type ComposerPanelProps = {
   turboEnabled: boolean;
   turboTier: TurboTier;
   turboLoading?: boolean;
+  turboOptions: LoraPreset[];
+  turboLoraId: string | null;
+  onTurboLoraId: (id: string) => void;
   loraBusy?: boolean;
   onTurbo: (enabled: boolean) => void;
   onTurboTier: (tier: TurboTier) => void;
@@ -145,7 +148,12 @@ export function ComposerPanel(props: ComposerPanelProps) {
     setMention(null);
   }
 
-  const clipItems = props.clips.map((c) => ({ id: c.id, label: c.label, videoUrl: c.video_url }));
+  const clipItems = props.clips.map((c) => ({
+    id: c.id,
+    label: c.label,
+    thumbUrl: c.thumb_url,
+    videoUrl: c.video_url,
+  }));
   const frameItems = props.frames.map((f) => ({ id: f.id, label: f.label, thumbUrl: f.image_url }));
 
   return (
@@ -354,6 +362,9 @@ export function ComposerPanel(props: ComposerPanelProps) {
           turboEnabled={props.turboEnabled}
           turboTier={props.turboTier}
           turboLoading={props.turboLoading}
+          turboOptions={props.turboOptions}
+          turboLoraId={props.turboLoraId}
+          onTurboLoraId={props.onTurboLoraId}
           loraBusy={props.loraBusy}
           onTurbo={props.onTurbo}
           onTurboTier={props.onTurboTier}

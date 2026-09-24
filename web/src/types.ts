@@ -4,11 +4,15 @@ export interface LoraPreset {
   spec: string;
   scale: number;
   custom?: boolean;
+  /** Discovered under models/loras — not removable via custom delete. */
+  local?: boolean;
   cached?: boolean;
+  turbo?: boolean;
   steps?: number;
   layers?: number;
   reuse?: number;
   guidance?: string | null;
+  path?: string;
 }
 
 export interface QualityPreset {
@@ -82,6 +86,8 @@ export interface Clip {
   prompt: string;
   label: string;
   video_url: string;
+  /** JPEG poster for library/timeline (avoids black WebKit video thumbs). */
+  thumb_url?: string;
   filename: string;
   path?: string;
   chain_id: string;

@@ -1,0 +1,132 @@
+name: Build macOS Release
+
+on:
+  release:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v0.1.0)"
+        required: true
+        default: "v0.1.0-macos"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    name: Build H3-WS.app
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          else
+            VERSION="${{ github.event.inputs.version }}"
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "$VERSION" > VERSION
+          cat VERSION
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build Web UI
+        run: |
+          cd web
+          npm ci
+          npm run build
+          test -f dist/index.html
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements_macos.txt
+
+      - name: Build native h3 (Metal)
+        run: |
+          ./scripts/build_h3.sh
+          test -x third_party/h3.c/h3
+
+      - name: Check macOS build assets
+        run: |
+          test -f build/macos/H3-WS.icns
+          test -f build/macos/codesign.sh
+          test -f build/macos/entitlements.plist
+
+      - name: Clean previous PyInstaller outputs
+        run: rm -rf dist/H3-WS.app dist/H3-WS build/H3-WS
+
+      - name: Build with PyInstaller
+        run: python -m PyInstaller H3WS.spec --clean --noconfirm
+
+      - name: Normalize CFBundleExecutable
+        run: |
+          # Spec builds H3-WS_bin; Info.plist expects H3-WS (AceForge pattern).
+          BIN="dist/H3-WS.app/Contents/MacOS/H3-WS_bin"
+          DEST="dist/H3-WS.app/Contents/MacOS/H3-WS"
+          if [ -f "$BIN" ]; then
+            cp "$BIN" "$DEST"
+            chmod +x "$DEST"
+          fi
+          test -x "$DEST"
+          # Ensure bundled native tools are executable
+          find dist/H3-WS.app -name h3 -type f -exec chmod +x {} \;
+          find dist/H3-WS.app -path '*/scripts/h3-av' -exec chmod +x {} \;
+
+      - name: Ad-hoc code sign
+        run: |
+          chmod +x build/macos/codesign.sh
+          ./build/macos/codesign.sh dist/H3-WS.app
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY || '-' }}
+
+      - name: Create DMG
+        run: |
+          mkdir -p dmg_temp
+          cp -R dist/H3-WS.app dmg_temp/
+          cp H3-WS.command dmg_temp/
+          chmod +x dmg_temp/H3-WS.command
+          ln -s /Applications dmg_temp/Applications
+          cp .github/DMG_README.txt dmg_temp/README.txt
+          hdiutil create -volname "H3-WS" \
+            -srcfolder dmg_temp \
+            -ov -format UDZO \
+            H3-WS-macOS.dmg
+
+      - name: Checksums
+        run: |
+          shasum -a 256 H3-WS-macOS.dmg > checksums.txt
+          cat checksums.txt
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: H3-WS-macOS-DMG
+          path: |
+            H3-WS-macOS.dmg
+            checksums.txt
+
+      - name: Attach to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            H3-WS-macOS.dmg
+            checksums.txt

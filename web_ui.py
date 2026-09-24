@@ -50,6 +50,7 @@ from h3_media import (
     RESOLUTION_PRESETS,
     audio_peaks,
     concat_mp4s,
+    ensure_video_poster,
     extract_last_frame,
     frame_video,
     media_available,
@@ -62,8 +63,17 @@ from h3_media import (
     trim_media,
     upscale_video,
     validate_canvas,
+    video_poster_path,
 )
-from h3_paths import REPO_ROOT, configure_scratch_root, mk_scratch_dir
+from h3_paths import (
+    REPO_ROOT,
+    configure_scratch_root,
+    default_output_dir,
+    default_upload_dir,
+    is_frozen,
+    mk_scratch_dir,
+    resource_root,
+)
 from h3_preview import (
     LatentPreviewWatcher,
     cleanup_preview_artifacts,
@@ -90,8 +100,8 @@ INDEX_FILE = "index.json"
 SETTINGS_FILE = "settings.json"
 USER_DATA_FILE = "user_data.json"
 CLIP_MULTIPLIER_MAX = 10
-DEFAULT_OUTPUT_DIR = REPO_ROOT / "web_outputs"
-DEFAULT_UPLOAD_DIR = REPO_ROOT / "web_uploads"
+DEFAULT_OUTPUT_DIR = default_output_dir()
+DEFAULT_UPLOAD_DIR = default_upload_dir()
 PROGRESS_KEEPALIVE_INTERVAL_S = 1.0
 
 _RUN_BODIES: dict[str, dict[str, Any]] = {}
@@ -477,6 +487,9 @@ class AppState:
     def clip_url(self, filename: str) -> str:
         return f"/api/videos/{filename}"
 
+    def clip_thumb_url(self, filename: str) -> str:
+        return f"/api/videos/{filename}/thumb"
+
     def delete_clip_record(self, clip_id: str) -> bool:
         clip = self.clips.get(clip_id)
         if not clip:
@@ -487,6 +500,12 @@ class AppState:
                 path.unlink()
             except OSError as exc:
                 log.warning("Could not delete clip file %s: %s", path, exc)
+        poster = video_poster_path(path)
+        if poster.is_file():
+            try:
+                poster.unlink()
+            except OSError:
+                pass
         del self.clips[clip_id]
         for run in list(self.runs.values()):
             if clip_id in run.clip_ids:
@@ -539,8 +558,12 @@ def _clip_for_api(state: AppState, clip: ClipRecord) -> dict[str, Any]:
             data["path"] = str(file_path)
             if not data.get("video_url"):
                 data["video_url"] = state.clip_url(filename)
+            # JPEG poster URL — WebKit leaves <video preload=metadata> black on
+            # non-faststart MP4s (moov at end), which is what h3-av writes.
+            data["thumb_url"] = state.clip_thumb_url(filename)
         else:
             data["video_url"] = ""
+            data["thumb_url"] = ""
     return data
 
 
@@ -617,7 +640,15 @@ def _frame_for_api(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def resolve_web_dist() -> Path:
-    return REPO_ROOT / "web" / "dist"
+    return resource_root() / "web" / "dist"
+
+
+def _download_model_cmd(*extra: str) -> list[str]:
+    """Build argv for scripts/download_model.py (frozen apps re-enter via --run-download)."""
+    if is_frozen():
+        return [sys.executable, "--run-download", *extra]
+    script = resource_root() / "scripts" / "download_model.py"
+    return [sys.executable, str(script), *extra]
 
 
 def web_dist_stale() -> bool:
@@ -629,7 +660,7 @@ def web_dist_stale() -> bool:
     if not js_files:
         return True
     newest_js = max(js_files, key=lambda path: path.stat().st_mtime)
-    src_root = REPO_ROOT / "web" / "src"
+    src_root = resource_root() / "web" / "src"
     if not src_root.is_dir():
         return False
     try:
@@ -645,9 +676,12 @@ def ensure_web_dist_built(*, auto_build: bool = True) -> bool:
     dist = resolve_web_dist()
     if dist.is_dir() and not web_dist_stale():
         return True
+    # Frozen apps ship a prebuilt UI — never try npm inside the bundle.
+    if is_frozen():
+        return dist.is_dir()
     if not auto_build:
         return dist.is_dir() and not web_dist_stale()
-    web_dir = REPO_ROOT / "web"
+    web_dir = resource_root() / "web"
     if not (web_dir / "package.json").is_file():
         return False
     npm = shutil.which("npm")
@@ -906,7 +940,7 @@ def list_library_assets(
                     "source": "render",
                     "created_at": clip.created_at or "",
                     "duration_s": clip.duration_seconds,
-                    "thumb_url": None,
+                    "thumb_url": state.clip_thumb_url(clip.filename),
                     "video_url": clip.video_url or state.clip_url(clip.filename),
                     "media_url": clip.video_url or state.clip_url(clip.filename),
                     "clip_id": clip.id,
@@ -1345,6 +1379,11 @@ async def _execute_run(state: AppState, run_id: str) -> None:
             clip.label = "CURRENT" if i == len(run.prompts) - 1 else f"CLIP {i + 1}"
             if i == 0:
                 clip.label = "ORIGINAL" if len(run.prompts) > 1 else "CURRENT"
+            thumb_url = ""
+            if dest.is_file() and media_available():
+                poster = await asyncio.to_thread(ensure_video_poster, dest)
+                if poster is not None:
+                    thumb_url = state.clip_thumb_url(clip.filename)
             state.save_index()
             await state.emit(
                 run_id,
@@ -1352,6 +1391,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     "type": "clip_done",
                     "clip_id": clip.id,
                     "video_url": clip.video_url,
+                    "thumb_url": thumb_url,
                     "bytes": clip.bytes,
                     "filename": clip.filename,
                     "chain_id": clip.chain_id,
@@ -1634,12 +1674,126 @@ def create_app(
 
     @app.get("/api/models")
     async def api_models_status():
+        from h3_paths import discover_existing_model_dirs, load_desktop_config
+        from h3_lora import lora_cache_dir, scan_disk_loras
+
         model_dir = state.engine.model_dir
+        cfg = load_desktop_config()
+        disk = scan_disk_loras()
         return {
             "ok": True,
             "model_dir": str(model_dir),
+            "repo_root": str(cfg.get("repo_root") or ""),
+            "lora_dir": str(lora_cache_dir()),
+            "lora_count": len(disk),
             "components": _component_status(model_dir),
+            "candidates": [str(p) for p in discover_existing_model_dirs()],
         }
+
+    def _normalize_model_dir_choice(raw: str | Path) -> Path:
+        """Accept MiniMax-H3 itself or an h3-ws clone root containing models/MiniMax-H3."""
+        from h3_paths import looks_like_minimax_h3
+
+        choice = Path(raw).expanduser()
+        try:
+            choice = choice.resolve()
+        except OSError:
+            choice = choice.absolute()
+        if choice.name != "MiniMax-H3" and looks_like_minimax_h3(choice / "models" / "MiniMax-H3"):
+            return (choice / "models" / "MiniMax-H3").resolve()
+        return choice
+
+    def _apply_model_dir(new_dir: Path) -> dict[str, Any]:
+        from h3_paths import (
+            apply_desktop_config_env,
+            discover_existing_model_dirs,
+            looks_like_minimax_h3,
+            save_desktop_config,
+        )
+        from h3_lora import lora_cache_dir, lora_catalog, scan_disk_loras
+
+        path = _normalize_model_dir_choice(new_dir)
+        path.mkdir(parents=True, exist_ok=True)
+        # Drop warm FL2VA session so the next gen reloads from the new tree.
+        stop = getattr(state.engine, "_stop_session", None)
+        if callable(stop):
+            stop()
+        state.engine.model_dir = path
+        payload: dict[str, Any] = {
+            "setup_done": True,
+            "model_dir": str(path),
+        }
+        if path.parent.name == "models":
+            repo = path.parent.parent
+            payload["repo_root"] = str(repo.resolve())
+            if (repo / "web_outputs").is_dir():
+                payload["output_dir"] = str((repo / "web_outputs").resolve())
+            if (repo / "web_uploads").is_dir():
+                payload["upload_dir"] = str((repo / "web_uploads").resolve())
+            loras = repo / "models" / "loras"
+            if loras.is_dir():
+                payload["lora_dir"] = str(loras.resolve())
+            taeh3 = repo / "models" / "vae_approx" / "taeh3.safetensors"
+            if taeh3.is_file():
+                payload["taeh3_path"] = str(taeh3.resolve())
+        save_desktop_config(payload)
+        apply_desktop_config_env()
+        disk = scan_disk_loras()
+        return {
+            "ok": True,
+            "model_dir": str(path),
+            "lora_dir": str(lora_cache_dir()),
+            "lora_count": len(disk),
+            "lora_presets": lora_catalog(state.output_dir),
+            "looks_valid": looks_like_minimax_h3(path),
+            "components": _component_status(path),
+            "candidates": [str(p) for p in discover_existing_model_dirs()],
+        }
+
+    @app.post("/api/models/path")
+    async def api_models_set_path(body: dict[str, Any]):
+        """Point the engine at an existing MiniMax-H3 folder (or clone root)."""
+        raw = str(body.get("path") or "").strip()
+        if not raw:
+            raise HTTPException(400, "path is required")
+        try:
+            return await asyncio.to_thread(_apply_model_dir, Path(raw))
+        except OSError as exc:
+            raise HTTPException(400, str(exc)) from exc
+
+    @app.post("/api/models/browse")
+    async def api_models_browse():
+        """Open a native folder picker (server-side) and apply the chosen path."""
+
+        def _pick() -> str | None:
+            try:
+                import tkinter as tk
+                from tkinter import filedialog
+            except ImportError:
+                return None
+            root = tk.Tk()
+            root.withdraw()
+            try:
+                root.attributes("-topmost", True)
+            except Exception:
+                pass
+            root.update_idletasks()
+            from h3_paths import default_model_dir
+
+            initial = str(default_model_dir().parent)
+            path = filedialog.askdirectory(
+                parent=root,
+                title="Select MiniMax-H3 folder (or h3-ws clone root)",
+                initialdir=initial,
+                mustexist=True,
+            )
+            root.destroy()
+            return path or None
+
+        picked = await asyncio.to_thread(_pick)
+        if not picked:
+            return {"ok": False, "cancelled": True, "model_dir": str(state.engine.model_dir)}
+        return await asyncio.to_thread(_apply_model_dir, Path(picked))
 
     # ── Download state for SSE progress ───────────────────────────────────────
     # Owned server-side so the task survives client disconnects. Stores the
@@ -1691,8 +1845,7 @@ def create_app(
 
     async def _run_download(component: str) -> None:
         """Run download in the background; update _download_state on finish."""
-        script = REPO_ROOT / "scripts" / "download_model.py"
-        cmd = [sys.executable, str(script), "--local-dir", str(state.engine.model_dir)]
+        cmd = _download_model_cmd("--local-dir", str(state.engine.model_dir))
         if component == "ref2va":
             cmd.append("--with-ref2va")
         try:
@@ -1839,10 +1992,7 @@ def create_app(
         component = str(body.get("component") or "").strip().lower()
         if component not in ("fl2va", "ref2va"):
             raise HTTPException(400, "component must be 'fl2va' or 'ref2va'")
-        script = REPO_ROOT / "scripts" / "download_model.py"
-        if not script.is_file():
-            raise HTTPException(500, f"Download script not found at {script}")
-        cmd = [sys.executable, str(script), "--local-dir", str(state.engine.model_dir)]
+        cmd = _download_model_cmd("--local-dir", str(state.engine.model_dir))
         if component == "ref2va":
             cmd.append("--with-ref2va")
 
@@ -2533,6 +2683,17 @@ def create_app(
         if not path.is_file():
             raise HTTPException(404, "Video not found")
         return FileResponse(path, media_type="video/mp4")
+
+    @app.get("/api/videos/{filename}/thumb")
+    async def video_thumb(filename: str):
+        """JPEG poster for library / timeline — avoids black WebKit video thumbs."""
+        path = state.output_dir / Path(filename).name
+        if not path.is_file():
+            raise HTTPException(404, "Video not found")
+        poster = await asyncio.to_thread(ensure_video_poster, path)
+        if poster is None or not poster.is_file():
+            raise HTTPException(404, "Poster unavailable")
+        return FileResponse(poster, media_type="image/jpeg")
 
     if mount_static:
         dist = resolve_web_dist()

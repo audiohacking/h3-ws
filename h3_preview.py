@@ -26,13 +26,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from h3_paths import REPO_ROOT
+from h3_paths import load_desktop_config, resource_root, writable_root
 
 log = logging.getLogger("h3-preview")
 
 H3_LATENT_MAGIC = b"H3L1"
-DEFAULT_TAEH3 = REPO_ROOT / "models" / "vae_approx" / "taeh3.safetensors"
-TAEHV_MODULE = REPO_ROOT / "third_party" / "taehv.py"
+TAEHV_MODULE = resource_root() / "third_party" / "taehv.py"
 
 # Continuity defaults (creator/settings.py + models.PREVIEW_FRAMES / fps).
 PREVIEW_MAX_PX = 640
@@ -51,7 +50,33 @@ def default_taeh3_path() -> Path:
     env = os.environ.get("H3_TAEH3", "").strip()
     if env:
         return Path(env).expanduser().resolve()
-    return DEFAULT_TAEH3
+    candidates: list[Path] = []
+    cfg = load_desktop_config()
+    configured = str(cfg.get("taeh3_path") or "").strip()
+    if configured:
+        candidates.append(Path(configured).expanduser())
+    repo = str(cfg.get("repo_root") or "").strip()
+    if repo:
+        candidates.append(Path(repo).expanduser() / "models" / "vae_approx" / "taeh3.safetensors")
+    model = str(cfg.get("model_dir") or "").strip()
+    if model:
+        mp = Path(model).expanduser()
+        if mp.name == "MiniMax-H3" and mp.parent.name == "models":
+            candidates.append(mp.parent / "vae_approx" / "taeh3.safetensors")
+    candidates.append(writable_root() / "models" / "vae_approx" / "taeh3.safetensors")
+    candidates.append(resource_root() / "models" / "vae_approx" / "taeh3.safetensors")
+    for path in candidates:
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            continue
+        if resolved.is_file() and resolved.stat().st_size > 1_000_000:
+            return resolved
+    return (writable_root() / "models" / "vae_approx" / "taeh3.safetensors").resolve()
+
+
+# Back-compat alias for scripts/download_model.py status lines
+DEFAULT_TAEH3 = default_taeh3_path()
 
 
 def taeh3_available(path: Path | None = None) -> bool:

@@ -38,16 +38,16 @@ export function MediaPickerGrid({
           title={item.label}
           onClick={() => onPick(item.id)}
         >
-          {item.videoUrl ? (
+          {item.thumbUrl ? (
+            <img className="media-picker__thumb" src={item.thumbUrl} alt="" loading="lazy" />
+          ) : item.videoUrl ? (
             <video
               className="media-picker__thumb"
-              src={item.videoUrl}
+              src={`${item.videoUrl}#t=0.1`}
               muted
               playsInline
               preload="metadata"
             />
-          ) : item.thumbUrl ? (
-            <img className="media-picker__thumb" src={item.thumbUrl} alt="" />
           ) : (
             <span className="media-picker__thumb media-picker__thumb--empty" />
           )}

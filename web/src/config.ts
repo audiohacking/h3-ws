@@ -44,11 +44,19 @@ export const FEATURES = {
  * Turbo mode configuration - distillation LoRA for fast generation
  */
 export const TURBO_CONFIG = {
-  /** Default LoRA spec for turbo mode (8-step NFE distillation) */
-  LORA_SPEC: "tutututututu/Tutu-MiniMax-H3-AudioVideo-20to8-NFE-LoRA",
+  /**
+   * Fallback HF recipe when no on-disk turbo LoRA is found.
+   * Prefer selecting from catalog entries marked turbo (TaoMate, Tutu, LightX2V, …).
+   */
+  LORA_SPEC:
+    "https://huggingface.co/tutututututu/Tutu-MiniMax-H3-AudioVideo-20to8-NFE-LoRA/" +
+    "resolve/main/comfyui/tutu-t8-minimax-h3-av-20to8-nfe-lora-step000100-bf16-comfyui.safetensors",
 
   /** Display label for the turbo LoRA */
   LABEL: "Tutu 8-NFE Turbo",
+
+  /** Preferred on-disk filename needles (first match wins). Continuity default: TaoMate. */
+  PREFERRED: ["taomate", "tutu", "minimax_h3", "minimax-h3", "h3_turbo", "h3-turbo", "fasth3"] as const,
 
   /** Recommended layers for turbo mode */
   LAYERS: 50,
@@ -70,7 +78,9 @@ export const TURBO_CONFIG = {
   DEFAULT_TIER: "good" as const,
 
   /** Guidance text */
-  GUIDANCE: "Distillation LoRA for faster generation. Draft: 4 steps (~4x faster), Medium: 6 steps (~3x), Good: 8 steps (~2x).",
+  GUIDANCE:
+    "Uses a turbo/distill LoRA from your models/loras folder (TaoMate, Tutu, LightX2V, …). " +
+    "Pick another in the chevron menu before you generate — settings lock while a run is in progress.",
 } as const;
 
 export type TurboTier = keyof typeof TURBO_CONFIG.TIERS;

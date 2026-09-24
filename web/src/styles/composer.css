@@ -348,6 +348,128 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  position: relative;
+}
+
+/* Continuity-style split pill: big half toggles, small half picks the LoRA. */
+.turbo-pill {
+  display: inline-flex;
+  align-items: stretch;
+  height: 32px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  overflow: hidden;
+}
+
+.turbo-pill.is-on {
+  border-color: color-mix(in srgb, var(--color-accent, #c45c26) 55%, transparent);
+  color: var(--color-accent, #c45c26);
+}
+
+.turbo-pill.is-busy {
+  opacity: 0.7;
+}
+
+.turbo-pill__main,
+.turbo-pill__pick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.turbo-pill__main {
+  padding: 0 10px 0 12px;
+  white-space: nowrap;
+}
+
+.turbo-pill__main svg {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+
+.turbo-pill__pick {
+  width: 26px;
+  border-left: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  padding: 0;
+}
+
+.turbo-pill__pick svg {
+  width: 14px;
+  height: 14px;
+}
+
+.turbo-pill__main:disabled,
+.turbo-pill__pick:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.turbo-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  min-width: 240px;
+  max-width: min(360px, 80vw);
+  max-height: 280px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface, #fff);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+}
+
+.turbo-menu__title {
+  padding: 6px 10px 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-muted, #888);
+}
+
+.turbo-menu__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  margin: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.turbo-menu__item:hover,
+.turbo-menu__item.is-on {
+  background: color-mix(in srgb, var(--color-accent, #c45c26) 12%, transparent);
+}
+
+.turbo-menu__name {
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.turbo-menu__meta {
+  font-size: 0.7rem;
+  color: var(--color-muted, #888);
 }
 
 .chip-btn {

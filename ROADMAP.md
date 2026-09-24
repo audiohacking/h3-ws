@@ -204,7 +204,7 @@ Still remaining for the warm session:
 - CLI client (protocol-compatible with the WS server): prompt, image, refs, quality, frames, count, autocontinue, autoconcat
 - MCP: `h3_server_healthcheck`, `h3_generate_video`, `h3_generate_sequence`
 - `AGENTS.md` / `DIRECTOR.md` / `CLAUDE.md`: Context-IR-style prompts (subject, action, camera, look, **audio**), H3 frame math, no LTX LoRA advice
-- `Start H3-WS.command` double-click launcher
+- ~~`Start H3-WS.command` double-click launcher~~ → **H3-WS.app** DMG (PyInstaller + ad-hoc codesign, AceForge pattern); `.command` kept for checkout users. First-run reuses existing `models/MiniMax-H3` trees.
 
 ### P8 — Hardening
 

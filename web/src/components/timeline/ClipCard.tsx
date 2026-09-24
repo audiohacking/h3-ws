@@ -72,10 +72,12 @@ export function ClipCard({
     >
       <span className="timeline-clip__index">{index + 1}</span>
 
-      {clip.video_url ? (
+      {clip.thumb_url ? (
+        <img className="timeline-clip__thumb" src={clip.thumb_url} alt="" loading="lazy" />
+      ) : clip.video_url ? (
         <video
           className="timeline-clip__thumb"
-          src={clip.video_url}
+          src={`${clip.video_url}#t=0.1`}
           muted
           playsInline
           preload="metadata"

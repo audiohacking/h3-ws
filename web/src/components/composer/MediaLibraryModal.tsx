@@ -329,10 +329,12 @@ export function MediaLibraryModal({
               >
                 {asset.kind === "image" && asset.thumb_url ? (
                   <img className="media-lib__thumb" src={asset.thumb_url} alt="" loading="lazy" />
+                ) : asset.thumb_url ? (
+                  <img className="media-lib__thumb" src={asset.thumb_url} alt="" loading="lazy" />
                 ) : asset.kind === "video" && (asset.video_url || asset.media_url) ? (
                   <video
                     className="media-lib__thumb"
-                    src={asset.video_url || asset.media_url || undefined}
+                    src={`${asset.video_url || asset.media_url || ""}#t=0.1`}
                     muted
                     playsInline
                     preload="metadata"

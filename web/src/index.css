@@ -362,10 +362,10 @@ body {
   gap: 6px;
   max-width: 220px;
   padding: 5px 10px;
-  border: 1px solid var(--border, #333);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--panel, #161616);
-  color: var(--text, #eee);
+  background: var(--surface);
+  color: var(--text);
   font: inherit;
   font-size: 0.82rem;
   cursor: pointer;
@@ -394,10 +394,11 @@ body {
   z-index: 40;
   min-width: 240px;
   padding: 6px;
-  border: 1px solid var(--border, #333);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--panel, #161616);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--text);
 }
 
 .project-switcher__row {
@@ -408,7 +409,7 @@ body {
 }
 
 .project-switcher__row.is-active {
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--accent-soft);
 }
 
 .project-switcher__item {
@@ -430,7 +431,7 @@ body {
 }
 
 .project-switcher__item:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--accent-soft);
 }
 
 .project-switcher__name {
@@ -441,8 +442,9 @@ body {
 
 .project-switcher__meta {
   flex-shrink: 0;
-  opacity: 0.45;
+  opacity: 0.55;
   font-variant-numeric: tabular-nums;
+  color: var(--muted);
 }
 
 .project-switcher__actions {
@@ -458,19 +460,19 @@ body {
   border: 0;
   border-radius: 4px;
   background: transparent;
-  color: var(--muted, #888);
+  color: var(--muted);
   font: inherit;
   cursor: pointer;
 }
 
 .project-switcher__icon:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text, #eee);
+  background: var(--accent-soft);
+  color: var(--text);
 }
 
 .project-switcher__icon--danger:hover:not(:disabled) {
-  background: rgba(220, 60, 60, 0.2);
-  color: #f88;
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
+  color: var(--danger);
 }
 
 .project-switcher__icon:disabled {
@@ -482,10 +484,10 @@ body {
   flex: 1;
   margin: 2px 4px;
   padding: 6px 8px;
-  border: 1px solid var(--border, #444);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: #0d0d0d;
-  color: inherit;
+  background: var(--bg);
+  color: var(--text);
   font: inherit;
   font-size: 0.82rem;
 }
@@ -496,10 +498,10 @@ body {
   margin-top: 4px;
   padding: 8px;
   border: 0;
-  border-top: 1px solid var(--border, #333);
+  border-top: 1px solid var(--border);
   border-radius: 0 0 6px 6px;
   background: transparent;
-  color: var(--text, #eee);
+  color: var(--text);
   font: inherit;
   font-size: 0.82rem;
   text-align: left;
@@ -507,7 +509,7 @@ body {
 }
 
 .project-switcher__new:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--accent-soft);
 }
 
 .status-dot {

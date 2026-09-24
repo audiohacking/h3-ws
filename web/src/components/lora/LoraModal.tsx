@@ -62,12 +62,17 @@ export function LoraModal({
     );
   }, [presets, search]);
 
-  // Group presets: selected first, then custom, then built-in
+  // Group: selected → on disk → custom URL → built-in download recipes
   const groupedPresets = useMemo(() => {
     const selected = filteredPresets.filter((p) => selectedIds.includes(p.id));
+    const local = filteredPresets.filter(
+      (p) => p.local && !p.custom && !selectedIds.includes(p.id),
+    );
     const custom = filteredPresets.filter((p) => p.custom && !selectedIds.includes(p.id));
-    const builtin = filteredPresets.filter((p) => !p.custom && !selectedIds.includes(p.id));
-    return { selected, custom, builtin };
+    const builtin = filteredPresets.filter(
+      (p) => !p.custom && !p.local && !selectedIds.includes(p.id),
+    );
+    return { selected, local, custom, builtin };
   }, [filteredPresets, selectedIds]);
 
   if (!open) return null;
@@ -119,6 +124,23 @@ export function LoraModal({
             </section>
           )}
 
+          {groupedPresets.local.length > 0 && (
+            <section className="lora-modal__section">
+              <h3 className="lora-modal__section-title">On disk ({groupedPresets.local.length})</h3>
+              <div className="lora-modal__grid">
+                {groupedPresets.local.map((preset) => (
+                  <LoraCard
+                    key={preset.id}
+                    preset={preset}
+                    selected={false}
+                    onToggle={(sel) => onToggle(preset.id, sel)}
+                    disabled={disabled}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+
           {groupedPresets.custom.length > 0 && (
             <section className="lora-modal__section">
               <h3 className="lora-modal__section-title">Custom</h3>
@@ -139,7 +161,7 @@ export function LoraModal({
 
           {groupedPresets.builtin.length > 0 && (
             <section className="lora-modal__section">
-              <h3 className="lora-modal__section-title">Built-in</h3>
+              <h3 className="lora-modal__section-title">Download recipes</h3>
               <div className="lora-modal__grid">
                 {groupedPresets.builtin.map((preset) => (
                   <LoraCard

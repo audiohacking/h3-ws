@@ -5,10 +5,53 @@ from __future__ import annotations
 import logging
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent
+_APP_SUPPORT_NAME = "H3-WS"
+
+
+def is_frozen() -> bool:
+    """True when running inside a PyInstaller (or similar) bundle."""
+    return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
+
+def resource_root() -> Path:
+    """Read-only tree: repo checkout, or PyInstaller ``_MEIPASS``."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass)
+    return Path(__file__).resolve().parent
+
+
+def writable_root() -> Path:
+    """User-writable data root (models, outputs, uploads, logs)."""
+    env = os.environ.get("H3_WS_DATA_DIR", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    if is_frozen():
+        return (Path.home() / "Library" / "Application Support" / _APP_SUPPORT_NAME).resolve()
+    return Path(__file__).resolve().parent
+
+
+def ensure_writable_tree() -> Path:
+    """Create App Support (or repo) subdirs used by the desktop/server."""
+    root = writable_root()
+    for rel in (
+        "models/MiniMax-H3",
+        "models/vae_approx",
+        "models/loras",
+        "web_outputs",
+        "web_uploads",
+        "logs",
+    ):
+        (root / rel).mkdir(parents=True, exist_ok=True)
+    return root
+
+
+# Back-compat: most call sites mean "resource root" (code + bundled assets).
+REPO_ROOT = resource_root()
 
 _configured_root: Path | None = None
 
@@ -49,7 +92,16 @@ def default_h3_bin() -> Path:
     env = os.environ.get("H3_BIN", "").strip()
     if env:
         return Path(env).expanduser().resolve()
-    return REPO_ROOT / "third_party" / "h3.c" / "h3"
+    root = resource_root()
+    # Prefer normal path; PyInstaller mangles "h3.c" → "h3__dot__c" for binary dests.
+    for rel in (
+        ("third_party", "h3.c", "h3"),
+        ("third_party", "h3__dot__c", "h3"),
+    ):
+        candidate = root.joinpath(*rel)
+        if candidate.is_file():
+            return candidate
+    return root / "third_party" / "h3.c" / "h3"
 
 
 def h3_process_cwd(h3_bin: Path | str | None = None) -> Path:
@@ -92,14 +144,308 @@ def default_model_dir() -> Path:
     ).strip()
     if env:
         return Path(env).expanduser().resolve()
-    return REPO_ROOT / "models" / "MiniMax-H3"
+    cfg = load_desktop_config()
+    configured = str(cfg.get("model_dir") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return writable_root() / "models" / "MiniMax-H3"
+
+
+def default_output_dir() -> Path:
+    env = os.environ.get("H3_WS_OUTPUT_DIR", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    cfg = load_desktop_config()
+    configured = str(cfg.get("output_dir") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return writable_root() / "web_outputs"
+
+
+def default_upload_dir() -> Path:
+    env = os.environ.get("H3_WS_UPLOAD_DIR", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    cfg = load_desktop_config()
+    configured = str(cfg.get("upload_dir") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return writable_root() / "web_uploads"
+
+
+def default_logs_dir() -> Path:
+    env = os.environ.get("H3_WS_LOG_DIR", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    if is_frozen():
+        return (Path.home() / "Library" / "Logs" / _APP_SUPPORT_NAME).resolve()
+    return writable_root() / "logs"
+
+
+def desktop_config_path() -> Path:
+    return writable_root() / "config.json"
+
+
+def load_desktop_config() -> dict:
+    path = desktop_config_path()
+    if not path.is_file():
+        return {}
+    try:
+        import json
+
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_desktop_config(data: dict) -> Path:
+    import json
+
+    root = ensure_writable_tree()
+    path = root / "config.json"
+    merged = load_desktop_config()
+    merged.update(data)
+    path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def looks_like_minimax_h3(path: Path) -> bool:
+    """True when ``path`` looks like a usable MiniMax-H3 native tree."""
+    p = Path(path)
+    if not p.is_dir():
+        return False
+    # Either FL2VA or Ref2VA transformer present is enough to count as "already downloaded".
+    markers = (
+        p / "FL2VA" / "transformer",
+        p / "FL2VA",
+        p / "Ref2VA" / "transformer",
+        p / "Ref2VA",
+    )
+    return any(m.is_dir() for m in markers)
+
+
+def hf_hub_cache() -> Path:
+    """Hugging Face hub cache root (``~/.cache/huggingface/hub`` by default)."""
+    for key in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        raw = os.environ.get(key, "").strip()
+        if raw:
+            return Path(raw).expanduser().resolve()
+    home = os.environ.get("HF_HOME", "").strip()
+    if home:
+        return (Path(home).expanduser() / "hub").resolve()
+    return (Path.home() / ".cache" / "huggingface" / "hub").resolve()
+
+
+def hf_snapshot(repo_dirname: str, *, hub: Path | None = None) -> Path | None:
+    """Current snapshot dir for a ``models--org--name`` cache tree, or None."""
+    root = (hub or hf_hub_cache()) / repo_dirname
+    ref = root / "refs" / "main"
+    if ref.is_file():
+        try:
+            snap = root / "snapshots" / ref.read_text(encoding="utf-8").strip()
+        except OSError:
+            snap = None
+        if snap is not None and snap.is_dir():
+            return snap
+    snaps = root / "snapshots"
+    if not snaps.is_dir():
+        return None
+    try:
+        kids = [p for p in snaps.iterdir() if p.is_dir()]
+    except OSError:
+        return None
+    if not kids:
+        return None
+    return max(kids, key=lambda p: p.stat().st_mtime)
+
+
+def discover_hf_hub_model_dirs(*, limit: int = 8) -> list[Path]:
+    """Native MiniMax-H3 trees already sitting in the Hugging Face hub cache."""
+    found: list[Path] = []
+    seen: set[str] = set()
+
+    def push(candidate: Path) -> None:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            return
+        key = str(resolved)
+        if key in seen or not looks_like_minimax_h3(resolved):
+            return
+        seen.add(key)
+        found.append(resolved)
+
+    # Official native checkpoint + any models--*MiniMax*H3* snapshot that has FL2VA.
+    for dirname in (
+        "models--MiniMaxAI--MiniMax-H3",
+        "models--Comfy-Org--MiniMax-H3",
+    ):
+        snap = hf_snapshot(dirname)
+        if snap is None:
+            continue
+        push(snap)
+        push(snap / "MiniMax-H3")
+        if len(found) >= limit:
+            return found[:limit]
+
+    hub = hf_hub_cache()
+    if hub.is_dir():
+        try:
+            for child in sorted(hub.iterdir()):
+                if not child.name.startswith("models--"):
+                    continue
+                low = child.name.lower()
+                if "minimax" not in low or "h3" not in low:
+                    continue
+                if "lora" in low:
+                    continue
+                snap = hf_snapshot(child.name, hub=hub)
+                if snap is None:
+                    continue
+                push(snap)
+                push(snap / "MiniMax-H3")
+                if len(found) >= limit:
+                    break
+        except OSError:
+            pass
+    return found[:limit]
+
+
+def discover_existing_model_dirs(*, limit: int = 12) -> list[Path]:
+    """Find prior git-clone / custom MiniMax-H3 trees so the app never re-downloads."""
+    found: list[Path] = []
+    seen: set[str] = set()
+
+    def push(candidate: Path) -> None:
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            return
+        key = str(resolved)
+        if key in seen:
+            return
+        if not looks_like_minimax_h3(resolved):
+            return
+        seen.add(key)
+        found.append(resolved)
+
+    # Explicit env always first.
+    for key in ("H3_MODEL_DIR", "H3_WS_MODEL_DIR"):
+        raw = os.environ.get(key, "").strip()
+        if raw:
+            push(Path(raw))
+
+    cfg = load_desktop_config()
+    for key in ("model_dir", "repo_root"):
+        raw = str(cfg.get(key) or "").strip()
+        if not raw:
+            continue
+        p = Path(raw)
+        push(p if p.name == "MiniMax-H3" else p / "models" / "MiniMax-H3")
+
+    # Hugging Face hub cache — common download location on the machine.
+    for p in discover_hf_hub_model_dirs(limit=limit):
+        push(p)
+        if len(found) >= limit:
+            return found[:limit]
+
+    # Common clone locations relative to the user's home / Documents / git trees.
+    home = Path.home()
+    candidates = [
+        writable_root() / "models" / "MiniMax-H3",
+        home / "Documents" / "git" / "h3-ws" / "models" / "MiniMax-H3",
+        home / "git" / "h3-ws" / "models" / "MiniMax-H3",
+        home / "src" / "h3-ws" / "models" / "MiniMax-H3",
+        home / "h3-ws" / "models" / "MiniMax-H3",
+        home / "Developer" / "h3-ws" / "models" / "MiniMax-H3",
+        Path("/Users") / home.name / "Documents" / "git" / "h3-ws" / "models" / "MiniMax-H3",
+    ]
+    # Sibling of Application Support is unlikely; also scan ~/Documents/git/*/models/MiniMax-H3 lightly.
+    git_root = home / "Documents" / "git"
+    if git_root.is_dir():
+        try:
+            for child in sorted(git_root.iterdir()):
+                push(child / "models" / "MiniMax-H3")
+                if len(found) >= limit:
+                    break
+        except OSError:
+            pass
+    for c in candidates:
+        push(c)
+        if len(found) >= limit:
+            break
+    return found[:limit]
+
+
+def apply_desktop_config_env() -> None:
+    """Export persisted path overrides into the process environment."""
+    cfg = load_desktop_config()
+    mapping = {
+        "model_dir": "H3_MODEL_DIR",
+        "output_dir": "H3_WS_OUTPUT_DIR",
+        "upload_dir": "H3_WS_UPLOAD_DIR",
+        "data_dir": "H3_WS_DATA_DIR",
+        "h3_bin": "H3_BIN",
+        "lora_dir": "H3_LORA_DIR",
+        "taeh3_path": "H3_TAEH3",
+    }
+    for cfg_key, env_key in mapping.items():
+        val = str(cfg.get(cfg_key) or "").strip()
+        if val and not os.environ.get(env_key, "").strip():
+            os.environ[env_key] = val
+    # repo_root → derive models/outputs/uploads/loras if not set explicitly
+    repo = str(cfg.get("repo_root") or "").strip()
+    if repo:
+        root = Path(repo).expanduser()
+        if not os.environ.get("H3_MODEL_DIR", "").strip() and looks_like_minimax_h3(
+            root / "models" / "MiniMax-H3"
+        ):
+            os.environ["H3_MODEL_DIR"] = str((root / "models" / "MiniMax-H3").resolve())
+        if not os.environ.get("H3_WS_OUTPUT_DIR", "").strip() and (root / "web_outputs").is_dir():
+            os.environ["H3_WS_OUTPUT_DIR"] = str((root / "web_outputs").resolve())
+        if not os.environ.get("H3_WS_UPLOAD_DIR", "").strip() and (root / "web_uploads").is_dir():
+            os.environ["H3_WS_UPLOAD_DIR"] = str((root / "web_uploads").resolve())
+        loras = root / "models" / "loras"
+        if not os.environ.get("H3_LORA_DIR", "").strip() and loras.is_dir():
+            os.environ["H3_LORA_DIR"] = str(loras.resolve())
+        taeh3 = root / "models" / "vae_approx" / "taeh3.safetensors"
+        if not os.environ.get("H3_TAEH3", "").strip() and taeh3.is_file():
+            os.environ["H3_TAEH3"] = str(taeh3.resolve())
 
 
 def default_h3_av() -> Path:
     env = os.environ.get("H3_AV", "").strip()
     if env:
         return Path(env).expanduser()
-    return REPO_ROOT / "scripts" / "h3-av"
+    # Frozen: prefer a writable wrapper that re-enters the app binary.
+    if is_frozen():
+        wrapper = writable_root() / "bin" / "h3-av"
+        if wrapper.is_file():
+            return wrapper
+    return resource_root() / "scripts" / "h3-av"
+
+
+def install_frozen_h3_av_wrapper() -> Path | None:
+    """Write ``H3_AV`` shim that re-enters the frozen binary with ``--run-h3-av``."""
+    if not is_frozen():
+        return None
+    bindir = writable_root() / "bin"
+    bindir.mkdir(parents=True, exist_ok=True)
+    wrapper = bindir / "h3-av"
+    exe = Path(sys.executable).resolve()
+    body = (
+        "#!/bin/bash\n"
+        "set -euo pipefail\n"
+        f'exec "{exe}" --run-h3-av "$@"\n'
+    )
+    try:
+        wrapper.write_text(body, encoding="utf-8")
+        wrapper.chmod(0o755)
+    except OSError:
+        return None
+    os.environ["H3_AV"] = str(wrapper)
+    return wrapper
 
 
 _SHIM_NAMES = {"h3-av", "h3-ffmpeg", "h3-ffprobe", "h3_av.py"}
@@ -113,9 +459,9 @@ def _looks_like_media_shim(path: Path) -> bool:
     if resolved.name in _SHIM_NAMES:
         return True
     try:
-        if resolved == (REPO_ROOT / "h3_av.py").resolve():
+        if resolved == (resource_root() / "h3_av.py").resolve():
             return True
-        if resolved == (REPO_ROOT / "scripts" / "h3-av").resolve():
+        if resolved == (resource_root() / "scripts" / "h3-av").resolve():
             return True
     except OSError:
         pass
@@ -197,7 +543,8 @@ def ffmpeg_shim_bindir() -> Path:
 
     Unpatched h3.c looks up those names on PATH. Patched builds prefer H3_AV.
     """
-    bindir = REPO_ROOT / "scripts" / ".h3-av-bin"
+    # Always writable — frozen bundles cannot create symlinks under _MEIPASS.
+    bindir = writable_root() / "bin" / ".h3-av-bin"
     bindir.mkdir(parents=True, exist_ok=True)
     shim = default_h3_av().resolve()
     for name in ("ffmpeg", "ffprobe"):

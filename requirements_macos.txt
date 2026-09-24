@@ -1,0 +1,14 @@
+# H3-WS macOS app runtime (PyInstaller / .app release)
+# Extends the repo requirements with desktop + preview deps.
+
+-r requirements.txt
+
+# Native window host (AceForge pattern)
+pywebview>=5.0
+
+# TAEH3 live preview (optional in requirements.txt; required for feature parity in the app)
+torch>=2.1
+safetensors>=0.4
+
+# Packaging (build hosts / CI only — also listed here for one-file install)
+pyinstaller>=6.0

@@ -7,10 +7,13 @@ via ``H3_AV`` instead of a system ffmpeg install.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("h3")
 
 FPS = 24
 SPATIAL_ALIGN = 32
@@ -706,6 +709,82 @@ def extract_last_frame(video_path: str | Path, dest: str | Path) -> Path:
     img = last.to_ndarray(format="rgb24")
     Image.fromarray(img).save(out)
     return out
+
+
+def video_poster_path(video_path: str | Path) -> Path:
+    """Sidecar JPEG used for library / timeline thumbs (next to the mp4)."""
+    src = Path(video_path)
+    return src.parent / ".thumbs" / f"{src.stem}.jpg"
+
+
+def ensure_video_poster(
+    video_path: str | Path,
+    *,
+    max_edge: int = 480,
+    force: bool = False,
+) -> Path | None:
+    """Decode an early frame to JPEG so WebKit library thumbs aren't black.
+
+    h3-av writes non-faststart MP4s (moov at end). ``<video preload=metadata>``
+    then often paints a black poster in Safari / pywebview. A real JPEG sidesteps that.
+    """
+    if not media_available():
+        return None
+    src = Path(video_path)
+    if not src.is_file():
+        return None
+    dest = video_poster_path(src)
+    if dest.is_file() and dest.stat().st_size > 64 and not force:
+        # Stale if the video was rewritten after the thumb.
+        try:
+            if dest.stat().st_mtime >= src.stat().st_mtime:
+                return dest
+        except OSError:
+            return dest
+    import av
+    from PIL import Image
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".tmp.jpg")
+    try:
+        container = av.open(str(src))
+        try:
+            stream = container.streams.video[0]
+            # Prefer a frame a little past t=0 (some encodes are near-black at 0).
+            target_pts = None
+            if stream.average_rate and stream.time_base:
+                # ~0.12s in
+                target_pts = int(0.12 / float(stream.time_base))
+            chosen = None
+            for i, frame in enumerate(container.decode(stream)):
+                chosen = frame
+                if target_pts is not None and frame.pts is not None and frame.pts >= target_pts:
+                    break
+                if i >= 8:
+                    break
+        finally:
+            container.close()
+        if chosen is None:
+            return None
+        img = Image.fromarray(chosen.to_ndarray(format="rgb24"))
+        w, h = img.size
+        edge = max(w, h)
+        if edge > max_edge:
+            scale = max_edge / float(edge)
+            img = img.resize(
+                (max(1, int(w * scale)), max(1, int(h * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        img.save(tmp, format="JPEG", quality=82, optimize=True)
+        tmp.replace(dest)
+        return dest
+    except Exception as exc:
+        log.debug("poster for %s failed: %s", src, exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
 
 
 def concat_mp4s(paths: list[Path], dest: Path) -> Path:
