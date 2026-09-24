@@ -741,7 +741,187 @@ async def _save_upload_file(
         duration = probe_duration_seconds(dest)
         if duration is not None:
             payload["duration_s"] = duration
+    _library_index_record(
+        upload_dir,
+        {
+            "path": str(dest),
+            "name": filename,
+            "kind": kind,
+            "created_at": datetime.now().isoformat(),
+            **({"duration_s": payload["duration_s"]} if "duration_s" in payload else {}),
+        },
+    )
     return payload
+
+
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+_VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".m4v"}
+_AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+_LIBRARY_INDEX = "library.json"
+
+
+def _library_index_path(upload_dir: Path) -> Path:
+    return Path(upload_dir) / _LIBRARY_INDEX
+
+
+def _library_index_load(upload_dir: Path) -> dict[str, dict[str, Any]]:
+    path = _library_index_path(upload_dir)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for raw in items:
+        if not isinstance(raw, dict) or not raw.get("path"):
+            continue
+        out[str(raw["path"])] = raw
+    return out
+
+
+def _library_index_record(upload_dir: Path, entry: dict[str, Any]) -> None:
+    upload_dir = Path(upload_dir)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    by_path = _library_index_load(upload_dir)
+    by_path[str(entry["path"])] = entry
+    payload = {"items": sorted(by_path.values(), key=lambda e: str(e.get("created_at") or ""), reverse=True)}
+    _library_index_path(upload_dir).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _kind_for_suffix(suffix: str) -> str | None:
+    low = suffix.lower()
+    if low in _IMAGE_EXTS:
+        return "image"
+    if low in _VIDEO_EXTS:
+        return "video"
+    if low in _AUDIO_EXTS:
+        return "audio"
+    return None
+
+
+def list_library_assets(
+    state: AppState,
+    *,
+    tab: str = "image",
+    query: str = "",
+) -> list[dict[str, Any]]:
+    """Continuity picker listing — recycle prior uploads, frames, or renders."""
+    tab = (tab or "image").strip().lower()
+    q = (query or "").strip().lower()
+    indexed = _library_index_load(state.upload_dir)
+    rows: list[dict[str, Any]] = []
+
+    def push(
+        *,
+        path: Path,
+        kind: str,
+        name: str,
+        created_at: str = "",
+        duration_s: float | None = None,
+        source: str = "upload",
+        thumb_url: str | None = None,
+        video_url: str | None = None,
+    ) -> None:
+        if q and q not in name.lower() and q not in path.name.lower():
+            return
+        media = f"/api/media?path={path}"
+        rows.append(
+            {
+                "id": str(path),
+                "path": str(path),
+                "name": name,
+                "kind": kind,
+                "source": source,
+                "created_at": created_at,
+                "duration_s": duration_s,
+                "thumb_url": thumb_url or (media if kind == "image" else None),
+                "video_url": video_url or (media if kind == "video" else None),
+                "media_url": media,
+            }
+        )
+
+    if tab in ("image", "video", "audio"):
+        want = tab
+        for path, meta in indexed.items():
+            p = Path(path)
+            if not p.is_file():
+                continue
+            kind = str(meta.get("kind") or _kind_for_suffix(p.suffix) or "")
+            if kind != want:
+                continue
+            push(
+                path=p,
+                kind=kind,
+                name=str(meta.get("name") or p.name),
+                created_at=str(meta.get("created_at") or ""),
+                duration_s=float(meta["duration_s"]) if meta.get("duration_s") is not None else None,
+                source="upload",
+            )
+        # Also surface unindexed files still sitting in the upload dir.
+        known = {Path(p).resolve() for p in indexed}
+        if state.upload_dir.is_dir():
+            for p in sorted(state.upload_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+                if not p.is_file() or p.name == _LIBRARY_INDEX or p.resolve() in known:
+                    continue
+                kind = _kind_for_suffix(p.suffix)
+                if kind != want:
+                    continue
+                push(path=p, kind=kind, name=p.name, source="upload")
+        if tab == "image":
+            frames_root = _frames_dir(state.output_dir)
+            if frames_root.is_dir():
+                for p in sorted(frames_root.glob("frame_*.png"), key=lambda x: x.stat().st_mtime, reverse=True):
+                    push(
+                        path=p,
+                        kind="image",
+                        name=p.name,
+                        source="frame",
+                        thumb_url=f"/api/frames/files/{p.name}",
+                    )
+
+    elif tab == "renders":
+        for clip in sorted(
+            state.clips.values(),
+            key=lambda c: str(c.created_at or ""),
+            reverse=True,
+        ):
+            if clip.status != RunStatus.DONE.value or not clip.filename:
+                continue
+            path = state.output_dir / clip.filename
+            if not path.is_file():
+                continue
+            name = _clip_display_name(clip)
+            if q and q not in name.lower() and q not in clip.filename.lower():
+                continue
+            rows.append(
+                {
+                    "id": clip.id,
+                    "path": str(path),
+                    "name": name,
+                    "kind": "video",
+                    "source": "render",
+                    "created_at": clip.created_at or "",
+                    "duration_s": clip.duration_seconds,
+                    "thumb_url": None,
+                    "video_url": clip.video_url or state.clip_url(clip.filename),
+                    "media_url": clip.video_url or state.clip_url(clip.filename),
+                    "clip_id": clip.id,
+                }
+            )
+
+    return rows
+
+
+def _clip_display_name(clip: ClipRecord) -> str:
+    prompt = (clip.prompt or "").strip()
+    if prompt:
+        short = prompt.replace("\n", " ")
+        return short if len(short) <= 48 else short[:45] + "…"
+    return clip.filename or clip.id
 
 
 def _clip_settings_from_body(body: dict[str, Any]) -> dict[str, Any]:
@@ -2142,6 +2322,15 @@ def create_app(
             return await _save_upload_file(request, state.upload_dir, kind=kind)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+
+    @app.get("/api/library")
+    async def library_list(kind: str = "image", q: str = ""):
+        """Continuity-style media picker listing (uploads / frames / renders)."""
+        tab = (kind or "image").strip().lower()
+        if tab not in ("image", "video", "audio", "renders"):
+            raise HTTPException(400, f"unsupported library tab: {tab}")
+        items = await asyncio.to_thread(list_library_assets, state, tab=tab, query=q)
+        return {"kind": tab, "items": items, "count": len(items)}
 
     @app.get("/api/media")
     async def serve_media(path: str = ""):

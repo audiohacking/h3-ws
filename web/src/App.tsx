@@ -14,7 +14,7 @@ import { RefinePanel } from "./components/composer/RefinePanel";
 import { ProjectSwitcher, type Project } from "./components/ProjectSwitcher";
 import { compilePrompt } from "./compile";
 import { leadWithStyle } from "./styleAtlas";
-import type { CastMediaType, CastMember, CastMedia, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, PillOption, ProgressState, QualityPreset, ReferenceItem, RefineSettingsPublic, RoutingMode, SceneQueueItem } from "./types";
+import type { CastMediaType, CastMember, CastMedia, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, PillOption, ProgressState, QualityPreset, ReferenceItem, RefineSettingsPublic, RefKind, RoutingMode, SceneQueueItem } from "./types";
 
 const H3_DEFAULT_STEPS = 20;
 const H3_DEFAULT_LAYERS = 50;
@@ -1098,52 +1098,29 @@ export default function App() {
     setClipMultiplier(1);
   }
 
-  async function addImageRef(file: File) {
-    const up = await uploadFile(file, "image");
+  async function addFromLibrary(
+    items: Array<{
+      kind: RefKind;
+      path: string;
+      name: string;
+      durationS?: number;
+      previewUrl?: string;
+    }>,
+  ) {
+    if (items.length === 0) return;
     handleRefsChange([
       ...refs,
-      {
+      ...items.map((item) => ({
         id: generateId(),
-        kind: "image",
-        path: up.path,
-        name: file.name,
-        enabled: true,
-        durationS: up.durationS,
-        previewUrl: URL.createObjectURL(file),
-        refSize: "max",
-      },
-    ]);
-  }
-
-  async function addVideoRef(file: File, kind: "video" | "silent_video" | "video_audio") {
-    const up = await uploadFile(file, "video");
-    handleRefsChange([
-      ...refs,
-      {
-        id: generateId(),
-        kind,
-        path: up.path,
-        name: file.name,
-        enabled: true,
-        durationS: up.durationS,
-        refSize: "max",
-      },
-    ]);
-  }
-
-  async function addAudioRef(file: File) {
-    const up = await uploadFile(file, "audio");
-    handleRefsChange([
-      ...refs,
-      {
-        id: generateId(),
-        kind: "audio",
-        path: up.path,
-        name: file.name,
-        enabled: true,
-        durationS: up.durationS,
-        refSize: "max",
-      },
+        kind: item.kind,
+        path: item.path,
+        name: item.name,
+        enabled: true as const,
+        durationS: item.durationS,
+        previewUrl: item.previewUrl,
+        refSize: "max" as const,
+        source: "library" as const,
+      })),
     ]);
   }
 
@@ -1709,9 +1686,8 @@ export default function App() {
               compiled={compiled}
               refs={routing === "fl2va" ? [] : refs}
               onRefsChange={handleRefsChange}
-              onAddImage={(file) => void addImageRef(file)}
-              onAddVideo={(file, kind) => void addVideoRef(file, kind)}
-              onAddAudio={(file) => void addAudioRef(file)}
+              onUpload={async (file, kind) => uploadFile(file, kind)}
+              onAddFromLibrary={(items) => void addFromLibrary(items)}
               onAddVideoAudio={(video, audio) => void addVideoAudioRef(video, audio)}
               onClearComposer={() => {
                 setPrompt("");

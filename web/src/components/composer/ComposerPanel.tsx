@@ -22,9 +22,18 @@ export type ComposerPanelProps = {
   compiled: CompileResult;
   refs: ReferenceItem[];
   onRefsChange: (refs: ReferenceItem[]) => void;
-  onAddImage: (file: File) => void;
-  onAddVideo: (file: File, kind: "video" | "silent_video" | "video_audio") => void;
-  onAddAudio: (file: File) => void;
+  onUpload: (file: File, kind: "image" | "video" | "audio") => Promise<{
+    path: string;
+    durationS?: number;
+    filename?: string;
+  }>;
+  onAddFromLibrary: (items: Array<{
+    kind: import("../../types").RefKind;
+    path: string;
+    name: string;
+    durationS?: number;
+    previewUrl?: string;
+  }>) => void;
   onAddVideoAudio: (video: File, audio: File) => void;
   onClearComposer: () => void;
   onOpenLora: () => void;
@@ -156,9 +165,9 @@ export function ComposerPanel(props: ComposerPanelProps) {
       <ComposerRail
         disabled={busy}
         loraCount={props.loraCount}
-        onAddImage={props.onAddImage}
-        onAddVideo={props.onAddVideo}
-        onAddAudio={props.onAddAudio}
+        refs={refs}
+        onUpload={props.onUpload}
+        onAddFromLibrary={props.onAddFromLibrary}
         onAddVideoAudio={props.onAddVideoAudio}
         onOpenLora={props.onOpenLora}
         onRefine={props.onRefine}

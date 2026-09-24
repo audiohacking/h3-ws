@@ -1,4 +1,6 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
+import { MediaLibraryModal, type LibraryTab } from "./MediaLibraryModal";
+import type { RefKind, ReferenceItem } from "../../types";
 
 type VideoKind = "video" | "silent_video" | "video_audio";
 
@@ -11,9 +13,20 @@ type Props = {
   refineEnabled?: boolean;
   onRefine?: () => void;
   onOpenFeatures?: () => void;
-  onAddImage: (file: File) => void;
-  onAddVideo: (file: File, kind: VideoKind) => void;
-  onAddAudio: (file: File) => void;
+  refs: ReferenceItem[];
+  onUpload: (file: File, kind: "image" | "video" | "audio") => Promise<{
+    path: string;
+    durationS?: number;
+    filename?: string;
+  }>;
+  onAddFromLibrary: (items: Array<{
+    kind: RefKind;
+    path: string;
+    name: string;
+    durationS?: number;
+    previewUrl?: string;
+  }>) => void;
+  /** Kept for video+replacement-audio two-file flow from the menu. */
   onAddVideoAudio: (video: File, audio: File) => void;
   onOpenLora: () => void;
   onClear: () => void;
@@ -28,27 +41,29 @@ export function ComposerRail({
   refineEnabled,
   onRefine,
   onOpenFeatures,
-  onAddImage,
-  onAddVideo,
-  onAddAudio,
+  refs,
+  onUpload,
+  onAddFromLibrary,
   onAddVideoAudio,
   onOpenLora,
   onClear,
 }: Props) {
-  const imageRef = useRef<HTMLInputElement>(null);
-  const videoRef = useRef<HTMLInputElement>(null);
-  const silentRef = useRef<HTMLInputElement>(null);
-  const videoAudioVideoRef = useRef<HTMLInputElement>(null);
-  const videoAudioAudioRef = useRef<HTMLInputElement>(null);
-  const audioRef = useRef<HTMLInputElement>(null);
-  const pendingVideo = useRef<File | null>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>("image");
+  const [videoAttachKind, setVideoAttachKind] = useState<"video" | "silent_video">("video");
   const [videoMenu, setVideoMenu] = useState(false);
-  const videoKind = useRef<VideoKind>("video");
+
+  function openLibrary(tab: LibraryTab, attach: "video" | "silent_video" = "video") {
+    setLibraryTab(tab);
+    setVideoAttachKind(attach);
+    setLibraryOpen(true);
+    setVideoMenu(false);
+  }
 
   return (
     <div className="composer-rail">
       <div className="composer-rail__group">
-        <button type="button" className="rail-btn" disabled={disabled} onClick={() => imageRef.current?.click()}>
+        <button type="button" className="rail-btn" disabled={disabled} onClick={() => openLibrary("image")}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
             <rect x="3" y="5" width="18" height="14" rx="2" />
             <circle cx="8.5" cy="10" r="1.5" />
@@ -71,31 +86,36 @@ export function ComposerRail({
           </button>
           {videoMenu && (
             <div className="rail-menu">
-              <button
-                type="button"
-                onClick={() => {
-                  videoKind.current = "video";
-                  setVideoMenu(false);
-                  videoRef.current?.click();
-                }}
-              >
+              <button type="button" onClick={() => openLibrary("video", "video")}>
                 Video (keep audio)
               </button>
-              <button
-                type="button"
-                onClick={() => {
-                  videoKind.current = "silent_video";
-                  setVideoMenu(false);
-                  silentRef.current?.click();
-                }}
-              >
-                Silent video
+              <button type="button" onClick={() => openLibrary("video", "silent_video")}>
+                Silent video / from library
+              </button>
+              <button type="button" onClick={() => openLibrary("renders", "silent_video")}>
+                From renders
               </button>
               <button
                 type="button"
                 onClick={() => {
                   setVideoMenu(false);
-                  videoAudioVideoRef.current?.click();
+                  // Two-file pick stays as native inputs via parent helper.
+                  const v = document.createElement("input");
+                  v.type = "file";
+                  v.accept = "video/*";
+                  v.onchange = () => {
+                    const video = v.files?.[0];
+                    if (!video) return;
+                    const a = document.createElement("input");
+                    a.type = "file";
+                    a.accept = "audio/*";
+                    a.onchange = () => {
+                      const audio = a.files?.[0];
+                      if (audio) onAddVideoAudio(video, audio);
+                    };
+                    a.click();
+                  };
+                  v.click();
                 }}
               >
                 Video + replacement audio
@@ -103,7 +123,7 @@ export function ComposerRail({
             </div>
           )}
         </div>
-        <button type="button" className="rail-btn" disabled={disabled} onClick={() => audioRef.current?.click()}>
+        <button type="button" className="rail-btn" disabled={disabled} onClick={() => openLibrary("audio")}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
             <path d="M9 18V6l12-2v12" />
             <circle cx="6" cy="18" r="2.5" />
@@ -152,40 +172,18 @@ export function ComposerRail({
       </div>
       <div className="composer-rail__group">{presetSlot}</div>
 
-      <input ref={imageRef} type="file" accept="image/*" hidden onChange={(e) => {
-        const f = e.target.files?.[0];
-        e.target.value = "";
-        if (f) onAddImage(f);
-      }} />
-      <input ref={videoRef} type="file" accept="video/*" hidden onChange={(e) => {
-        const f = e.target.files?.[0];
-        e.target.value = "";
-        if (f) onAddVideo(f, "video");
-      }} />
-      <input ref={silentRef} type="file" accept="video/*" hidden onChange={(e) => {
-        const f = e.target.files?.[0];
-        e.target.value = "";
-        if (f) onAddVideo(f, "silent_video");
-      }} />
-      <input ref={videoAudioVideoRef} type="file" accept="video/*" hidden onChange={(e) => {
-        const f = e.target.files?.[0];
-        e.target.value = "";
-        if (!f) return;
-        pendingVideo.current = f;
-        videoAudioAudioRef.current?.click();
-      }} />
-      <input ref={videoAudioAudioRef} type="file" accept="audio/*" hidden onChange={(e) => {
-        const f = e.target.files?.[0];
-        e.target.value = "";
-        const video = pendingVideo.current;
-        pendingVideo.current = null;
-        if (f && video) onAddVideoAudio(video, f);
-      }} />
-      <input ref={audioRef} type="file" accept="audio/*" hidden onChange={(e) => {
-        const f = e.target.files?.[0];
-        e.target.value = "";
-        if (f) onAddAudio(f);
-      }} />
+      <MediaLibraryModal
+        open={libraryOpen}
+        initialTab={libraryTab}
+        videoAttachKind={videoAttachKind}
+        refs={refs}
+        disabled={disabled}
+        onClose={() => setLibraryOpen(false)}
+        onUpload={onUpload}
+        onAdd={onAddFromLibrary}
+      />
     </div>
   );
 }
+
+export type { VideoKind };

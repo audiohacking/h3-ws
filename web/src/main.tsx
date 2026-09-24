@@ -14,6 +14,7 @@ import "./styles/cast.css";
 import "./styles/style-atlas.css";
 import "./styles/composer.css";
 import "./styles/picture.css";
+import "./styles/media-library.css";
 import "./index.css";
 
 createRoot(document.getElementById("root")!).render(
