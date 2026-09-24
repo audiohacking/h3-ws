@@ -1,32 +1,55 @@
 # h3-ws
 
-Local **MiniMax-H3** video+audio generation on Apple Silicon. Native [h3.c](https://github.com/antirez/h3.c) (Metal) with a browser UI.
+Local **MiniMax-H3** video+audio generation on Apple Silicon (Metal), driven by native [h3.c](https://github.com/antirez/h3.c).
 
-Open **http://127.0.0.1:8765/** after starting the server.
+## Download (macOS · Apple Silicon)
 
-The UI starts in **Ref2VA** mode (add an image/video/audio reference to generate). See
-[`DEV.md`](DEV.md) for the current development state and [`ROADMAP.md`](ROADMAP.md) for the plan.
+**End users:** install the prebuilt app from GitHub Releases — you do not need to clone or compile.
 
-## Download (macOS app)
+1. Open [**Releases**](https://github.com/lmangani/h3-ws/releases) and download the latest **H3-WS-macOS.dmg** (or `.app` zip if attached).
+2. Open the DMG and drag **H3-WS.app** into Applications.
+3. First launch: **right-click → Open → Open** (ad-hoc signed / not notarized — Gatekeeper may warn; this is expected, not “damaged”).
+4. **Weights:** on first launch, point the dialog at an existing `models/MiniMax-H3` tree from a previous clone if you have one (nothing is re-downloaded). Otherwise use the in-app **Models** panel to fetch FL2VA (~134 GB). Choice is saved in `~/Library/Application Support/H3-WS/config.json`.
 
-Apple Silicon only. Grab **H3-WS-macOS.dmg** from [GitHub Releases](https://github.com/lmangani/h3-ws/releases).
+Logs: `~/Library/Logs/H3-WS/`.
 
-1. Drag **H3-WS.app** into Applications.
-2. First open: **right-click → Open → Open** (ad-hoc signed; not notarized — expected Gatekeeper prompt, not “damaged”).
-3. **Already have weights from a git clone?** On first launch, point the dialog at your existing `models/MiniMax-H3` folder (or the clone root). The app will reuse them — nothing is re-downloaded. Choice is saved in `~/Library/Application Support/H3-WS/config.json`.
-4. Otherwise download FL2VA (~134 GB) from the in-app Models UI.
+See [`ROADMAP.md`](ROADMAP.md) for the product plan. Contributors: [`DEV.md`](DEV.md) and the **Developers** section below.
 
-Logs: `~/Library/Logs/H3-WS/`. Dev checkout users can still use `Start H3-WS.command` / `python server.py`.
+## Using the app
 
-## Requirements
+The UI opens in **Ref2VA** mode (add an image / video / audio reference to enable Generate). Switch modes as needed.
+
+Prompts should describe scene, action, camera, look, and audio. What you type is what H3 sees — there is no cloud rewriter.
+
+| Mode | Use |
+|------|-----|
+| Text to video+audio | Prompt only |
+| First / last / first+last frame | Image anchors |
+| Ordered references (Ref2VA) | Image, silent video, video, video+audio, and/or audio |
+
+First/last-frame anchors cannot be mixed with Ref2VA references. For references, prompt with `Picture 1`, `Video 1`, `Audio 1` in list order. Standalone audio must accompany an image or video (≤9 images, ≤3 videos, ≤3 audio).
+
+**Quality:** Four-step · Aggressive · Fast (default) · Balanced · Close.
+
+**Canvas** (dropdown, grouped): **1:1** 256×256 preview, 512×512 (safest), 512×512 with 384 or 320 internal, 768×768. **16:9** 1024×576 (exact) and 1248×704 (largest under the cap). **7:4** 1344×768 max landscape. **4:3** 1024×768. **5:4** 960×768. **4:5** 768×960 Instagram/social. **3:4** 768×1024. **9:16** 576×1024 (exact Stories/Reels/TikTok) and 704×1248 (largest). **4:7** 768×1344 max portrait. Each side is a multiple of 32; pixel count cannot exceed 768×1344. H3-Base is a 768p model; 512×512 is the usual working size.
+
+Output is 24 fps video with 32 kHz stereo audio. Clip length is any integer **1s–15s** (each snapped up to a legal H3 frame count `5+17n` @ 24 fps).
+
+---
+
+## Developers
+
+Building and running from a git checkout is for development, packaging, and CI. Day-to-day use should prefer the Release DMG above.
+
+### Requirements
 
 - Apple Silicon Mac (Metal)
-- Python 3.12+ with packages from `requirements.txt` (PyAV `av` for all media, including the h3.c mux/decode shim)
-- Node.js 18+ (to build the UI)
+- Python 3.12+ (`requirements.txt`; PyAV `av` for all media, including the h3.c mux/decode shim)
+- Node.js 18+ (Web UI)
 - Xcode command-line tools (`make`)
 - Enough unified memory for the model (~40 GB peak). Use `--ssd-streaming` if you have under ~64 GB.
 
-## Install (from source)
+### Install from source
 
 ```bash
 git clone --recurse-submodules https://github.com/lmangani/h3-ws.git
@@ -45,39 +68,32 @@ python scripts/download_model.py          # ~134 GB FL2VA only (enough to genera
 cd web && npm install && npm run build && cd ..
 ```
 
-Do **not** `hf download MiniMaxAI/MiniMax-H3` without filters. The Hugging Face repo is ~464 GB: native `FL2VA/` + `Ref2VA/` plus a second Diffusers copy at the repo root (`transformer/`, `transformer_ref/`, `text_encoder/`, `vae/`). There are no extra quantizations in that repo. h3.c only loads the native trees.
+Do **not** `hf download MiniMaxAI/MiniMax-H3` without filters. The Hugging Face repo is ~464 GB: native `FL2VA/` + `Ref2VA/` plus a Diffusers copy at the repo root that h3.c never opens. Default `python scripts/download_model.py` fetches **FL2VA only** (~134 GB). Pass `--with-ref2va` for the extra ~62 GB Ref2VA transformer. Existing files are never deleted; a second run resumes.
 
-Default `python scripts/download_model.py` fetches **FL2VA only** (~134 GB: Qwen encoder + DiT + VAEs). Pass `--with-ref2va` for the extra ~62 GB Ref2VA transformer. Existing files are never deleted; a second run resumes and skips what is already on disk. If a previous unfiltered download already saved root `text_encoder/`, that copy is reused for `FL2VA/text_encoder` instead of downloading it again.
-
-## Run
+### Run (dev server)
 
 ```bash
 source .venv/bin/activate
 python server.py
 ```
 
-Or double-click `Start H3-WS.command`. For a Dock app with crash-restart, use the DMG build above (`python h3_desktop.py` from a checkout also works if `pywebview` is installed).
+Then open **http://127.0.0.1:8765/**. Or double-click `Start H3-WS.command` / `H3-WS.command`. For an embedded window with crash-restart: `python h3_desktop.py` (needs `pywebview`; see `requirements_macos.txt`).
 
-Default generate is 512×512, **1s** (22 frames), **fast** quality (token-reduction + 384 internal render). Lower RAM if a run is killed for memory (this makes denoise slower):
+Default generate is 512×512, **1s** (22 frames), **fast** quality. Lower RAM if a run is killed for memory (slower denoise):
 
 ```bash
 python server.py --ssd-streaming
 ```
 
-## Generate
+### Package the macOS `.app` locally
 
-Prompts should describe scene, action, camera, look, and audio. What you type is what H3 sees — there is no cloud rewriter.
+```bash
+pip install -r requirements_macos.txt
+python -m PyInstaller H3WS.spec --clean --noconfirm
+cp dist/H3-WS.app/Contents/MacOS/H3-WS_bin dist/H3-WS.app/Contents/MacOS/H3-WS
+chmod +x dist/H3-WS.app/Contents/MacOS/H3-WS
+./build/macos/codesign.sh dist/H3-WS.app
+open dist/H3-WS.app
+```
 
-| Mode | Use |
-|------|-----|
-| Text to video+audio | Prompt only |
-| First / last / first+last frame | Image anchors |
-| Ordered references (Ref2VA) | Image, silent video, video, video+audio, and/or audio |
-
-First/last-frame anchors cannot be mixed with Ref2VA references. For references, prompt with `Picture 1`, `Video 1`, `Audio 1` in list order. Standalone audio must accompany an image or video (≤9 images, ≤3 videos, ≤3 audio).
-
-**Quality:** Four-step · Aggressive · Fast (default) · Balanced · Close.
-
-**Canvas** (dropdown, grouped): **1:1** 256×256 preview, 512×512 (safest), 512×512 with 384 or 320 internal, 768×768. **16:9** 1024×576 (exact) and 1248×704 (largest under the cap). **7:4** 1344×768 max landscape. **4:3** 1024×768. **5:4** 960×768. **4:5** 768×960 Instagram/social. **3:4** 768×1024. **9:16** 576×1024 (exact Stories/Reels/TikTok) and 704×1248 (largest). **4:7** 768×1344 max portrait. Each side is a multiple of 32; pixel count cannot exceed 768×1344. True 768p 16:9 (1365×768) does not fit that cap. H3-Base is a 768p model; 512×512 is the usual working size.
-
-Output is 24 fps video with 32 kHz stereo audio. Duration picks are **1s, 2s, 5s, 10s, 15s** (each snapped to a legal H3 frame count).
+CI builds the DMG on **Release** publish or via **workflow_dispatch** (`.github/workflows/build-release.yml`) and uploads it to that Release.
