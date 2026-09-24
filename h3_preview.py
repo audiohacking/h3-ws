@@ -55,8 +55,31 @@ def default_taeh3_path() -> Path:
 
 
 def taeh3_available(path: Path | None = None) -> bool:
+    """True when the weight file is on disk (download status / --status)."""
     p = Path(path) if path is not None else default_taeh3_path()
     return p.is_file() and p.stat().st_size > 1_000_000
+
+
+def taeh3_decode_ready(path: Path | None = None) -> bool:
+    """True when live preview can actually run — weights + torch + safetensors.
+
+    Arming ``--preview-latent`` without these deps forces a one-shot h3 spawn
+    and kills the warm FL2VA session for nothing.
+    """
+    if not taeh3_available(path):
+        return False
+    if not TAEHV_MODULE.is_file():
+        return False
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("torch") is None:
+            return False
+        if importlib.util.find_spec("safetensors") is None:
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def cleanup_preview_artifacts(*paths: Path | None) -> None:
@@ -337,7 +360,7 @@ class LatentPreviewWatcher:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_step: int | None = None
-        self._enabled = taeh3_available(self.checkpoint)
+        self._enabled = taeh3_decode_ready(self.checkpoint)
         self.last_served: Path | None = None
         self.last_mime: str | None = None
 
@@ -382,10 +405,18 @@ class LatentPreviewWatcher:
                         name = str(info.get("file") or f"step_{step:04d}.bin")
                         bin_path = self.dump_dir / name
                         if bin_path.is_file():
-                            self._decode_step(bin_path, info)
+                            # Advance even on failure so a bad step is not
+                            # retried every poll for the whole denoise.
                             self._last_step = step
+                            try:
+                                self._decode_step(bin_path, info)
+                            except Exception:
+                                log.exception(
+                                    "taeh3 preview decode failed at step %s", step
+                                )
+                                _unlink_consumed_bins(self.dump_dir, keep_step=step)
             except Exception:
-                log.exception("taeh3 preview decode failed")
+                log.exception("taeh3 preview watcher tick failed")
             self._stop.wait(self.poll_s)
 
     def _decode_step(self, bin_path: Path, info: dict[str, Any]) -> None:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from h3_preview import H3_LATENT_MAGIC, read_latent_bin, taeh3_available
+from h3_preview import H3_LATENT_MAGIC, read_latent_bin, taeh3_available, taeh3_decode_ready
 
 
 class TestLatentDump(unittest.TestCase):
@@ -33,6 +33,10 @@ class TestLatentDump(unittest.TestCase):
 
     def test_taeh3_availability_is_bool(self) -> None:
         self.assertIsInstance(taeh3_available(), bool)
+        self.assertIsInstance(taeh3_decode_ready(), bool)
+        # Weights alone are not enough to arm --preview-latent.
+        if not taeh3_available():
+            self.assertFalse(taeh3_decode_ready())
 
 
 if __name__ == "__main__":

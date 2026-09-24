@@ -64,7 +64,12 @@ from h3_media import (
     validate_canvas,
 )
 from h3_paths import REPO_ROOT, configure_scratch_root, mk_scratch_dir
-from h3_preview import LatentPreviewWatcher, cleanup_preview_artifacts, taeh3_available
+from h3_preview import (
+    LatentPreviewWatcher,
+    cleanup_preview_artifacts,
+    taeh3_available,
+    taeh3_decode_ready,
+)
 from h3_refine import (
     merge_refine_settings,
     refine_prompt,
@@ -1100,7 +1105,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
             preview_dir: Path | None = None
             preview_stem = state.output_dir / ".preview" / f"{run_id}_{clip_id}"
             watcher: LatentPreviewWatcher | None = None
-            if taeh3_available():
+            if taeh3_decode_ready():
                 preview_dir = Path(mk_scratch_dir("h3_prev_"))
                 req.preview_latent_dir = preview_dir
 
