@@ -2,6 +2,9 @@
 
 Local **MiniMax-H3** video+audio generation on Apple Silicon (Metal), driven by native [h3.c](https://github.com/antirez/h3.c).
 
+<img width="900" height="581" alt="image" src="https://github.com/user-attachments/assets/8d26e446-f881-404a-86e7-d1e7b12fae93" />
+
+
 ## Download (macOS · Apple Silicon)
 
 **End users:** install the prebuilt app from GitHub Releases — you do not need to clone or compile.
