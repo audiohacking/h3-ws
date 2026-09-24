@@ -1,0 +1,19 @@
+---
+description: Continuity segment editors — trim + crop for every ref kind
+alwaysApply: true
+---
+
+# Continuity segment controls
+
+Every reference capsule has a **segment** door, matching ComfyUI-Continuity-Mac:
+
+| Kind | Temporal (`TrimEditor` / `trim.js`) | Spatial (`PictureEditor` / `picture.js`) |
+|------|-------------------------------------|------------------------------------------|
+| image | — | crop / turn / mirror / aspect lock |
+| audio | in–out + waveform | — |
+| video / silent_video / video_audio | in–out + waveform + track switch | Crop button → same picture editor |
+
+- Trim blob: `{ start, end }` seconds (null = whole).
+- Crop blob: `{ x, y, w, h, turn, mirror }` fractions after turn/mirror (`h3_crop.py`).
+- Materialize under `upload_dir/edited/` before generate; validate audio limits on the trimmed files.
+- Do not invent a third editor — port Continuity UX (labels: "whole", "0:02–0:07", "cropped · ↻ 90°").

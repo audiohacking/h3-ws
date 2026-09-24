@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { clipDisplayPrompt, snapshotFromClip } from "./clipEditor";
+import { buildGenerationSnapshot, clipDisplayPrompt, composerIsEmpty, generationFromClip } from "./clipEditor";
 import { applyProgressEvent } from "./progress";
 import { captureVideoFrame, formatVideoTime } from "./frameCapture";
 import { refsAreValid } from "./components/composer/RefListEnhanced";
@@ -9,10 +9,12 @@ import { LoraModal } from "./components/lora/LoraModal";
 import { TimelineStrip } from "./components/timeline/TimelineStrip";
 import { ModelsManager } from "./components/media/ModelsManager";
 import { ComposerPanel } from "./components/composer/ComposerPanel";
+import { FeaturesPopup } from "./components/composer/FeaturesPopup";
+import { RefinePanel } from "./components/composer/RefinePanel";
 import { ProjectSwitcher, type Project } from "./components/ProjectSwitcher";
 import { compilePrompt } from "./compile";
 import { leadWithStyle } from "./styleAtlas";
-import type { CastMediaType, CastMember, CastMedia, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, PillOption, ProgressState, QualityPreset, ReferenceItem, RoutingMode, SceneQueueItem } from "./types";
+import type { CastMediaType, CastMember, CastMedia, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, PillOption, ProgressState, QualityPreset, ReferenceItem, RefineSettingsPublic, RoutingMode, SceneQueueItem } from "./types";
 
 const H3_DEFAULT_STEPS = 20;
 const H3_DEFAULT_LAYERS = 50;
@@ -254,6 +256,7 @@ export default function App() {
   const [seed, setSeed] = useState("");
   const [ssdStreaming, setSsdStreaming] = useState(false);
   const [tokenReduction, setTokenReduction] = useState(true);
+  const [upscale, setUpscale] = useState(false);
   const [loraPresetIds, setLoraPresetIds] = useState<string[]>([]);
   const [loraPresets, setLoraPresets] = useState<LoraPreset[]>([]);
   const [addingCustomLora, setAddingCustomLora] = useState(false);
@@ -291,6 +294,20 @@ export default function App() {
   const [libraryOpen, setLibraryOpen] = useState(true);
   const [framesOpen, setFramesOpen] = useState(true);
   const [activeStyleId, setActiveStyleId] = useState<string | null>(null);
+  const [livePreviewUrl, setLivePreviewUrl] = useState<string | null>(null);
+  const [livePreviewMime, setLivePreviewMime] = useState<string>("image/webp");
+  const [refineSettings, setRefineSettings] = useState<RefineSettingsPublic>({
+    enabled: false,
+    base_url: "",
+    model: "",
+    key_set: false,
+  });
+  const [featuresOpen, setFeaturesOpen] = useState(false);
+  const [refineOpen, setRefineOpen] = useState(false);
+  const [refineBusy, setRefineBusy] = useState(false);
+  const [refineError, setRefineError] = useState<string | null>(null);
+  const [refineDraft, setRefineDraft] = useState("");
+  const [refineOriginal, setRefineOriginal] = useState("");
   const playerVideoRef = useRef<HTMLVideoElement>(null);
   const runEventSourceRef = useRef<EventSource | null>(null);
   const clipsRef = useRef<Clip[]>([]);
@@ -372,6 +389,7 @@ export default function App() {
         setTokenReduction(fields.tokenReduction);
         setSsdStreaming(false);
         setLoraPresets(cfg.lora_presets ?? []);
+        if (cfg.refine) setRefineSettings(cfg.refine);
         const defRes =
           cfg.resolution_presets.find((r) => r.id === "512x512") ??
           cfg.resolution_presets.find(
@@ -415,10 +433,26 @@ export default function App() {
 
   const applyClipSelection = useCallback(
     (clip: Clip) => {
+      if (!config) {
+        selectClipId(clip.id);
+        setChainId(clip.chain_id);
+        return;
+      }
+      const occupied = !composerIsEmpty({ prompt, refs, imagePath, endImagePath });
+      if (occupied) {
+        const ok = window.confirm(
+          "Replace the current composer with this clip’s settings (prompt, references, mode, sampler)?",
+        );
+        if (!ok) {
+          // Still select for playback without stomping the composer.
+          selectClipId(clip.id);
+          setChainId(clip.chain_id);
+          return;
+        }
+      }
       selectClipId(clip.id);
       setChainId(clip.chain_id);
-      if (!config) return;
-      const snap = snapshotFromClip(clip, config, {
+      const snap = generationFromClip(clip, config, {
         numSteps: config.defaults.num_steps,
         layers: config.defaults.layers ?? H3_DEFAULT_LAYERS,
         reuse: config.defaults.reuse ?? H3_DEFAULT_REUSE,
@@ -426,7 +460,11 @@ export default function App() {
       });
       setPrompt(snap.prompt);
       setMode(snap.mode);
-      setRouting(snap.mode === "ref2va" ? "ref2va" : snap.mode === "t2va" ? "auto" : "fl2va");
+      setRouting(
+        snap.routing
+          ?? (snap.mode === "ref2va" ? "ref2va" : snap.mode === "t2va" ? "auto" : "fl2va"),
+      );
+      setSelectedCastIds(snap.selectedCastIds ?? []);
       setResolutionId(snap.resolutionId);
       setDurationId(snap.durationId);
       setClipMultiplier(snap.clipMultiplier);
@@ -435,8 +473,19 @@ export default function App() {
       setReuse(snap.reuse);
       setSeed(snap.seed);
       setQuality(snap.quality);
+      setLoraPresetIds(snap.loraPresetIds ?? []);
+      setTurboEnabled(Boolean(snap.turboEnabled));
+      if (snap.turboTier) setTurboTier(snap.turboTier as TurboTier);
+      setRefs(snap.refs ?? []);
+      setImagePath(snap.imagePath ?? null);
+      setImageName(snap.imagePath ? snap.imagePath.split("/").pop() ?? "start" : null);
+      setEndImagePath(snap.endImagePath ?? null);
+      setEndImageName(snap.endImagePath ? snap.endImagePath.split("/").pop() ?? "end" : null);
+      setTokenReduction(Boolean(snap.tokenReduction));
+      setSsdStreaming(Boolean(snap.ssdStreaming));
+      if (snap.upscale != null) setUpscale(Boolean(snap.upscale));
     },
-    [config, selectClipId],
+    [config, selectClipId, prompt, refs, imagePath, endImagePath],
   );
 
   // Hydrate composer from `?id=` once clips+config are ready; ignore missing ids.
@@ -997,6 +1046,27 @@ export default function App() {
     );
   }
 
+  async function upscaleLibraryClip(clip: Clip) {
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/api/clips/${clip.id}/upscale`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scale: 2 }),
+      });
+      if (!r.ok) {
+        const body = await r.json().catch(() => null);
+        throw new Error((body && body.detail) || "Upscale failed");
+      }
+      const data = await r.json();
+      if (data.clip) setClips((prev) => [data.clip as Clip, ...prev]);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveCurrentFrame() {
     const video = playerVideoRef.current;
     if (!video || !activeClip) return;
@@ -1173,6 +1243,8 @@ export default function App() {
         setActiveRunId(null);
         setBusy(false);
         setProgress(null);
+        setLivePreviewUrl(null);
+        setLivePreviewMime("image/webp");
         if (err) {
           reject(new Error(err));
           return;
@@ -1187,13 +1259,36 @@ export default function App() {
           setProgress((prev) => applyProgressEvent(prev, msg));
           return;
         }
+        if (msg.type === "preview") {
+          const url = String(msg.url ?? "");
+          if (url) {
+            setLivePreviewUrl(url);
+            setLivePreviewMime(String(msg.mime ?? "image/webp"));
+          }
+          const step = msg.step != null ? Number(msg.step) : null;
+          const total = msg.total != null ? Number(msg.total) : null;
+          if (step != null && total != null && total > 0) {
+            setProgress((prev) => ({
+              phase: prev?.phase ?? "generating",
+              message: `Preview ${step}/${total}`,
+              pct: Math.round((100 * step) / total),
+              step,
+              total,
+            }));
+          }
+          return;
+        }
         if (msg.type === "clip_started") {
+          setLivePreviewUrl(null);
+          setLivePreviewMime("image/webp");
           setProgress({
             phase: "generating",
             message: `Clip ${Number(msg.index ?? 0) + 1}/${Number(msg.total ?? 1)}`,
           });
         }
         if (msg.type === "clip_done" || msg.type === "merged") {
+          setLivePreviewUrl(null);
+          setLivePreviewMime("image/webp");
           const clipId = String(msg.clip_id ?? "");
           fetchClips(runChainId).then((chainClips) => {
             setClips((prev) => replaceChainClips(prev, runChainId, chainClips));
@@ -1222,6 +1317,8 @@ export default function App() {
   async function postGenerate(body: Record<string, unknown>): Promise<void> {
     setError(null);
     setBusy(true);
+    setLivePreviewUrl(null);
+    setLivePreviewMime("image/webp");
     setProgress({ phase: "starting", message: "Submitting…" });
     const r = await fetch(`${API}/api/generate`, {
       method: "POST",
@@ -1265,6 +1362,9 @@ export default function App() {
     loraPresetIds: string[];
     imagePath: string | null;
     endImagePath: string | null;
+    upscale?: boolean;
+    /** User-facing composer state for library restore (kept separate from compiled prompt). */
+    generation?: ReturnType<typeof buildGenerationSnapshot>;
   }): Record<string, unknown> {
     const res = config?.resolution_presets.find((p) => p.id === opts.resolutionId);
     const dur = config?.duration_presets.find((d) => d.id === opts.durationId);
@@ -1292,11 +1392,13 @@ export default function App() {
       autoconcat: multi,
       ssd_streaming: opts.loraPresetIds.length ? false : opts.ssdStreaming,
       token_reduction: tokenLocked ? false : opts.tokenReduction,
+      upscale: opts.upscale ? 2 : undefined,
       loras: loraPresets
         .filter((p) => opts.loraPresetIds.includes(p.id))
         .map((p) => ({ id: p.id, spec: p.spec, scale: p.scale })),
       project_id: activeProjectId || undefined,
     };
+    if (opts.generation) body.generation = opts.generation;
     if (res?.render_width) body.render_width = res.render_width;
     if (res?.render_height) body.render_height = res.render_height;
     if (opts.seed.trim() !== "") body.seed = Number(opts.seed);
@@ -1307,6 +1409,8 @@ export default function App() {
         name: r.name,
         audio_path: r.audioPath || undefined,
         ref_size: r.refSize ?? "max",
+        ...(r.trim ? { trim: { start: r.trim.start, end: r.trim.end } } : {}),
+        ...(r.crop ? { crop: r.crop } : {}),
       }));
     } else {
       if (IMAGE_MODES.has(opts.modeHint) && opts.imagePath) body.image_path = opts.imagePath;
@@ -1351,6 +1455,8 @@ export default function App() {
         loraPresetIds: scene.loraPresetIds,
         imagePath: scene.imagePath ?? null,
         endImagePath: scene.endImagePath ?? null,
+        upscale,
+        generation: buildGenerationSnapshot({ ...scene, upscale }),
       }),
     );
   }
@@ -1377,12 +1483,72 @@ export default function App() {
           loraPresetIds,
           imagePath,
           endImagePath,
+          upscale,
+          generation: buildGenerationSnapshot({
+            prompt,
+            mode: compiled.modeHint,
+            routing,
+            selectedCastIds,
+            quality,
+            resolutionId,
+            durationId,
+            numSteps,
+            layers,
+            reuse,
+            seed,
+            loraPresetIds,
+            turboEnabled,
+            turboTier,
+            refs,
+            imagePath,
+            endImagePath,
+            clipMultiplier,
+            tokenReduction,
+            ssdStreaming,
+            upscale,
+          }),
         }),
       );
     } catch (e) {
       setError(String(e));
       setBusy(false);
       setProgress(null);
+      setLivePreviewUrl(null);
+      setLivePreviewMime("image/webp");
+    }
+  }
+
+  async function runRefine() {
+    if (!refineSettings.enabled || !refineSettings.base_url.trim()) return;
+    const original = prompt;
+    setRefineOriginal(original);
+    setRefineDraft("");
+    setRefineError(null);
+    setRefineOpen(true);
+    setRefineBusy(true);
+    try {
+      const r = await fetch(`${API}/api/refine`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: original,
+          mode: effectiveMode,
+          refs: compiled.refs.map((ref) => ({
+            kind: ref.kind,
+            name: ref.name || ref.path,
+          })),
+        }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(typeof err.detail === "string" ? err.detail : "Refine failed");
+      }
+      const data = (await r.json()) as { refined?: string };
+      setRefineDraft(String(data.refined || ""));
+    } catch (exc) {
+      setRefineError(exc instanceof Error ? exc.message : String(exc));
+    } finally {
+      setRefineBusy(false);
     }
   }
 
@@ -1432,7 +1598,28 @@ export default function App() {
         <div className="app-main">
           <section className="player-section">
             <div className="player-wrap">
-              {activeClip?.video_url ? (
+              {busy && livePreviewUrl ? (
+                livePreviewMime.startsWith("video/") ? (
+                  <video
+                    key={livePreviewUrl}
+                    className="player player--preview"
+                    src={livePreviewUrl}
+                    autoPlay
+                    muted
+                    loop
+                    playsInline
+                    preload="metadata"
+                  />
+                ) : (
+                  /* Continuity-on-Mac default: animated WebP in <img> (GIF-like loop). */
+                  <img
+                    key={livePreviewUrl}
+                    className="player player--preview"
+                    src={livePreviewUrl}
+                    alt="Denoise preview"
+                  />
+                )
+              ) : activeClip?.video_url ? (
                 <video
                   ref={playerVideoRef}
                   className="player"
@@ -1536,6 +1723,11 @@ export default function App() {
                 setSelectedCastIds([]);
               }}
               onOpenLora={() => setLoraModalOpen(true)}
+              onRefine={() => void runRefine()}
+              refineEnabled={
+                refineSettings.enabled && Boolean(refineSettings.base_url.trim())
+              }
+              onOpenFeatures={() => setFeaturesOpen(true)}
               loraCount={loraPresetIds.length}
               loraActivity={loraActivity}
               castMembers={castMembers}
@@ -1626,6 +1818,8 @@ export default function App() {
               ssdStreaming={ssdStreaming}
               ssdLocked={loraPresetIds.length > 0}
               onSsdStreaming={setSsdStreaming}
+              upscale={upscale}
+              onUpscale={setUpscale}
               clipMultiplier={clipMultiplier}
               onClipMultiplier={setClipMultiplier}
               sceneQueue={sceneQueue}
@@ -1699,6 +1893,20 @@ export default function App() {
                 >
                   ×
                 </button>
+                {clip.status === "done" && clip.video_url && (
+                  <button
+                    type="button"
+                    className="library-upscale"
+                    title="Upscale ×2 into a new library clip"
+                    disabled={busy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void upscaleLibraryClip(clip);
+                    }}
+                  >
+                    ↑2
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -1816,6 +2024,34 @@ export default function App() {
           disabled={busy || loraBusy}
         />
       )}
+
+      <FeaturesPopup
+        open={featuresOpen}
+        onClose={() => setFeaturesOpen(false)}
+        api={API}
+        initial={refineSettings}
+        onSaved={setRefineSettings}
+      />
+
+      <RefinePanel
+        open={refineOpen}
+        draft={refineDraft}
+        original={refineOriginal}
+        busy={refineBusy}
+        error={refineError}
+        onDraftChange={setRefineDraft}
+        onUse={() => {
+          if (refineDraft.trim()) setPrompt(refineDraft.trim());
+          setRefineOpen(false);
+        }}
+        onRevert={() => {
+          setRefineDraft(refineOriginal);
+          setPrompt(refineOriginal);
+          setRefineOpen(false);
+        }}
+        onKeep={() => setRefineOpen(false)}
+        onClose={() => setRefineOpen(false)}
+      />
     </div>
   );
 }

@@ -42,13 +42,16 @@ from h3_backend import (
     ram_gb,
     recommend_ssd_streaming,
     ref2va_dir,
+    validate_refs,
 )
 from h3_media import (
     DURATION_PRESETS,
     FPS,
     RESOLUTION_PRESETS,
+    audio_peaks,
     concat_mp4s,
     extract_last_frame,
+    frame_video,
     media_available,
     probe_duration_seconds,
     require_ui_canvas,
@@ -56,9 +59,17 @@ from h3_media import (
     sanitize_filename,
     seconds_to_frames,
     snap_frames,
+    trim_media,
+    upscale_video,
     validate_canvas,
 )
 from h3_paths import REPO_ROOT, configure_scratch_root, mk_scratch_dir
+from h3_preview import LatentPreviewWatcher, cleanup_preview_artifacts, taeh3_available
+from h3_refine import (
+    merge_refine_settings,
+    refine_prompt,
+    refine_settings_public,
+)
 from h3_lora import (
     ensure_lora,
     lora_catalog,
@@ -118,6 +129,9 @@ class ClipRecord:
     quality: Optional[str] = None
     loras: Optional[list[dict[str, Any]]] = None
     project_id: Optional[str] = None
+    # Full composer snapshot so Library can re-run the generation (prompt with
+    # @handles, refs + trim/crop, mode/routing, sampler, LoRAs, anchors…).
+    generation: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -543,6 +557,16 @@ def write_web_settings(output_dir: Path, data: dict[str, Any]) -> None:
     )
 
 
+def _purge_preview_stem(stem: Path) -> None:
+    """Remove served looping preview files for one run/clip stem."""
+    parent = stem.parent
+    if not parent.is_dir():
+        return
+    for sib in parent.glob(stem.name + ".*"):
+        cleanup_preview_artifacts(sib)
+    cleanup_preview_artifacts(stem)
+
+
 def _frames_dir(output_dir: Path) -> Path:
     return output_dir / "frames"
 
@@ -781,12 +805,115 @@ def _resolve_existing_media(state: AppState, raw: str) -> Path:
     raise ValueError(f"reference file not found: {text}")
 
 
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def _resolve_refs(state: AppState, refs: list[Any]) -> list[Any]:
     for item in refs:
         item.path = _resolve_existing_media(state, str(item.path))
         if item.audio_path is not None:
             item.audio_path = _resolve_existing_media(state, str(item.audio_path))
     return refs
+
+
+def _materialize_ref_edits(state: AppState, refs: list[Any]) -> list[Any]:
+    """Apply Continuity trim/crop to copies under upload_dir/edited/ before generate."""
+    if not refs:
+        return refs
+    from h3_crop import apply_still, parse as parse_crop
+
+    edit_dir = state.upload_dir / "edited"
+    edit_dir.mkdir(parents=True, exist_ok=True)
+    for item in refs:
+        kind = (item.kind or "").strip().lower()
+        # Temporal segment first so framing sees the used stretch.
+        if item.has_trim() and kind in ("audio", "silent_video", "video", "video_audio"):
+            start = float(item.trim_start or 0.0)
+            end = float(item.trim_end) if item.trim_end is not None else None
+            suffix = item.path.suffix or (".wav" if kind == "audio" else ".mp4")
+            dest = edit_dir / f"{uuid.uuid4().hex[:10]}_trim{suffix}"
+            item.path = trim_media(item.path, dest, start_s=start, end_s=end)
+            if kind == "video_audio" and item.audio_path is not None:
+                a_suffix = item.audio_path.suffix or ".wav"
+                a_dest = edit_dir / f"{uuid.uuid4().hex[:10]}_trim_a{a_suffix}"
+                item.audio_path = trim_media(
+                    item.audio_path, a_dest, start_s=start, end_s=end
+                )
+        if item.has_crop() and kind == "image":
+            crop = parse_crop(item.crop)
+            if crop is not None:
+                dest = edit_dir / f"{uuid.uuid4().hex[:10]}_crop.png"
+                apply_still(item.path, dest, crop)
+                item.path = dest
+        elif item.has_crop() and kind in ("silent_video", "video", "video_audio"):
+            # Spatial framing on a clip: bake Continuity turn/mirror/window per frame.
+            crop = parse_crop(item.crop)
+            if crop is not None:
+                dest = edit_dir / f"{uuid.uuid4().hex[:10]}_frame.mp4"
+                item.path = frame_video(item.path, dest, crop)
+    return refs
+
+
+def _upscale_scale_from_body(body: dict[str, Any]) -> float | None:
+    raw = body.get("upscale_scale", body.get("upscale"))
+    if raw is None or raw is False or raw == "" or raw == 0:
+        return None
+    if raw is True:
+        return 2.0
+    try:
+        scale = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if scale <= 1.0:
+        return None
+    return min(4.0, scale)
+
+
+def _register_upscaled_clip(
+    state: AppState,
+    source: ClipRecord,
+    dest: Path,
+    *,
+    width: int,
+    height: int,
+    scale: float,
+) -> ClipRecord:
+    mid = str(uuid.uuid4())
+    filename = dest.name
+    clip = ClipRecord(
+        id=mid,
+        prompt=f"{source.prompt} (×{scale:g} upscale)",
+        label="UPSCALED",
+        video_url=state.clip_url(filename),
+        filename=filename,
+        chain_id=source.chain_id,
+        clip_index=int(source.clip_index or 0) + 1000,
+        mode=source.mode,
+        status=RunStatus.DONE.value,
+        created_at=datetime.now().isoformat(),
+        elapsed_s=None,
+        bytes=dest.stat().st_size if dest.is_file() else None,
+        num_frames=source.num_frames,
+        width=width,
+        height=height,
+        seed=source.seed,
+        num_steps=source.num_steps,
+        layers=source.layers,
+        reuse=source.reuse,
+        duration_seconds=source.duration_seconds,
+        quality=source.quality,
+        loras=source.loras,
+        project_id=source.project_id,
+        generation=dict(source.generation) if source.generation else None,
+    )
+    state.clips[mid] = clip
+    state.save_index()
+    return clip
 
 
 def _request_from_body(
@@ -969,11 +1096,61 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                 req.mode = "ref2va"
             elif run.autocontinue and i > 0 and first is not None:
                 req.mode = "first_frame"
+
+            preview_dir: Path | None = None
+            preview_stem = state.output_dir / ".preview" / f"{run_id}_{clip_id}"
+            watcher: LatentPreviewWatcher | None = None
+            if taeh3_available():
+                preview_dir = Path(mk_scratch_dir("h3_prev_"))
+                req.preview_latent_dir = preview_dir
+
+                def _on_preview(
+                    info: dict[str, Any],
+                    *,
+                    _rid=run_id,
+                    _stem=preview_stem.name,
+                ) -> None:
+                    served = Path(str(info.get("path") or ""))
+                    ext = served.suffix if served.suffix else ".mp4"
+                    url = f"/api/preview/{_stem}{ext}?t={int(time.time() * 1000)}"
+                    asyncio.run_coroutine_threadsafe(
+                        state.emit(
+                            _rid,
+                            {
+                                "type": "preview",
+                                "url": url,
+                                "mime": info.get("mime") or "image/webp",
+                                "step": info.get("step"),
+                                "total": info.get("total"),
+                                "fps": info.get("fps"),
+                            },
+                        ),
+                        loop,
+                    )
+
+                watcher = LatentPreviewWatcher(
+                    preview_dir, preview_stem, on_preview=_on_preview
+                )
+                watcher.start()
+
             try:
                 await asyncio.to_thread(state.engine.generate, req, on_progress=_progress)
             except GenerationCancelledError:
+                if watcher is not None:
+                    watcher.stop(cleanup=True)
+                else:
+                    cleanup_preview_artifacts(preview_dir)
+                _purge_preview_stem(preview_stem)
                 await _abort_run_cancelled(state, run_id)
                 return
+            finally:
+                # Drop latent dumps immediately; keep the looping clip until
+                # clip_done so the stage can hand off to the real video.
+                if watcher is not None:
+                    watcher.stop(cleanup=False)
+                    cleanup_preview_artifacts(preview_dir)
+                else:
+                    cleanup_preview_artifacts(preview_dir)
             elapsed = round(time.time() - t0, 2)
             size = dest.stat().st_size if dest.is_file() else 0
             clip.status = RunStatus.DONE.value
@@ -995,7 +1172,41 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     "chain_id": clip.chain_id,
                 },
             )
+            _purge_preview_stem(preview_stem)
             done_paths.append(dest)
+            upscale_scale = _upscale_scale_from_body(body)
+            if upscale_scale and dest.is_file() and media_available():
+                await state.emit(
+                    run_id,
+                    {
+                        "type": "progress",
+                        "phase": "upscaling",
+                        "message": f"Upscaling ×{upscale_scale:g}…",
+                    },
+                )
+                up_name = f"{dest.stem}_x{upscale_scale:g}.mp4".replace(".", "p", 1) if False else f"{dest.stem}_up{upscale_scale:g}.mp4"
+                up_path = state.output_dir / up_name
+                try:
+                    _, uw, uh = await asyncio.to_thread(
+                        upscale_video, dest, up_path, scale=upscale_scale
+                    )
+                    up_clip = _register_upscaled_clip(
+                        state, clip, up_path, width=uw, height=uh, scale=upscale_scale
+                    )
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "clip_done",
+                            "clip_id": up_clip.id,
+                            "video_url": up_clip.video_url,
+                            "bytes": up_clip.bytes,
+                            "filename": up_clip.filename,
+                            "chain_id": up_clip.chain_id,
+                            "upscaled_from": clip.id,
+                        },
+                    )
+                except Exception:
+                    log.exception("upscale failed for %s", dest)
             if run.autocontinue and i < len(run.prompts) - 1 and media_available():
                 tmp = mk_scratch_dir("h3_chain_")
                 prev_frame = extract_last_frame(dest, tmp / "last.png")
@@ -1024,10 +1235,12 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                 created_at=datetime.now().isoformat(),
                 bytes=merged_path.stat().st_size if merged_path.is_file() else None,
                 project_id=source_project or state.active_project_id,
+                generation=dict(body["generation"]) if isinstance(body.get("generation"), dict) else None,
                 **{
                     k: v
                     for k, v in _clip_settings_from_body(body).items()
-                    if k in ClipRecord.__dataclass_fields__ and k != "project_id"
+                    if k in ClipRecord.__dataclass_fields__
+                    and k not in ("project_id", "generation")
                 },
             )
             state.clips[mid] = mclip
@@ -1187,6 +1400,10 @@ def create_app(
             "defaults": _defaults(),
             "model_note": note,
             "pyav_available": media_available(),
+            "taeh3_available": taeh3_available(),
+            "refine": refine_settings_public(
+                read_web_settings(state.output_dir).get("refine")
+            ),
         }
 
     # ── Models management (status + user-confirmed download) ─────────────────
@@ -1719,7 +1936,10 @@ def create_app(
 
         ui_mode = (body.get("mode") or "t2va").strip().lower()
         try:
-            refs = _resolve_refs(state, parse_refs_payload(body.get("refs")))
+            refs = parse_refs_payload(body.get("refs"), validate=False)
+            refs = _resolve_refs(state, refs)
+            refs = _materialize_ref_edits(state, refs)
+            validate_refs(refs)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         if refs:
@@ -1801,6 +2021,11 @@ def create_app(
         project_id = str(body.get("project_id") or state.active_project_id or "")
         if project_id and project_id not in state.projects:
             project_id = state.active_project_id or next(iter(state.projects))
+        # Client-authored restore blob (pre-materialize refs). Opaque to the engine.
+        generation_snap = body.get("generation")
+        if not isinstance(generation_snap, dict):
+            generation_snap = None
+
         clip_ids: list[str] = []
         for i, p in enumerate(prompts):
             clip_id = str(uuid.uuid4())
@@ -1818,10 +2043,12 @@ def create_app(
                 status=RunStatus.QUEUED.value,
                 created_at=datetime.now().isoformat(),
                 project_id=project_id,
+                generation=dict(generation_snap) if generation_snap else None,
                 **{
                     k: v
                     for k, v in settings.items()
-                    if k in ClipRecord.__dataclass_fields__ and k != "project_id"
+                    if k in ClipRecord.__dataclass_fields__
+                    and k not in ("project_id", "generation")
                 },
             )
             state.clips[clip_id] = clip
@@ -1910,6 +2137,54 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    @app.get("/api/media")
+    async def serve_media(path: str = ""):
+        """Serve an upload/output/frame file for the Continuity segment editors."""
+        try:
+            resolved = _resolve_existing_media(state, path)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        allowed = (
+            state.upload_dir.resolve(),
+            state.output_dir.resolve(),
+            _frames_dir(state.output_dir).resolve(),
+        )
+        if not any(_is_under(resolved, root) for root in allowed):
+            raise HTTPException(403, "media path not allowed")
+        return FileResponse(resolved)
+
+    @app.get("/api/media/peaks")
+    async def media_peaks(path: str = ""):
+        """Waveform peaks for the Continuity trim editor."""
+        try:
+            resolved = _resolve_existing_media(state, path)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        try:
+            return await asyncio.to_thread(audio_peaks, resolved)
+        except Exception as exc:
+            log.exception("peaks failed for %s", resolved)
+            raise HTTPException(400, f"cannot read peaks: {exc}") from exc
+
+    @app.post("/api/clips/{clip_id}/upscale")
+    async def upscale_clip(clip_id: str, body: dict[str, Any] | None = None):
+        clip = state.clips.get(clip_id)
+        if clip is None:
+            raise HTTPException(404, "Clip not found")
+        src = state.output_dir / clip.filename
+        if not src.is_file():
+            raise HTTPException(404, "Clip file not found")
+        body = body or {}
+        scale = _upscale_scale_from_body({**body, "upscale": body.get("scale", body.get("upscale", True))}) or 2.0
+        dest = state.output_dir / f"{src.stem}_up{scale:g}.mp4"
+        try:
+            _, uw, uh = await asyncio.to_thread(upscale_video, src, dest, scale=scale)
+        except Exception as exc:
+            log.exception("upscale failed for %s", src)
+            raise HTTPException(400, f"upscale failed: {exc}") from exc
+        made = _register_upscaled_clip(state, clip, dest, width=uw, height=uh, scale=scale)
+        return {"ok": True, "clip": _clip_for_api(state, made)}
+
     @app.get("/api/frames")
     async def list_frames():
         entries = _read_frame_library(state.output_dir)
@@ -1989,6 +2264,73 @@ def create_app(
         if not path.is_file():
             raise HTTPException(404, "Frame file not found")
         return FileResponse(path)
+
+    @app.get("/api/preview/{filename}")
+    async def preview_file(filename: str):
+        """Serve the latest TAEH3 looping preview (mp4 or animated webp)."""
+        name = Path(filename).name
+        path = state.output_dir / ".preview" / name
+        if not path.is_file():
+            raise HTTPException(404, "Preview not found")
+        suffix = path.suffix.lower()
+        media = {
+            ".mp4": "video/mp4",
+            ".webp": "image/webp",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+        }.get(suffix, "application/octet-stream")
+        return FileResponse(path, media_type=media)
+
+    @app.get("/api/settings/refine")
+    async def get_refine_settings():
+        return refine_settings_public(read_web_settings(state.output_dir).get("refine"))
+
+    @app.put("/api/settings/refine")
+    async def put_refine_settings(body: dict[str, Any]):
+        data = read_web_settings(state.output_dir)
+        try:
+            merged = merge_refine_settings(data.get("refine"), body)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        data["refine"] = merged
+        write_web_settings(state.output_dir, data)
+        return refine_settings_public(merged)
+
+    @app.post("/api/refine")
+    async def api_refine(body: dict[str, Any]):
+        settings = read_web_settings(state.output_dir).get("refine") or {}
+        if not settings.get("enabled"):
+            raise HTTPException(400, "Refine is disabled — enable it in Features")
+        base_url = str(settings.get("base_url") or "")
+        if not base_url.strip():
+            raise HTTPException(400, "Refine base URL is empty")
+        prompt = str(body.get("prompt") or "")
+        mode = str(body.get("mode") or "t2va")
+        refs_raw = body.get("refs")
+        ref_labels: list[str] = []
+        if isinstance(refs_raw, list):
+            for item in refs_raw:
+                if isinstance(item, str):
+                    ref_labels.append(item)
+                elif isinstance(item, dict):
+                    kind = item.get("kind") or item.get("type") or "ref"
+                    name = item.get("name") or item.get("path") or ""
+                    ref_labels.append(f"{kind}: {name}".strip(": "))
+        try:
+            result = await asyncio.to_thread(
+                refine_prompt,
+                prompt,
+                base_url=base_url,
+                model=str(settings.get("model") or ""),
+                api_key=str(settings.get("api_key") or ""),
+                mode=mode,
+                refs=ref_labels or None,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return result
 
     @app.get("/api/videos/{filename}")
     async def video_file(filename: str):

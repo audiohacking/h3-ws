@@ -340,11 +340,22 @@ class RefItem:
     audio_path: Path | None = None
     name: str = ""
     ref_size: str = "max"
+    # Continuity temporal segment: [trim_start, trim_end) seconds.
+    trim_start: float | None = None
+    trim_end: float | None = None
+    # Continuity framing blob: {x,y,w,h,turn,mirror} — see h3_crop.py.
+    crop: dict[str, Any] | None = None
 
     def file_count(self) -> int:
         if self.kind == "video_audio":
             return 2
         return 1
+
+    def has_trim(self) -> bool:
+        return self.trim_start is not None or self.trim_end is not None
+
+    def has_crop(self) -> bool:
+        return bool(self.crop)
 
 
 def refs_from_legacy(
@@ -401,11 +412,22 @@ def validate_refs(refs: list[RefItem]) -> None:
     _validate_ref_audio_durations(refs)
 
 
-def parse_refs_payload(raw: Any) -> list[RefItem]:
+def _optional_float(raw: Any) -> float | None:
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"expected a number, got {raw!r}") from exc
+
+
+def parse_refs_payload(raw: Any, *, validate: bool = True) -> list[RefItem]:
     if not raw:
         return []
     if not isinstance(raw, list):
         raise ValueError("refs must be a list")
+    from h3_crop import CropError, parse as parse_crop, to_dict
+
     items: list[RefItem] = []
     for entry in raw:
         if not isinstance(entry, dict):
@@ -415,6 +437,33 @@ def parse_refs_payload(raw: Any) -> list[RefItem]:
         if not kind or not path:
             raise ValueError("each ref needs kind and path")
         audio = str(entry.get("audio_path") or "").strip()
+        trim = entry.get("trim") if isinstance(entry.get("trim"), dict) else None
+        crop_raw = entry.get("crop") if isinstance(entry.get("crop"), dict) else None
+        # Flat crop_x… fields still accepted for older clients.
+        if crop_raw is None and any(entry.get(k) is not None for k in ("crop_x", "crop_y", "crop_w", "crop_h", "turn", "mirror")):
+            crop_raw = {
+                "x": entry.get("crop_x", 0),
+                "y": entry.get("crop_y", 0),
+                "w": entry.get("crop_w", 1),
+                "h": entry.get("crop_h", 1),
+                "turn": entry.get("turn", 0),
+                "mirror": entry.get("mirror", ""),
+            }
+        trim_start = _optional_float(
+            entry.get("trim_start") if trim is None else trim.get("start", trim.get("start_s"))
+        )
+        trim_end = _optional_float(
+            entry.get("trim_end") if trim is None else trim.get("end", trim.get("end_s"))
+        )
+        if trim_start is not None and trim_end is not None and trim_end <= trim_start:
+            raise ValueError("trim end must be greater than trim start")
+        crop_blob: dict[str, Any] | None = None
+        if crop_raw is not None:
+            try:
+                parsed = parse_crop(crop_raw)
+            except CropError as exc:
+                raise ValueError(str(exc)) from exc
+            crop_blob = to_dict(parsed) if parsed else None
         items.append(
             RefItem(
                 kind=kind,
@@ -422,9 +471,13 @@ def parse_refs_payload(raw: Any) -> list[RefItem]:
                 audio_path=Path(audio) if audio else None,
                 name=str(entry.get("name") or Path(path).name),
                 ref_size=str(entry.get("ref_size") or "max").strip().lower() or "max",
+                trim_start=trim_start,
+                trim_end=trim_end,
+                crop=crop_blob,
             )
         )
-    validate_refs(items)
+    if validate:
+        validate_refs(items)
     return items
 
 
@@ -496,6 +549,8 @@ class GenerateRequest:
     loras: list[LoraRef] = field(default_factory=list)
     mode: str = "t2va"
     profile: bool = True
+    # When set, h3.c dumps mid-denoise latents here for TAEH3 preview (no --show).
+    preview_latent_dir: Path | None = None
 
 
 def uses_ref2va(req: GenerateRequest) -> bool:
@@ -577,6 +632,8 @@ def build_h3_argv(
         cmd.extend(["--first-frame", str(req.first_frame)])
     if req.last_frame:
         cmd.extend(["--last-frame", str(req.last_frame)])
+    if req.preview_latent_dir:
+        cmd.extend(["--preview-latent", str(req.preview_latent_dir)])
     append_ref_flags(cmd, req.refs)
     return cmd
 
@@ -737,7 +794,9 @@ class H3Engine:
         req.output_path.parent.mkdir(parents=True, exist_ok=True)
         req.int8_row_fc2 = resolve_int8_row_fc2(req, metal4=self.metal4)
 
-        if need_ref:
+        # Latent preview dumps need a fresh one-shot argv (--preview-latent);
+        # the warm interactive session does not re-bind that flag per prompt.
+        if need_ref or req.preview_latent_dir:
             self._stop_session()
             return self._generate_oneshot(req, on_progress=on_progress)
 

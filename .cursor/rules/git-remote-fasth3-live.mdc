@@ -1,0 +1,27 @@
+---
+description: Git remotes — Continuity product vs Live experiment
+alwaysApply: true
+---
+
+# Git remotes (mandatory)
+
+## Continuity product (default / `main`)
+
+**`origin` must be:** `https://github.com/lmangani/h3-ws`
+
+- Web UI on `:8765`, `server.py`, Continuity-inspired standalone port powered by h3.c.
+- Before every `git push` on Continuity work: `git remote -v` → confirm `origin` is `lmangani/h3-ws`.
+- Fix if wrong: `git remote set-url origin https://github.com/lmangani/h3-ws.git`
+
+## Live experiment (set aside)
+
+**`fasth3-live` remote only:** `https://github.com/audiohacking/FastH3-Live-MLX`
+
+- FastH3 Live stream / Metal decode experiments — learning branch, not the product mainline.
+- Never push Continuity/`main` work there. Never make this `origin` while doing Continuity features.
+- Push Live work only with an explicit `git push fasth3-live …`.
+
+## Anti-footgun
+
+- Do not push to a repo that is not the active product for the current branch.
+- A mistaken cross-push is a critical incident: revert that remote’s `main`/tags to the pre-push SHA immediately.

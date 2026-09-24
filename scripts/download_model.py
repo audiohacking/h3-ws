@@ -25,6 +25,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from h3_paths import default_model_dir  # noqa: E402
+from h3_preview import DEFAULT_TAEH3, default_taeh3_path, taeh3_available  # noqa: E402
+
+TAEH3_URL = (
+    "https://github.com/madebyollin/taehv/raw/main/safetensors/taeh3.safetensors"
+)
+TAEH3_GIB = 0.021
 
 # Root-level Diffusers / docs. ``FL2VA/text_encoder/…`` does not match these.
 DIFFUSERS_IGNORE = [
@@ -238,6 +244,30 @@ def _print_selection(chosen: list[str], sizes: dict[str, int], *, n_repo: int, s
         print(f"  {key:28} {_fmt_gib(sz)}")
 
 
+def download_taeh3(dest: Path | None = None, *, force: bool = False) -> Path:
+    """Fetch madebyollin's ~22 MB TAEH3 preview decoder into models/vae_approx/."""
+    import urllib.request
+
+    path = Path(dest) if dest is not None else default_taeh3_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if taeh3_available(path) and not force:
+        print(f"taeh3 already present: {path} ({path.stat().st_size} bytes)")
+        return path
+    print(f"Downloading TAEH3 preview decoder (~{TAEH3_GIB:.2f} GB) → {path}")
+    tmp = path.with_suffix(".download")
+    try:
+        urllib.request.urlretrieve(TAEH3_URL, tmp)
+        tmp.replace(path)
+    except Exception:
+        if tmp.is_file():
+            tmp.unlink(missing_ok=True)
+        raise
+    if not taeh3_available(path):
+        raise SystemExit(f"download finished but {path} looks incomplete")
+    print(f"OK: {path} ({path.stat().st_size} bytes)")
+    return path
+
+
 def main() -> None:
     p = argparse.ArgumentParser(
         description="Download only the MiniMax-H3 files native h3.c loads"
@@ -253,6 +283,16 @@ def main() -> None:
         "--with-ref2va",
         action="store_true",
         help="Also fetch the Ref2VA transformer (~62 GB) and symlink shared encoder/VAE",
+    )
+    p.add_argument(
+        "--with-taeh3",
+        action="store_true",
+        help="Also fetch the ~22 MB TAEH3 live-preview decoder (models/vae_approx/)",
+    )
+    p.add_argument(
+        "--taeh3-only",
+        action="store_true",
+        help="Only download taeh3.safetensors; skip MiniMax-H3 weights",
     )
     p.add_argument(
         "--dry-run",
@@ -280,8 +320,21 @@ def main() -> None:
             "Root Diffusers leftovers stay until you remove them yourself."
         )
 
+    if args.taeh3_only:
+        if args.dry_run:
+            print(f"would fetch {TAEH3_URL} → {default_taeh3_path()}")
+            return
+        download_taeh3()
+        return
+
     if args.status:
-        print("\n".join(local_status(dest)))
+        lines = list(local_status(dest))
+        tae = default_taeh3_path()
+        if taeh3_available(tae):
+            lines.append(f"taeh3 preview:         OK  {tae}{_fmt_gib(tae.stat().st_size)}")
+        else:
+            lines.append(f"taeh3 preview:         missing ({DEFAULT_TAEH3})")
+        print("\n".join(lines))
         return
 
     try:
@@ -306,6 +359,8 @@ def main() -> None:
             names, sizes, with_ref2va=with_ref2va
         )
         _print_selection(chosen, sizes, n_repo=len(names), skipped=skipped)
+        if args.with_taeh3:
+            print(f"would also fetch taeh3 → {default_taeh3_path()}")
         return
 
     print(f"Downloading {args.repo} → {dest}")
@@ -343,6 +398,8 @@ def main() -> None:
             print("     Ref2VA transformer present (shared encoder/VAE kept or linked)")
     else:
         print("     Ref2VA skipped (text/first/last-frame still work; pass --with-ref2va later)")
+    if args.with_taeh3:
+        download_taeh3()
 
 
 if __name__ == "__main__":

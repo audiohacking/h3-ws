@@ -32,6 +32,8 @@ type Props = {
   clipMultiplierMax: number;
   showClips: boolean;
   onClipMultiplier: (n: number) => void;
+  upscale: boolean;
+  onUpscale: (v: boolean) => void;
 };
 
 function ParamStepper({
@@ -96,6 +98,8 @@ export function SamplerRow({
   clipMultiplierMax,
   showClips,
   onClipMultiplier,
+  upscale,
+  onUpscale,
 }: Props) {
   const tokenOn = tokenReduction && !tokenReductionLocked;
   const ssdOn = ssdStreaming && !ssdLocked;
@@ -205,6 +209,15 @@ export function SamplerRow({
             onClick={() => onSsdStreaming(!ssdStreaming)}
           >
             ssd {ssdOn ? "on" : "off"}
+          </button>
+          <button
+            type="button"
+            className={`chip-btn${upscale ? " is-on" : ""}`}
+            disabled={disabled}
+            title="After generate, Lanczos-upscale ×2 into a new library clip"
+            onClick={() => onUpscale(!upscale)}
+          >
+            upscale {upscale ? "×2" : "off"}
           </button>
         </div>
       </div>

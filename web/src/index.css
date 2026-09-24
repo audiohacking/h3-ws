@@ -163,9 +163,31 @@ body {
   transition: opacity 0.15s;
 }
 
+.library-upscale {
+  position: absolute;
+  top: 4px;
+  right: 28px;
+  z-index: 2;
+  height: 22px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 11px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 22px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
 .library-card-wrap:hover .library-delete,
 .library-card-wrap.active .library-delete,
-.library-card-wrap:focus-within .library-delete {
+.library-card-wrap:focus-within .library-delete,
+.library-card-wrap:hover .library-upscale,
+.library-card-wrap.active .library-upscale,
+.library-card-wrap:focus-within .library-upscale {
   opacity: 1;
 }
 
@@ -650,6 +672,10 @@ body {
   max-height: 420px;
   object-fit: contain;
   background: #0a0a0a;
+}
+
+.player--preview {
+  max-height: 420px;
 }
 
 .player.placeholder {

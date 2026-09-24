@@ -8,6 +8,9 @@ type Props = {
   castSlot: React.ReactNode;
   librarySlot?: React.ReactNode;
   presetSlot: React.ReactNode;
+  refineEnabled?: boolean;
+  onRefine?: () => void;
+  onOpenFeatures?: () => void;
   onAddImage: (file: File) => void;
   onAddVideo: (file: File, kind: VideoKind) => void;
   onAddAudio: (file: File) => void;
@@ -22,6 +25,9 @@ export function ComposerRail({
   castSlot,
   librarySlot,
   presetSlot,
+  refineEnabled,
+  onRefine,
+  onOpenFeatures,
   onAddImage,
   onAddVideo,
   onAddAudio,
@@ -112,6 +118,29 @@ export function ComposerRail({
           Add LoRA
           {loraCount > 0 && <span className="rail-btn__badge">{loraCount}</span>}
         </button>
+        {onRefine && (
+          <button
+            type="button"
+            className="rail-btn"
+            disabled={disabled || !refineEnabled}
+            onClick={onRefine}
+            title={refineEnabled ? "Rewrite prompt via remote Refine" : "Enable Refine in Features"}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <path d="M4 19h16M7 15l3-9h4l3 9M9 11h6" />
+            </svg>
+            Refine
+          </button>
+        )}
+        {onOpenFeatures && (
+          <button type="button" className="rail-btn" disabled={disabled} onClick={onOpenFeatures}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+            </svg>
+            Features
+          </button>
+        )}
         {castSlot}
         {librarySlot}
         <button type="button" className="rail-btn" disabled={disabled} onClick={onClear}>

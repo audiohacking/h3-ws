@@ -369,6 +369,300 @@ def resize_still_to_canvas(src: Path | str, dest: Path | str, width: int, height
     return target
 
 
+def crop_still(
+    src: Path | str,
+    dest: Path | str,
+    *,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+) -> Path:
+    """Crop an image using a normalized box in [0, 1]. Writes PNG.
+
+    Prefer ``h3_crop.apply_still`` for Continuity framing (turn/mirror/window).
+    """
+    from h3_crop import Crop, apply_still
+
+    return apply_still(src, dest, Crop(x=float(x), y=float(y), w=float(w), h=float(h)))
+
+
+def frame_video(src: Path | str, dest: Path | str, crop: Any) -> Path:
+    """Bake Continuity framing (turn/mirror/window) into every video frame."""
+    import av
+    import numpy as np
+    from av.audio.frame import AudioFrame
+    from av.video.frame import VideoFrame
+    from PIL import Image
+
+    from h3_crop import pil as crop_pil
+
+    source = Path(src)
+    target = Path(dest)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    inp = av.open(str(source))
+    try:
+        v_in = next((s for s in inp.streams if s.type == "video"), None)
+        if v_in is None:
+            raise ValueError(f"no video stream in {source}")
+        fps = float(v_in.average_rate) if v_in.average_rate else 24.0
+        out = av.open(str(target), mode="w")
+        try:
+            v_out = None
+            a_out = None
+            if any(s.type == "audio" for s in inp.streams):
+                a_out = out.add_stream("aac", rate=48000)
+                a_out.layout = "stereo"
+            for frame in inp.decode():
+                if isinstance(frame, VideoFrame):
+                    img = Image.fromarray(frame.to_ndarray(format="rgb24"))
+                    framed = crop_pil(img, crop)
+                    arr = np.asarray(framed.convert("RGB"))
+                    h, w = arr.shape[:2]
+                    # yuv420p needs even dims
+                    ew, eh = w - (w % 2), h - (h % 2)
+                    if (ew, eh) != (w, h):
+                        framed = framed.resize((max(2, ew), max(2, eh)), Image.Resampling.LANCZOS)
+                        arr = np.asarray(framed)
+                        h, w = arr.shape[:2]
+                    if v_out is None:
+                        v_out = out.add_stream("libx264", rate=max(1, int(round(fps))))
+                        v_out.width = w
+                        v_out.height = h
+                        v_out.pix_fmt = "yuv420p"
+                        v_out.options = {"preset": "veryfast", "crf": "18"}
+                    new_frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
+                    new_frame = new_frame.reformat(format="yuv420p")
+                    new_frame.pts = None
+                    for packet in v_out.encode(new_frame):
+                        out.mux(packet)
+                elif isinstance(frame, AudioFrame) and a_out is not None:
+                    frame = frame.reformat(format="fltp", layout="stereo", rate=48000)
+                    frame.pts = None
+                    for packet in a_out.encode(frame):
+                        out.mux(packet)
+            if v_out is not None:
+                for packet in v_out.encode():
+                    out.mux(packet)
+            if a_out is not None:
+                for packet in a_out.encode():
+                    out.mux(packet)
+        finally:
+            out.close()
+    finally:
+        inp.close()
+    return target
+
+
+def audio_peaks(src: Path | str, *, buckets: int = 400) -> dict[str, Any]:
+    """Peak envelope for the Continuity trim waveform, plus duration / has_audio."""
+    import av
+    import numpy as np
+
+    source = Path(src)
+    if not source.is_file():
+        return {"peaks": [], "duration": None, "has_audio": False}
+    container = av.open(str(source))
+    try:
+        has_video = any(s.type == "video" for s in container.streams)
+        has_audio = any(s.type == "audio" for s in container.streams)
+        duration = None
+        if container.duration and container.duration > 0:
+            duration = float(container.duration) / float(av.time_base)
+        peaks: list[float] = []
+        if has_audio:
+            samples: list[np.ndarray] = []
+            for frame in container.decode(audio=0):
+                arr = frame.to_ndarray()
+                if arr.ndim > 1:
+                    arr = arr.mean(axis=0)
+                samples.append(np.asarray(arr, dtype=np.float32).ravel())
+            if samples:
+                wave = np.concatenate(samples)
+                # Normalize to [-1, 1] peak envelope.
+                if wave.dtype != np.float32:
+                    wave = wave.astype(np.float32)
+                if np.issubdtype(wave.dtype, np.integer):
+                    wave = wave / np.iinfo(wave.dtype).max
+                n = max(1, int(buckets))
+                chunk = max(1, len(wave) // n)
+                for i in range(n):
+                    part = wave[i * chunk : (i + 1) * chunk]
+                    peaks.append(float(np.max(np.abs(part))) if len(part) else 0.0)
+                peak_max = max(peaks) or 1.0
+                peaks = [min(1.0, p / peak_max) for p in peaks]
+        return {"peaks": peaks, "duration": duration, "has_audio": has_audio, "has_video": has_video}
+    finally:
+        container.close()
+
+
+def trim_media(
+    src: Path | str,
+    dest: Path | str,
+    *,
+    start_s: float = 0.0,
+    end_s: float | None = None,
+) -> Path:
+    """Trim audio and/or video to ``[start_s, end_s)``. Re-encodes for keyframe safety."""
+    import av
+    from av.audio.frame import AudioFrame
+    from av.video.frame import VideoFrame
+
+    source = Path(src)
+    target = Path(dest)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    start = max(0.0, float(start_s))
+    end = float(end_s) if end_s is not None else None
+    if end is not None and end <= start:
+        raise ValueError("trim end must be greater than trim start")
+
+    inp = av.open(str(source))
+    try:
+        has_video = any(s.type == "video" for s in inp.streams)
+        has_audio = any(s.type == "audio" for s in inp.streams)
+        if not has_video and not has_audio:
+            raise ValueError(f"no audio/video streams in {source}")
+
+        try:
+            inp.seek(int(start * av.time_base))
+        except Exception:
+            pass
+
+        if has_video:
+            out = av.open(str(target), mode="w")
+        else:
+            # wav keeps trim simple without an AAC encoder dependency.
+            if target.suffix.lower() not in (".wav", ".mp3", ".m4a"):
+                target = target.with_suffix(".wav")
+            out = av.open(str(target), mode="w", format="wav")
+        try:
+            v_out = None
+            a_out = None
+            if has_video:
+                v_in = next(s for s in inp.streams if s.type == "video")
+                fps = float(v_in.average_rate) if v_in.average_rate else 24.0
+                v_out = out.add_stream("libx264", rate=max(1, int(round(fps))))
+                v_out.width = int(v_in.codec_context.width or 0)
+                v_out.height = int(v_in.codec_context.height or 0)
+                v_out.pix_fmt = "yuv420p"
+                v_out.options = {"preset": "veryfast", "crf": "18"}
+            if has_audio:
+                if has_video:
+                    a_out = out.add_stream("aac", rate=48000)
+                    a_out.layout = "stereo"
+                else:
+                    a_out = out.add_stream("pcm_s16le", rate=48000)
+                    a_out.layout = "stereo"
+
+            for frame in inp.decode():
+                pts_s = float(frame.time) if frame.time is not None else 0.0
+                if pts_s + 1e-3 < start:
+                    continue
+                if end is not None and pts_s >= end - 1e-6:
+                    if isinstance(frame, VideoFrame):
+                        break
+                    continue
+                if isinstance(frame, VideoFrame) and v_out is not None:
+                    frame = frame.reformat(format="yuv420p")
+                    frame.pts = None
+                    for packet in v_out.encode(frame):
+                        out.mux(packet)
+                elif isinstance(frame, AudioFrame) and a_out is not None:
+                    frame = frame.reformat(format="s16" if not has_video else "fltp", layout="stereo", rate=48000)
+                    frame.pts = None
+                    for packet in a_out.encode(frame):
+                        out.mux(packet)
+
+            if v_out is not None:
+                for packet in v_out.encode():
+                    out.mux(packet)
+            if a_out is not None:
+                for packet in a_out.encode():
+                    out.mux(packet)
+        finally:
+            out.close()
+    finally:
+        inp.close()
+    return target
+
+
+def upscale_video(
+    src: Path | str,
+    dest: Path | str,
+    *,
+    scale: float = 2.0,
+    max_side: int = 2048,
+) -> tuple[Path, int, int]:
+    """Lanczos-upscale every video frame; re-encode audio. Returns (path, w, h)."""
+    import av
+    import numpy as np
+    from av.audio.frame import AudioFrame
+    from av.video.frame import VideoFrame
+    from PIL import Image
+
+    source = Path(src)
+    target = Path(dest)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    factor = max(1.0, float(scale))
+    inp = av.open(str(source))
+    try:
+        v_in = next((s for s in inp.streams if s.type == "video"), None)
+        if v_in is None:
+            raise ValueError(f"no video stream in {source}")
+        src_w = int(v_in.codec_context.width or 0)
+        src_h = int(v_in.codec_context.height or 0)
+        if src_w < 1 or src_h < 1:
+            raise ValueError(f"invalid video size {src_w}x{src_h}")
+        out_w = max(2, int(round(src_w * factor)))
+        out_h = max(2, int(round(src_h * factor)))
+        long_side = max(out_w, out_h)
+        if long_side > max_side:
+            shrink = max_side / long_side
+            out_w = max(2, int(round(out_w * shrink)))
+            out_h = max(2, int(round(out_h * shrink)))
+        out_w -= out_w % 2
+        out_h -= out_h % 2
+
+        fps = float(v_in.average_rate) if v_in.average_rate else 24.0
+        out = av.open(str(target), mode="w")
+        try:
+            v_out = out.add_stream("libx264", rate=max(1, int(round(fps))))
+            v_out.width = out_w
+            v_out.height = out_h
+            v_out.pix_fmt = "yuv420p"
+            v_out.options = {"preset": "medium", "crf": "17"}
+            a_out = None
+            if any(s.type == "audio" for s in inp.streams):
+                a_out = out.add_stream("aac", rate=48000)
+                a_out.layout = "stereo"
+
+            for frame in inp.decode():
+                if isinstance(frame, VideoFrame):
+                    img = Image.fromarray(frame.to_ndarray(format="rgb24"))
+                    scaled = img.resize((out_w, out_h), Image.Resampling.LANCZOS)
+                    new_frame = av.VideoFrame.from_ndarray(np.asarray(scaled), format="rgb24")
+                    new_frame = new_frame.reformat(format="yuv420p")
+                    new_frame.pts = None
+                    for packet in v_out.encode(new_frame):
+                        out.mux(packet)
+                elif isinstance(frame, AudioFrame) and a_out is not None:
+                    frame = frame.reformat(format="fltp", layout="stereo", rate=48000)
+                    frame.pts = None
+                    for packet in a_out.encode(frame):
+                        out.mux(packet)
+
+            for packet in v_out.encode():
+                out.mux(packet)
+            if a_out is not None:
+                for packet in a_out.encode():
+                    out.mux(packet)
+        finally:
+            out.close()
+    finally:
+        inp.close()
+    return target, out_w, out_h
+
+
 def assert_audio_durations(seconds: list[float]) -> None:
     """Enforce h3.c audio-reference limits (2–15 s each, ≤3 clips, total ≤15 s)."""
     if len(seconds) > MAX_REF_AUDIO_CLIPS:

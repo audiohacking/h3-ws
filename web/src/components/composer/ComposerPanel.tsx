@@ -28,6 +28,9 @@ export type ComposerPanelProps = {
   onAddVideoAudio: (video: File, audio: File) => void;
   onClearComposer: () => void;
   onOpenLora: () => void;
+  onRefine?: () => void;
+  refineEnabled?: boolean;
+  onOpenFeatures?: () => void;
   loraCount: number;
   loraActivity: string | null;
   castMembers: CastMember[];
@@ -86,6 +89,8 @@ export type ComposerPanelProps = {
   ssdStreaming: boolean;
   ssdLocked: boolean;
   onSsdStreaming: (v: boolean) => void;
+  upscale: boolean;
+  onUpscale: (v: boolean) => void;
   clipMultiplier: number;
   onClipMultiplier: (n: number) => void;
   sceneQueue: SceneQueueItem[];
@@ -156,6 +161,9 @@ export function ComposerPanel(props: ComposerPanelProps) {
         onAddAudio={props.onAddAudio}
         onAddVideoAudio={props.onAddVideoAudio}
         onOpenLora={props.onOpenLora}
+        onRefine={props.onRefine}
+        refineEnabled={props.refineEnabled}
+        onOpenFeatures={props.onOpenFeatures}
         onClear={props.onClearComposer}
         castSlot={
           <CastPicker
@@ -208,7 +216,19 @@ export function ComposerPanel(props: ComposerPanelProps) {
         }
       />
 
-      <AssetCapsules refs={refs} disabled={busy} onChange={onRefsChange} />
+      <AssetCapsules
+        refs={refs}
+        disabled={busy}
+        onChange={onRefsChange}
+        shotAspect={(() => {
+          const res = props.config.resolution_presets.find((p) => p.id === props.resolutionId);
+          if (!res?.width || !res?.height) return null;
+          return { ratio: res.width / res.height, label: res.aspect || "shot" };
+        })()}
+        cardSeconds={
+          props.config.duration_presets.find((d) => d.id === props.durationId)?.seconds ?? null
+        }
+      />
 
       <div className="composer-prompt">
         <div className="prompt-field-wrap">
@@ -334,6 +354,8 @@ export function ComposerPanel(props: ComposerPanelProps) {
           ssdStreaming={props.ssdStreaming}
           ssdLocked={props.ssdLocked}
           onSsdStreaming={props.onSsdStreaming}
+          upscale={props.upscale}
+          onUpscale={props.onUpscale}
           clipMultiplier={props.clipMultiplier}
           clipMultiplierMax={props.config.clip_multiplier_max ?? 10}
           showClips={compiled.modeHint !== "ref2va"}

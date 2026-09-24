@@ -11,3 +11,6 @@ uvicorn[standard]>=0.27.0
 python-multipart>=0.0.6
 sse-starlette>=1.6.0
 mcp>=1.0.0
+# Optional: TAEH3 live previews (models/vae_approx/taeh3.safetensors)
+# torch>=2.1
+# safetensors>=0.4

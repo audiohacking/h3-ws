@@ -66,6 +66,15 @@ export interface Config {
   embedded?: boolean;
   web_url?: string;
   pyav_available?: boolean;
+  taeh3_available?: boolean;
+  refine?: RefineSettingsPublic;
+}
+
+export interface RefineSettingsPublic {
+  enabled: boolean;
+  base_url: string;
+  model: string;
+  key_set: boolean;
 }
 
 export interface Clip {
@@ -96,6 +105,9 @@ export interface Clip {
   autocontinue?: boolean;
   autoconcat?: boolean;
   quality?: string;
+  loras?: { id?: string; spec?: string; scale?: number }[];
+  /** Full composer snapshot for re-running from the library. */
+  generation?: Record<string, unknown> | null;
 }
 
 export interface LibraryFrame {
@@ -127,6 +139,16 @@ export type RefKind = "image" | "silent_video" | "video" | "video_audio" | "audi
 export type RoutingMode = "auto" | "fl2va" | "ref2va";
 export type RefSize = "max" | "match";
 
+/** Continuity framing blob — fractions after turn/mirror. See web/src/crop.ts. */
+export type { ImageCrop } from "./crop";
+import type { ImageCrop } from "./crop";
+
+export interface MediaTrim {
+  /** Continuity shape: seconds from file start. */
+  start: number;
+  end: number;
+}
+
 export interface ReferenceItem {
   id: string;
   kind: RefKind;
@@ -141,6 +163,10 @@ export interface ReferenceItem {
   previewUrl?: string;
   source?: "upload" | "cast" | "library";
   castId?: string;
+  /** Continuity spatial framing (images + video). */
+  crop?: ImageCrop | null;
+  /** Continuity temporal segment (audio + video). */
+  trim?: MediaTrim | null;
 }
 
 export interface ProgressState {
