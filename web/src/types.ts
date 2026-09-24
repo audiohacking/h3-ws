@@ -72,6 +72,7 @@ export interface Config {
   pyav_available?: boolean;
   taeh3_available?: boolean;
   refine?: RefineSettingsPublic;
+  network?: NetworkSettingsPublic;
 }
 
 export interface RefineSettingsPublic {
@@ -79,6 +80,28 @@ export interface RefineSettingsPublic {
   base_url: string;
   model: string;
   key_set: boolean;
+}
+
+export interface NetworkSettingsPublic {
+  listen_lan: boolean;
+  bind_host: string;
+  port: number;
+  lan_urls: string[];
+  desktop_supervised?: boolean;
+  rebinding?: boolean;
+  restart_required?: boolean;
+}
+
+export interface UpdateCheckPublic {
+  ok: boolean;
+  repo: string;
+  releases_url: string;
+  installed: string;
+  latest: string | null;
+  update_available: boolean;
+  html_url: string;
+  name?: string | null;
+  error?: string | null;
 }
 
 export interface Clip {

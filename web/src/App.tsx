@@ -15,7 +15,7 @@ import { RefinePanel } from "./components/composer/RefinePanel";
 import { ProjectSwitcher, type Project } from "./components/ProjectSwitcher";
 import { compilePrompt } from "./compile";
 import { leadWithStyle } from "./styleAtlas";
-import type { CastMediaType, CastMember, CastMedia, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, PillOption, ProgressState, QualityPreset, ReferenceItem, RefineSettingsPublic, RefKind, RoutingMode, SceneQueueItem } from "./types";
+import type { CastMediaType, CastMember, CastMedia, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, NetworkSettingsPublic, PillOption, ProgressState, QualityPreset, ReferenceItem, RefineSettingsPublic, RefKind, RoutingMode, SceneQueueItem, UpdateCheckPublic } from "./types";
 
 const H3_DEFAULT_STEPS = 20;
 const H3_DEFAULT_LAYERS = 50;
@@ -318,6 +318,9 @@ export default function App() {
     model: "",
     key_set: false,
   });
+  const [networkSettings, setNetworkSettings] = useState<NetworkSettingsPublic | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckPublic | null>(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const [featuresOpen, setFeaturesOpen] = useState(false);
   const [refineOpen, setRefineOpen] = useState(false);
   const [refineBusy, setRefineBusy] = useState(false);
@@ -408,6 +411,7 @@ export default function App() {
         setLoraPresets(cfg.lora_presets ?? []);
         setTurboLoraId((prev) => prev ?? pickDefaultTurboId(cfg.lora_presets ?? []));
         if (cfg.refine) setRefineSettings(cfg.refine);
+        if (cfg.network) setNetworkSettings(cfg.network);
         const defRes =
           cfg.resolution_presets.find((r) => r.id === "512x512") ??
           cfg.resolution_presets.find(
@@ -421,6 +425,15 @@ export default function App() {
         if (defDur) setDurationId(defDur.id);
       })
       .catch((e) => setError(String(e)));
+    fetch(`${API}/api/update`)
+      .then(async (r) => {
+        if (!r.ok) return;
+        const data = (await r.json()) as UpdateCheckPublic;
+        setUpdateInfo(data);
+      })
+      .catch(() => {
+        /* offline / rate-limit — ignore */
+      });
     fetchClips()
       .then((c) => {
         setClips(c);
@@ -1042,6 +1055,7 @@ export default function App() {
   async function addCustomLora(spec: string, label: string, scale: number) {
     if (busy || !spec || addingCustomLora) return;
     setAddingCustomLora(true);
+    setLoraActivity(`Downloading ${label || "LoRA"}…`);
     try {
       const r = await fetch(`${API}/api/loras/custom`, {
         method: "POST",
@@ -1064,9 +1078,12 @@ export default function App() {
         setLoraPresetIds((prev) => (prev.includes(data.id) ? prev : [...prev, data.id]));
         if (data.preset) applyLoraHints(data.preset);
       }
-      setLoraActivity(`LoRA ready: ${data.preset?.label ?? spec}`);
+      const ready = `LoRA ready: ${data.preset?.label ?? (label || spec)}`;
+      setLoraActivity(ready);
     } catch (e) {
+      setLoraActivity(null);
       setError(String(e));
+      throw e;
     } finally {
       setAddingCustomLora(false);
     }
@@ -1608,6 +1625,19 @@ export default function App() {
 
   return (
     <div className="app">
+      {updateInfo?.update_available && !updateDismissed && (
+        <div className="update-banner" role="status">
+          <span>
+            Update available: <strong>v{updateInfo.latest}</strong> (you have v{updateInfo.installed}).
+          </span>
+          <a href={updateInfo.html_url || updateInfo.releases_url} target="_blank" rel="noreferrer">
+            Download
+          </a>
+          <button type="button" className="update-banner__dismiss" onClick={() => setUpdateDismissed(true)}>
+            Dismiss
+          </button>
+        </div>
+      )}
       <header className="header">
         <div className="brand">
           <span className="brand-mark">H3-WS</span>
@@ -1630,6 +1660,11 @@ export default function App() {
           />
           <span className={`status-dot ${serverOk ? "ok" : "off"}`} title={endpointLabel} />
           {serverOk ? "Server connected" : "Server offline"}
+          {networkSettings?.listen_lan && networkSettings.lan_urls[0] ? (
+            <span className="status-lan" title="LAN listen is on — open this URL from other devices">
+              LAN {networkSettings.lan_urls[0].replace(/^https?:\/\//, "")}
+            </span>
+          ) : null}
         </div>
       </header>
 
@@ -2084,6 +2119,7 @@ export default function App() {
           onRemove={(preset) => void removeLoraPreset(preset)}
           onAddCustom={addCustomLora}
           addingCustom={addingCustomLora}
+          activity={loraActivity}
           disabled={busy || loraBusy}
         />
       )}
@@ -2094,6 +2130,8 @@ export default function App() {
         api={API}
         initial={refineSettings}
         onSaved={setRefineSettings}
+        networkInitial={networkSettings}
+        onNetworkSaved={setNetworkSettings}
       />
 
       <RefinePanel

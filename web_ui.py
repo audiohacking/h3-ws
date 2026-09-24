@@ -81,6 +81,7 @@ from h3_preview import (
     taeh3_decode_ready,
 )
 from h3_refine import (
+    discover_refine_endpoints,
     merge_refine_settings,
     refine_prompt,
     refine_settings_public,
@@ -723,6 +724,45 @@ def public_host(bind_host: str) -> str:
     if not host or host in ("0.0.0.0", "::", "[::]"):
         return local_hostname()
     return host
+
+
+def network_settings_public(*, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Serialize LAN-listen settings for the Features / Settings UI."""
+    from h3_paths import (
+        configured_server_host,
+        configured_server_port,
+        lan_ipv4_addresses,
+        load_desktop_config,
+    )
+
+    data = cfg if cfg is not None else load_desktop_config()
+    bind = configured_server_host(cfg=data)
+    port = configured_server_port(cfg=data)
+    listen_lan = bind in ("0.0.0.0", "::", "[::]") or data.get("listen_lan") is True
+    lan_ips = lan_ipv4_addresses() if listen_lan else []
+    return {
+        "listen_lan": bool(listen_lan),
+        "bind_host": bind,
+        "port": port,
+        "lan_urls": [f"http://{ip}:{port}/" for ip in lan_ips],
+        "desktop_supervised": os.environ.get("H3_WS_DESKTOP", "").strip() in ("1", "true", "yes"),
+    }
+
+
+def request_network_rebind() -> bool:
+    """Ask the desktop supervisor to rebind, if we were spawned by it."""
+    if os.environ.get("H3_WS_DESKTOP", "").strip() not in ("1", "true", "yes"):
+        return False
+    # Do not import h3_desktop here — its module guard can exit the process.
+    from h3_paths import writable_root
+
+    path = writable_root() / "rebind.request"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{time.time():.3f}\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
 
 
 def build_server_urls(bind_host: str, port: int) -> tuple[str, str]:
@@ -1636,6 +1676,7 @@ def create_app(
             "refine": refine_settings_public(
                 read_web_settings(state.output_dir).get("refine")
             ),
+            "network": network_settings_public(),
         }
 
     # ── Models management (status + user-confirmed download) ─────────────────
@@ -2635,6 +2676,50 @@ def create_app(
     @app.get("/api/settings/refine")
     async def get_refine_settings():
         return refine_settings_public(read_web_settings(state.output_dir).get("refine"))
+
+    @app.post("/api/settings/refine/discover")
+    async def api_refine_discover():
+        """Probe localhost for OpenAI-compatible Refine backends (LM Studio, Ollama, …)."""
+        return await asyncio.to_thread(discover_refine_endpoints)
+
+    @app.get("/api/update")
+    async def api_update_check():
+        from h3_update import check_for_update
+
+        return await asyncio.to_thread(check_for_update)
+
+    @app.get("/api/settings/network")
+    async def get_network_settings():
+        return network_settings_public()
+
+    @app.put("/api/settings/network")
+    async def put_network_settings(body: dict[str, Any]):
+        """Persist LAN listen preference; desktop supervisor rebinds when supervised."""
+        from h3_paths import (
+            apply_desktop_config_env,
+            configured_server_host,
+            load_desktop_config,
+            save_desktop_config,
+        )
+
+        if "listen_lan" not in body:
+            raise HTTPException(400, "listen_lan is required")
+        listen_lan = bool(body.get("listen_lan"))
+        before = configured_server_host()
+        payload: dict[str, Any] = {
+            "listen_lan": listen_lan,
+            "server_host": "0.0.0.0" if listen_lan else "127.0.0.1",
+        }
+        save_desktop_config(payload)
+        apply_desktop_config_env()
+        after = configured_server_host(cfg=load_desktop_config())
+        rebinding = False
+        if before != after:
+            rebinding = request_network_rebind()
+        out = network_settings_public()
+        out["rebinding"] = rebinding
+        out["restart_required"] = before != after and not rebinding
+        return out
 
     @app.put("/api/settings/refine")
     async def put_refine_settings(body: dict[str, Any]):

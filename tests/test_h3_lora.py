@@ -27,6 +27,14 @@ from h3_session import build_session_argv
 
 
 class LoraCatalogTests(unittest.TestCase):
+    def test_builtin_includes_taomate_first(self) -> None:
+        self.assertEqual(BUILTIN_LORAS[0]["id"], "taomate_h3_3step")
+        tao = BUILTIN_LORAS[0]
+        self.assertTrue(tao.get("turbo"))
+        self.assertEqual(tao["steps"], 3)
+        self.assertIn("Robert1212star/TaoMate-H3-3Step-ComfyUI", tao["spec"])
+        self.assertIn("taomate_h3_3step_comfy.safetensors", tao["spec"])
+
     def test_builtin_includes_tutu_step100(self) -> None:
         tutu = next(p for p in BUILTIN_LORAS if p["id"] == "tutu_20to8_nfe_step100")
         self.assertEqual(tutu["scale"], 0.8)
@@ -38,7 +46,9 @@ class LoraCatalogTests(unittest.TestCase):
                 with mock.patch("h3_lora._lora_search_roots", return_value=[Path(tmp)]):
                     catalog = lora_catalog(None)
                     ids = [p["id"] for p in catalog]
+                    self.assertIn("taomate_h3_3step", ids)
                     self.assertIn("tutu_20to8_nfe_step100", ids)
+                    self.assertLess(ids.index("taomate_h3_3step"), ids.index("tutu_20to8_nfe_step100"))
 
     def test_normalize_blob_to_resolve(self) -> None:
         spec = normalize_lora_spec(

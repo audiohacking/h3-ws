@@ -147,3 +147,114 @@ def _extract_content(raw: dict[str, Any]) -> str:
         if isinstance(text, str):
             return text.strip()
     return ""
+
+
+# Well-known local OpenAI-compatible servers (LM Studio, Ollama, llama.cpp, …).
+_DISCOVER_CANDIDATES: tuple[tuple[str, str, str], ...] = (
+    ("LM Studio", "127.0.0.1", "1234"),
+    ("Ollama", "127.0.0.1", "11434"),
+    ("llama.cpp / Open WebUI", "127.0.0.1", "8080"),
+    ("vLLM / OpenAI-compatible", "127.0.0.1", "8000"),
+    ("Jan", "127.0.0.1", "1337"),
+    ("LocalAI", "127.0.0.1", "8080"),
+    ("TabbyAPI", "127.0.0.1", "5000"),
+    ("text-generation-webui", "127.0.0.1", "5000"),
+    ("KoboldCpp", "127.0.0.1", "5001"),
+)
+
+
+def _port_open(host: str, port: int, timeout_s: float = 0.25) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
+def _probe_models(base_url: str, timeout_s: float = 1.5) -> list[str]:
+    base = normalize_base_url(base_url)
+    if not base:
+        return []
+    url = f"{base}/models"
+    req = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return []
+    models: list[str] = []
+    data = raw.get("data") if isinstance(raw, dict) else None
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and item.get("id"):
+                models.append(str(item["id"]))
+            elif isinstance(item, str):
+                models.append(item)
+    return models[:24]
+
+
+def _agent_cli_hints() -> list[dict[str, Any]]:
+    """Non-HTTP agents installed on PATH (Codex CLI, ollama, …)."""
+    import shutil
+
+    hints: list[dict[str, Any]] = []
+    checks = (
+        (
+            "codex",
+            "OpenAI Codex CLI — start a local OpenAI-compatible proxy or paste its base URL.",
+        ),
+        (
+            "ollama",
+            "Ollama is installed — run `ollama serve` (default http://127.0.0.1:11434/v1).",
+        ),
+        (
+            "lmstudio",
+            "LM Studio CLI present — enable the local server (default http://127.0.0.1:1234/v1).",
+        ),
+    )
+    for binary, note in checks:
+        path = shutil.which(binary)
+        if path:
+            hints.append({"kind": "cli", "name": binary, "path": path, "note": note})
+    return hints
+
+
+def discover_refine_endpoints(*, timeout_s: float = 0.3) -> dict[str, Any]:
+    """Scan localhost for OpenAI-compatible Refine backends."""
+    found: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
+    for name, host, port in _DISCOVER_CANDIDATES:
+        if not _port_open(host, int(port), timeout_s=timeout_s):
+            continue
+        for suffix in ("/v1", ""):
+            base = f"http://{host}:{port}{suffix}"
+            try:
+                normalized = normalize_base_url(base)
+            except ValueError:
+                continue
+            if normalized in seen_urls:
+                continue
+            models = _probe_models(normalized, timeout_s=max(timeout_s * 4, 1.0))
+            # Prefer /v1 when the port is open, even if /models needs auth.
+            if models or suffix == "/v1":
+                seen_urls.add(normalized)
+                found.append(
+                    {
+                        "name": name,
+                        "base_url": normalized,
+                        "models": models,
+                        "reachable": True,
+                    }
+                )
+                break
+    return {
+        "ok": True,
+        "endpoints": found,
+        "cli_hints": _agent_cli_hints(),
+        "note": (
+            "Pick a discovered OpenAI-compatible server, or point Refine at any "
+            "local Agent/Codex proxy that speaks /v1/chat/completions."
+        ),
+    }

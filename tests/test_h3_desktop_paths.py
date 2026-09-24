@@ -1,6 +1,7 @@
 # Tiny smoke test for frozen-path helpers (no network, no PyInstaller).
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -37,6 +38,21 @@ class TestDesktopPaths(unittest.TestCase):
                 cfg = load_desktop_config()
             self.assertEqual(cfg.get("model_dir"), "/tmp/models/MiniMax-H3")
             self.assertTrue(cfg.get("setup_done"))
+
+    def test_listen_lan_host(self) -> None:
+        from h3_paths import apply_desktop_config_env, configured_server_host
+
+        with TemporaryDirectory() as tmp:
+            with mock.patch("h3_paths.writable_root", return_value=Path(tmp)):
+                with mock.patch.dict("os.environ", {}, clear=False):
+                    for key in ("H3_WS_HOST",):
+                        os.environ.pop(key, None)
+                    save_desktop_config({"listen_lan": True})
+                    self.assertEqual(configured_server_host(), "0.0.0.0")
+                    apply_desktop_config_env()
+                    self.assertEqual(os.environ.get("H3_WS_HOST"), "0.0.0.0")
+                    save_desktop_config({"listen_lan": False})
+                    self.assertEqual(configured_server_host(), "127.0.0.1")
 
 
 if __name__ == "__main__":

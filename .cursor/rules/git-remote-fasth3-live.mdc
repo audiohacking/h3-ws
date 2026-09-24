@@ -7,11 +7,11 @@ alwaysApply: true
 
 ## Continuity product (default / `main`)
 
-**`origin` must be:** `https://github.com/lmangani/h3-ws`
+**`origin` must be:** `https://github.com/audiohacking/h3-ws`
 
 - Web UI on `:8765`, `server.py`, Continuity-inspired standalone port powered by h3.c.
-- Before every `git push` on Continuity work: `git remote -v` → confirm `origin` is `lmangani/h3-ws`.
-- Fix if wrong: `git remote set-url origin https://github.com/lmangani/h3-ws.git`
+- Before every `git push` on Continuity work: `git remote -v` → confirm `origin` is `audiohacking/h3-ws`.
+- Fix if wrong: `git remote set-url origin https://github.com/audiohacking/h3-ws.git`
 
 ## Live experiment (set aside)
 

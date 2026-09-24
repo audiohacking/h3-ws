@@ -11,6 +11,7 @@ interface LoraModalProps {
   onRemove: (preset: LoraPreset) => void;
   onAddCustom?: (spec: string, label: string, scale: number) => Promise<void>;
   addingCustom?: boolean;
+  activity?: string | null;
   disabled?: boolean;
 }
 
@@ -23,12 +24,15 @@ export function LoraModal({
   onRemove,
   onAddCustom,
   addingCustom,
+  activity,
   disabled,
 }: LoraModalProps) {
   const [search, setSearch] = useState("");
   const [customSpec, setCustomSpec] = useState("");
   const [customLabel, setCustomLabel] = useState("");
   const [customScale, setCustomScale] = useState("0.8");
+  const [addStatus, setAddStatus] = useState<string | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   // Focus search input when modal opens
@@ -37,6 +41,8 @@ export function LoraModal({
       setTimeout(() => searchRef.current?.focus(), 50);
     } else {
       setSearch("");
+      setAddStatus(null);
+      setAddError(null);
     }
   }, [open]);
 
@@ -190,10 +196,20 @@ export function LoraModal({
               onSubmit={(e) => {
                 e.preventDefault();
                 if (!customSpec.trim() || addingCustom) return;
-                void onAddCustom(customSpec.trim(), customLabel.trim(), Number(customScale) || 0.8).then(() => {
-                  setCustomSpec("");
-                  setCustomLabel("");
-                });
+                const spec = customSpec.trim();
+                const label = customLabel.trim();
+                setAddError(null);
+                setAddStatus(`Downloading ${label || "LoRA"}… this can take a few minutes`);
+                void onAddCustom(spec, label, Number(customScale) || 0.8)
+                  .then(() => {
+                    setCustomSpec("");
+                    setCustomLabel("");
+                    setAddStatus(`Added ${label || spec}`);
+                  })
+                  .catch((err) => {
+                    setAddStatus(null);
+                    setAddError(err instanceof Error ? err.message : String(err));
+                  });
               }}
             >
               <input
@@ -222,19 +238,23 @@ export function LoraModal({
                 disabled={addingCustom || disabled}
                 onChange={(e) => setCustomScale(e.target.value)}
               />
-              <button type="submit" className="btn-secondary btn-compact" disabled={!customSpec.trim() || addingCustom}>
-                {addingCustom ? "…" : "Add"}
+              <button
+                type="submit"
+                className="btn-secondary btn-compact"
+                disabled={!customSpec.trim() || addingCustom || disabled}
+              >
+                {addingCustom ? "Downloading…" : "Add"}
               </button>
             </form>
           )}
-          <span className="lora-modal__count">
-            {selectedIds.length} selected
-          </span>
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={onClose}
-          >
+          {(addStatus || activity) && (
+            <p className="lora-modal__status" role="status">
+              {addStatus || activity}
+            </p>
+          )}
+          {addError && <p className="form-error lora-modal__status">{addError}</p>}
+          <span className="lora-modal__count">{selectedIds.length} selected</span>
+          <button type="button" className="btn-secondary" onClick={onClose}>
             Done
           </button>
         </footer>

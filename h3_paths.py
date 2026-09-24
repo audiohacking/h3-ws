@@ -378,6 +378,76 @@ def discover_existing_model_dirs(*, limit: int = 12) -> list[Path]:
     return found[:limit]
 
 
+def configured_server_host(*, cfg: dict | None = None) -> str:
+    """Bind address for the HTTP server: ``0.0.0.0`` when LAN listen is on.
+
+    ``config.json`` ``listen_lan`` / ``server_host`` win when set (app Settings).
+    Otherwise ``H3_WS_HOST``, else loopback-only.
+    """
+    data = cfg if cfg is not None else load_desktop_config()
+    raw = str(data.get("server_host") or "").strip()
+    if raw in ("0.0.0.0", "::", "[::]"):
+        return "0.0.0.0"
+    if data.get("listen_lan") is True:
+        return "0.0.0.0"
+    if data.get("listen_lan") is False:
+        return "127.0.0.1"
+    env = os.environ.get("H3_WS_HOST", "").strip()
+    if env:
+        return env
+    if raw:
+        return raw
+    return "127.0.0.1"
+
+
+def configured_server_port(*, cfg: dict | None = None) -> int:
+    env = os.environ.get("H3_WS_PORT", "").strip()
+    if env:
+        try:
+            return int(env)
+        except ValueError:
+            pass
+    data = cfg if cfg is not None else load_desktop_config()
+    raw = data.get("server_port")
+    try:
+        if raw is not None and str(raw).strip():
+            return int(raw)
+    except (TypeError, ValueError):
+        pass
+    return 8765
+
+
+def lan_ipv4_addresses(*, limit: int = 8) -> list[str]:
+    """Best-effort private IPv4 addresses for LAN URL hints (excludes loopback)."""
+    import socket
+
+    found: list[str] = []
+    seen: set[str] = set()
+
+    def push(ip: str) -> None:
+        if not ip or ip.startswith("127.") or ip in seen:
+            return
+        seen.add(ip)
+        found.append(ip)
+
+    try:
+        hostname = socket.gethostname()
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM):
+            push(info[4][0])
+    except OSError:
+        pass
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(("8.8.8.8", 80))
+            push(probe.getsockname()[0])
+        finally:
+            probe.close()
+    except OSError:
+        pass
+    return found[:limit]
+
+
 def apply_desktop_config_env() -> None:
     """Export persisted path overrides into the process environment."""
     cfg = load_desktop_config()
@@ -394,6 +464,12 @@ def apply_desktop_config_env() -> None:
         val = str(cfg.get(cfg_key) or "").strip()
         if val and not os.environ.get(env_key, "").strip():
             os.environ[env_key] = val
+    # Always sync bind host from desktop config so a Settings toggle can rebind
+    # on the next supervisor spawn (env may still be sticky from the parent).
+    if "listen_lan" in cfg or "server_host" in cfg:
+        os.environ["H3_WS_HOST"] = configured_server_host(cfg=cfg)
+    if "server_port" in cfg and str(cfg.get("server_port") or "").strip():
+        os.environ["H3_WS_PORT"] = str(configured_server_port(cfg=cfg))
     # repo_root → derive models/outputs/uploads/loras if not set explicitly
     repo = str(cfg.get("repo_root") or "").strip()
     if repo:

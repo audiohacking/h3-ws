@@ -15,6 +15,14 @@ from h3_paths import hf_hub_cache, hf_snapshot, load_desktop_config, writable_ro
 
 log = logging.getLogger("h3")
 
+TAOMATE_REPO = "Robert1212star/TaoMate-H3-3Step-ComfyUI"
+TAOMATE_FILE = "taomate_h3_3step_comfy.safetensors"
+TAOMATE_GUIDANCE = (
+    "TaoMate 3-step distill LoRA for MiniMax-H3 (ComfyUI package). "
+    "Quality tiers collapse to 3 steps at strength ~0.8. Prefer this over "
+    "older 8-step turbo recipes when you want the fastest turnaround."
+)
+
 TUTU_REPO = "tutututututu/Tutu-MiniMax-H3-AudioVideo-20to8-NFE-LoRA"
 TUTU_GUIDANCE = (
     "Tutu 20→8 NFE LoRA for FL2VA. Trained for 8 Euler steps at strength 0.8. "
@@ -58,6 +66,19 @@ _DISK_LORA_HINTS: tuple[dict[str, Any], ...] = (
 
 BUILTIN_LORAS: list[dict[str, Any]] = [
     {
+        "id": "taomate_h3_3step",
+        "label": "TaoMate H3 3-step",
+        "spec": (
+            f"https://huggingface.co/{TAOMATE_REPO}/resolve/main/{TAOMATE_FILE}"
+        ),
+        "scale": 0.8,
+        "steps": 3,
+        "layers": 50,
+        "reuse": 1,
+        "guidance": TAOMATE_GUIDANCE,
+        "turbo": True,
+    },
+    {
         "id": "tutu_20to8_nfe_step100",
         "label": "Tutu 20→8 NFE (step 100)",
         "spec": (
@@ -69,6 +90,7 @@ BUILTIN_LORAS: list[dict[str, Any]] = [
         "layers": 50,
         "reuse": 1,
         "guidance": TUTU_GUIDANCE,
+        "turbo": True,
     },
     {
         "id": "tutu_20to8_nfe_step200",
@@ -82,6 +104,7 @@ BUILTIN_LORAS: list[dict[str, Any]] = [
         "layers": 50,
         "reuse": 1,
         "guidance": TUTU_GUIDANCE,
+        "turbo": True,
     },
     {
         "id": "tutu_20to8_nfe_step300",
@@ -95,6 +118,7 @@ BUILTIN_LORAS: list[dict[str, Any]] = [
         "layers": 50,
         "reuse": 1,
         "guidance": TUTU_GUIDANCE,
+        "turbo": True,
     },
 ]
 

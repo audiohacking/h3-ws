@@ -38,6 +38,8 @@ except ImportError:
 
 from h3_paths import (
     apply_desktop_config_env,
+    configured_server_host,
+    configured_server_port,
     default_logs_dir,
     default_model_dir,
     discover_existing_model_dirs,
@@ -50,11 +52,11 @@ from h3_paths import (
     writable_root,
 )
 
-SERVER_HOST = "127.0.0.1"
-SERVER_PORT = int(os.environ.get("H3_WS_PORT", "8765"))
-SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}/"
+# Health probes always use loopback — connecting to 0.0.0.0 is unreliable.
+HEALTH_HOST = "127.0.0.1"
 RESTART_DELAY_S = 1.5
 HEALTH_TIMEOUT_S = 90.0
+REBIND_REQUEST = "rebind.request"
 
 _LOCK_FD: int | None = None
 _LOCK_PATH: Path | None = None
@@ -64,6 +66,41 @@ _stop = threading.Event()
 _shutting_down = False
 _log_file = None
 _webview_module = None
+
+
+def _server_port() -> int:
+    return configured_server_port()
+
+
+def _bind_host() -> str:
+    return configured_server_host()
+
+
+def _ui_url() -> str:
+    """URL for the embedded webview (always loopback)."""
+    return f"http://{HEALTH_HOST}:{_server_port()}/"
+
+
+def _rebind_path() -> Path:
+    return writable_root() / REBIND_REQUEST
+
+
+def request_server_rebind() -> None:
+    """Ask the desktop supervisor to stop/start the child with a fresh bind."""
+    path = _rebind_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{time.time():.3f}\n", encoding="utf-8")
+
+
+def _rebind_requested() -> bool:
+    return _rebind_path().is_file()
+
+
+def _clear_rebind_request() -> None:
+    try:
+        _rebind_path().unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _log(msg: str) -> None:
@@ -251,19 +288,19 @@ def claim_exclusive_runtime() -> None:
         _clear_server_pid()
 
     # Anything still listening on our port that looks like us (or blocks bind).
-    for pid in _pids_listening_on_port(SERVER_PORT):
+    for pid in _pids_listening_on_port(_server_port()):
         if pid in keep or pid in killed:
             continue
         args = _pid_args(pid)
         if _is_h3_ws_argv(args) or not args:
-            _kill_pid(pid, label=f":{SERVER_PORT} listener")
+            _kill_pid(pid, label=f":{_server_port()} listener")
             killed.add(pid)
 
     deadline = time.time() + 8.0
-    while time.time() < deadline and _port_open(SERVER_HOST, SERVER_PORT):
+    while time.time() < deadline and _port_open(HEALTH_HOST, _server_port()):
         time.sleep(0.2)
-    if _port_open(SERVER_HOST, SERVER_PORT):
-        _log(f"WARNING: {SERVER_HOST}:{SERVER_PORT} still busy after cleanup")
+    if _port_open(HEALTH_HOST, _server_port()):
+        _log(f"WARNING: {HEALTH_HOST}:{_server_port()} still busy after cleanup")
     elif killed:
         _log(f"Exclusive runtime claimed — cleared {len(killed)} leftover process(es)")
 
@@ -400,7 +437,7 @@ def _port_open(host: str, port: int) -> bool:
 def wait_for_server(timeout: float = HEALTH_TIMEOUT_S) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline and not _stop.is_set():
-        if _port_open(SERVER_HOST, SERVER_PORT):
+        if _port_open(HEALTH_HOST, _server_port()):
             return True
         time.sleep(0.4)
     return False
@@ -414,9 +451,9 @@ def _server_argv() -> list[str]:
     return [
         *base,
         "--host",
-        SERVER_HOST,
+        _bind_host(),
         "--port",
-        str(SERVER_PORT),
+        str(_server_port()),
         "--model-dir",
         str(default_model_dir()),
     ]
@@ -427,13 +464,15 @@ def spawn_server() -> subprocess.Popen[bytes]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env.setdefault("DEBUG", "false")
+    env["H3_WS_DESKTOP"] = "1"
     apply_desktop_config_env()
     if is_frozen():
         install_frozen_h3_av_wrapper()
     log_dir = default_logs_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     server_log = open(log_dir / "server.log", "a", encoding="utf-8")
-    _log(f"Starting server → {SERVER_URL}")
+    bind = _bind_host()
+    _log(f"Starting server → bind {bind}:{_server_port()} (UI {_ui_url()})")
     # New session so we can killpg on quit; PID file covers Force Quit orphans.
     _server_proc = subprocess.Popen(
         _server_argv(),
@@ -517,7 +556,20 @@ def supervisor_loop() -> None:
     """Keep the HTTP server alive while the desktop window is open."""
     consecutive_fail = 0
     while not _stop.is_set() and not _shutting_down:
-        if _port_open(SERVER_HOST, SERVER_PORT):
+        if _rebind_requested():
+            _log("Network bind change requested — restarting server")
+            _clear_rebind_request()
+            stop_server()
+            time.sleep(RESTART_DELAY_S)
+            if _stop.is_set() or _shutting_down:
+                break
+            try:
+                spawn_server()
+                wait_for_server(timeout=60)
+            except OSError as exc:
+                _log(f"Rebind restart failed: {exc}")
+            continue
+        if _port_open(HEALTH_HOST, _server_port()):
             consecutive_fail = 0
             time.sleep(2.0)
             continue
@@ -738,11 +790,11 @@ def open_webview() -> None:
         _log(f"pywebview missing: {exc}")
         _show_fatal(
             "H3-WS could not open its built-in window (pywebview missing).\n"
-            f"Open {SERVER_URL} in Safari as a fallback."
+            f"Open {_ui_url()} in Safari as a fallback."
         )
         import webbrowser
 
-        webbrowser.open(SERVER_URL)
+        webbrowser.open(_ui_url())
         try:
             while not _stop.is_set() and not _shutting_down:
                 time.sleep(1.0)
@@ -755,10 +807,11 @@ def open_webview() -> None:
         # Leave the Cocoa run loop; force-exit if it hangs.
         threading.Timer(0.5, lambda: os._exit(0)).start()
 
-    _log(f"Opening embedded UI → {SERVER_URL}")
+    ui = _ui_url()
+    _log(f"Opening embedded UI → {ui}")
     window = webview.create_window(
         title="H3-WS",
-        url=SERVER_URL,
+        url=ui,
         width=1440,
         height=960,
         min_size=(1024, 720),
