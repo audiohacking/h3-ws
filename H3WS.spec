@@ -90,6 +90,8 @@ hiddenimports = [
     "h3_media",
     "h3_crop",
     "h3_session",
+    "h3_refine",
+    "h3_update",
     "torch",
     "safetensors",
     *collect_submodules("uvicorn"),
