@@ -1405,7 +1405,8 @@ def create_app(
             "defaults": _defaults(),
             "model_note": note,
             "pyav_available": media_available(),
-            "taeh3_available": taeh3_available(),
+            "taeh3_available": taeh3_decode_ready(),
+            "taeh3_weights": taeh3_available(),
             "refine": refine_settings_public(
                 read_web_settings(state.output_dir).get("refine")
             ),
