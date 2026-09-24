@@ -193,6 +193,19 @@
   font-weight: 600;
 }
 
+.model-card__essential {
+  margin-left: 0.4rem;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #b45309;
+  background: #fef3c7;
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+  vertical-align: middle;
+}
+
 .model-card__badge {
   font-size: 11px;
   font-weight: 700;

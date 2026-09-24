@@ -1580,6 +1580,17 @@ def create_app(
                 loop.add_signal_handler(sig, _on_interrupt)
             except (NotImplementedError, RuntimeError):
                 pass
+
+        # Preview weights are tiny (~22 MB) and required for live denoise previews.
+        def _boot_taeh3() -> None:
+            try:
+                from h3_preview import ensure_taeh3
+
+                ensure_taeh3()
+            except Exception:
+                log.exception("background taeh3 ensure failed")
+
+        loop.run_in_executor(None, _boot_taeh3)
         yield
         state.engine.shutdown(wait=True)
 
@@ -1682,7 +1693,10 @@ def create_app(
     # ── Models management (status + user-confirmed download) ─────────────────
 
     def _component_status(model_dir: Path) -> list[dict[str, Any]]:
-        """Return present/missing status for FL2VA and Ref2VA components."""
+        """Return present/missing status for FL2VA, Ref2VA, TAEH3, and TaoMate."""
+        from h3_lora import BUILTIN_LORAS, lora_cached_path
+        from h3_preview import default_taeh3_path, taeh3_available
+
         def _dir_gib(path: Path) -> float:
             total = 0
             for p in path.rglob("*"):
@@ -1693,13 +1707,22 @@ def create_app(
                         pass
             return total / (1024 ** 3)
 
-        def _has_safetensors(path: Path) -> bool:
-            return path.is_dir() and any(path.glob("*.safetensors"))
+        def _file_gib(path: Path) -> float:
+            try:
+                return path.stat().st_size / (1024 ** 3) if path.is_file() else 0.0
+            except OSError:
+                return 0.0
 
         fl = fl2va_dir(model_dir)
         r2 = ref2va_dir(model_dir)
         fl_ok, _ = model_layout_ok(model_dir)
         r2_ok, _ = model_layout_ok(model_dir, need_ref2va=True)
+        tae = default_taeh3_path()
+        tae_ok = taeh3_available(tae)
+        tao = next((p for p in BUILTIN_LORAS if p.get("id") == "taomate_h3_3step"), None)
+        tao_spec = str(tao["spec"]) if tao else ""
+        tao_path = lora_cached_path(tao_spec) if tao_spec else None
+        tao_ok = tao_path is not None and tao_path.is_file()
         return [
             {
                 "id": "fl2va",
@@ -1708,6 +1731,7 @@ def create_app(
                 "path": str(fl),
                 "size_gib": round(_dir_gib(fl), 1),
                 "note": "Required for t2va / first / last frame generation.",
+                "essential": True,
             },
             {
                 "id": "ref2va",
@@ -1716,6 +1740,31 @@ def create_app(
                 "path": str(r2),
                 "size_gib": round(_dir_gib(r2), 1),
                 "note": "Required for reference (image/video) modes.",
+                "essential": False,
+            },
+            {
+                "id": "taeh3",
+                "label": "TAEH3 live preview",
+                "present": tae_ok,
+                "path": str(tae),
+                "size_gib": round(_file_gib(tae), 3),
+                "note": (
+                    "Tiny (~22 MB) live-preview decoder. Auto-fetched on first launch; "
+                    "required for mid-run preview frames."
+                ),
+                "essential": True,
+            },
+            {
+                "id": "taomate",
+                "label": "TaoMate H3 3-step turbo",
+                "present": tao_ok,
+                "path": str(tao_path) if tao_path else tao_spec,
+                "size_gib": round(_file_gib(tao_path), 2) if tao_path else 2.4,
+                "note": (
+                    "Preferred turbo/distill LoRA (~2.4 GB). Enables the 3-step turbo "
+                    "path in the composer."
+                ),
+                "essential": False,
             },
         ]
 
@@ -1856,9 +1905,13 @@ def create_app(
     EXPECTED_BYTES = {
         "fl2va": 134.1 * 1024**3,   # ~134 GB
         "ref2va": 61.7 * 1024**3,   # ~62 GB (transformer only)
+        "taeh3": 22 * 1024**2,      # ~22 MB
+        "taomate": 2.4 * 1024**3,   # ~2.4 GB
     }
 
     _COMPONENT_DIR = {"fl2va": "FL2VA", "ref2va": "Ref2VA"}
+    _LIGHT_COMPONENTS = frozenset({"taeh3", "taomate"})
+    _ALL_DOWNLOAD_COMPONENTS = frozenset({"fl2va", "ref2va", "taeh3", "taomate"})
 
     def _component_progress(model_dir: Path, component: str) -> tuple[int, int]:
         """Sum bytes of .incomplete partials + already-relocated final files.
@@ -1869,6 +1922,24 @@ def create_app(
         The global hub cache (~/.cache/huggingface/hub/blobs) is a DIFFERENT, stale
         repo and must not drive the progress bar.
         """
+        if component == "taeh3":
+            from h3_preview import default_taeh3_path
+
+            path = default_taeh3_path()
+            tmp = path.with_suffix(".download")
+            complete = path.stat().st_size if path.is_file() else 0
+            incomplete = tmp.stat().st_size if tmp.is_file() else 0
+            return complete, incomplete
+        if component == "taomate":
+            from h3_lora import BUILTIN_LORAS, lora_cached_path
+
+            tao = next((p for p in BUILTIN_LORAS if p.get("id") == "taomate_h3_3step"), None)
+            if not tao:
+                return 0, 0
+            hit = lora_cached_path(str(tao["spec"]))
+            if hit is not None and hit.is_file():
+                return hit.stat().st_size, 0
+            return 0, 0
         comp_dir = _COMPONENT_DIR.get(component)
         if not comp_dir:
             return 0, 0
@@ -1892,21 +1963,49 @@ def create_app(
 
     async def _run_download(component: str) -> None:
         """Run download in the background; update _download_state on finish."""
-        cmd = _download_model_cmd("--local-dir", str(state.engine.model_dir))
-        if component == "ref2va":
-            cmd.append("--with-ref2va")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            output, _ = await proc.communicate()
-            text = output.decode("utf-8", "replace")
-            if proc.returncode != 0:
-                _download_state["error"] = text.strip()[-2000:] or "download failed"
-            else:
+            if component == "taeh3":
+                from h3_preview import download_taeh3
+
+                await asyncio.to_thread(download_taeh3)
                 _download_state["error"] = None
+            elif component == "taomate":
+                from h3_lora import BUILTIN_LORAS, ensure_lora
+
+                tao = next(
+                    (p for p in BUILTIN_LORAS if p.get("id") == "taomate_h3_3step"),
+                    None,
+                )
+                if not tao:
+                    raise RuntimeError("TaoMate builtin recipe missing")
+                await asyncio.to_thread(ensure_lora, str(tao["spec"]))
+                _download_state["error"] = None
+            else:
+                cmd = _download_model_cmd("--local-dir", str(state.engine.model_dir))
+                if component == "ref2va":
+                    cmd.append("--with-ref2va")
+                # Always pull the tiny preview decoder alongside FL2VA.
+                if component == "fl2va":
+                    cmd.append("--with-taeh3")
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+                output, _ = await proc.communicate()
+                text = output.decode("utf-8", "replace")
+                if proc.returncode != 0:
+                    _download_state["error"] = text.strip()[-2000:] or "download failed"
+                else:
+                    _download_state["error"] = None
+                    # Belt-and-suspenders if the script skipped taeh3.
+                    if component == "fl2va":
+                        try:
+                            from h3_preview import ensure_taeh3
+
+                            await asyncio.to_thread(ensure_taeh3)
+                        except Exception:
+                            pass
         except Exception as exc:
             _download_state["error"] = str(exc)
         finally:
@@ -1953,8 +2052,10 @@ def create_app(
         import time
 
         component = component.strip().lower()
-        if component not in ("fl2va", "ref2va"):
-            raise HTTPException(400, "component must be 'fl2va' or 'ref2va'")
+        if component not in _ALL_DOWNLOAD_COMPONENTS:
+            raise HTTPException(
+                400, "component must be one of: fl2va, ref2va, taeh3, taomate"
+            )
 
         st = _download_state
         task = st.get("task")
@@ -1997,12 +2098,13 @@ def create_app(
                         speed_str = f"{speed / 1024:.0f} KB/s"
                     else:
                         speed_str = f"{speed:.0f} B/s" if speed > 0 else "starting..."
+                    expected_gb = round(expected / 1024**3, 4) if expected else 0
                     yield {
                         "event": "progress",
                         "data": json.dumps({
                             "percent": pct,
-                            "downloaded_gb": round(current / 1024**3, 2),
-                            "expected_gb": round(expected / 1024**3, 1),
+                            "downloaded_gb": round(current / 1024**3, 4),
+                            "expected_gb": expected_gb,
                             "speed": speed_str,
                             "active": True,
                         }),
@@ -2037,23 +2139,16 @@ def create_app(
         huggingface_hub natively resumes partial downloads.
         """
         component = str(body.get("component") or "").strip().lower()
-        if component not in ("fl2va", "ref2va"):
-            raise HTTPException(400, "component must be 'fl2va' or 'ref2va'")
-        cmd = _download_model_cmd("--local-dir", str(state.engine.model_dir))
-        if component == "ref2va":
-            cmd.append("--with-ref2va")
+        if component not in _ALL_DOWNLOAD_COMPONENTS:
+            raise HTTPException(
+                400, "component must be one of: fl2va, ref2va, taeh3, taomate"
+            )
 
         async def _run() -> dict[str, Any]:
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                )
-                output, _ = await proc.communicate()
-                text = output.decode("utf-8", "replace")
-                if proc.returncode != 0:
-                    return {"ok": False, "error": text.strip()[-2000:] or "download failed"}
+                await _run_download(component)
+                if _download_state.get("error"):
+                    return {"ok": False, "error": _download_state["error"]}
                 return {
                     "ok": True,
                     "components": _component_status(state.engine.model_dir),

@@ -246,25 +246,12 @@ def _print_selection(chosen: list[str], sizes: dict[str, int], *, n_repo: int, s
 
 def download_taeh3(dest: Path | None = None, *, force: bool = False) -> Path:
     """Fetch madebyollin's ~22 MB TAEH3 preview decoder into models/vae_approx/."""
-    import urllib.request
+    from h3_preview import download_taeh3 as _download
+    from h3_preview import taeh3_available as _ready
 
-    path = Path(dest) if dest is not None else default_taeh3_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if taeh3_available(path) and not force:
-        print(f"taeh3 already present: {path} ({path.stat().st_size} bytes)")
-        return path
-    print(f"Downloading TAEH3 preview decoder (~{TAEH3_GIB:.2f} GB) → {path}")
-    tmp = path.with_suffix(".download")
-    try:
-        urllib.request.urlretrieve(TAEH3_URL, tmp)
-        tmp.replace(path)
-    except Exception:
-        if tmp.is_file():
-            tmp.unlink(missing_ok=True)
-        raise
-    if not taeh3_available(path):
-        raise SystemExit(f"download finished but {path} looks incomplete")
-    print(f"OK: {path} ({path.stat().st_size} bytes)")
+    path = _download(dest, force=force)
+    if _ready(path):
+        print(f"OK: taeh3 → {path} ({path.stat().st_size} bytes)")
     return path
 
 

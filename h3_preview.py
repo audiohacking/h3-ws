@@ -38,6 +38,11 @@ PREVIEW_MAX_PX = 640
 PREVIEW_QUALITY = 80
 PREVIEW_FPS = 24
 
+TAEH3_URL = (
+    "https://github.com/madebyollin/taehv/raw/main/safetensors/taeh3.safetensors"
+)
+TAEH3_MIN_BYTES = 1_000_000
+
 PreviewCallback = Callable[[dict[str, Any]], None]
 
 _decoder_lock = threading.Lock()
@@ -70,7 +75,7 @@ def default_taeh3_path() -> Path:
             resolved = path.expanduser().resolve()
         except OSError:
             continue
-        if resolved.is_file() and resolved.stat().st_size > 1_000_000:
+        if resolved.is_file() and resolved.stat().st_size > TAEH3_MIN_BYTES:
             return resolved
     return (writable_root() / "models" / "vae_approx" / "taeh3.safetensors").resolve()
 
@@ -82,7 +87,40 @@ DEFAULT_TAEH3 = default_taeh3_path()
 def taeh3_available(path: Path | None = None) -> bool:
     """True when the weight file is on disk (download status / --status)."""
     p = Path(path) if path is not None else default_taeh3_path()
-    return p.is_file() and p.stat().st_size > 1_000_000
+    return p.is_file() and p.stat().st_size > TAEH3_MIN_BYTES
+
+
+def download_taeh3(dest: Path | None = None, *, force: bool = False) -> Path:
+    """Fetch madebyollin's ~22 MB TAEH3 preview decoder into models/vae_approx/."""
+    import urllib.request
+
+    path = Path(dest) if dest is not None else default_taeh3_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if taeh3_available(path) and not force:
+        log.info("taeh3 already present: %s (%s bytes)", path, path.stat().st_size)
+        return path
+    log.info("Downloading TAEH3 preview decoder → %s", path)
+    tmp = path.with_suffix(".download")
+    try:
+        urllib.request.urlretrieve(TAEH3_URL, tmp)
+        tmp.replace(path)
+    except Exception:
+        if tmp.is_file():
+            tmp.unlink(missing_ok=True)
+        raise
+    if not taeh3_available(path):
+        raise RuntimeError(f"download finished but {path} looks incomplete")
+    log.info("OK: taeh3 at %s (%s bytes)", path, path.stat().st_size)
+    return path
+
+
+def ensure_taeh3(*, force: bool = False) -> Path | None:
+    """Ensure taeh3.safetensors exists; return path or None on failure."""
+    try:
+        return download_taeh3(force=force)
+    except Exception as exc:  # noqa: BLE001 — startup must not die on preview assets
+        log.warning("Could not ensure taeh3 preview weights: %s", exc)
+        return None
 
 
 def taeh3_decode_ready(path: Path | None = None) -> bool:

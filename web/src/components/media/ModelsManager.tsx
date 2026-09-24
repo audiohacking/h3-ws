@@ -7,6 +7,7 @@ interface ModelComponent {
   path: string;
   size_gib: number;
   note: string;
+  essential?: boolean;
 }
 
 interface ModelsStatus {
@@ -218,11 +219,24 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
 
   function startDownload(component: ModelComponent) {
     if (busyId !== null) return;
-    if (!component.present && !window.confirm(
-      `Download ${component.label}?\n\n` +
-      `This can be large (${component.id === "fl2va" ? "~134" : "~62"} GB).\n` +
-      `Downloads resume automatically if interrupted.\n\nProceed?`
-    )) {
+    const sizeHint =
+      component.id === "fl2va"
+        ? "~134 GB"
+        : component.id === "ref2va"
+          ? "~62 GB"
+          : component.id === "taomate"
+            ? "~2.4 GB"
+            : "~22 MB";
+    const needsConfirm = component.id === "fl2va" || component.id === "ref2va" || component.id === "taomate";
+    if (
+      !component.present &&
+      needsConfirm &&
+      !window.confirm(
+        `Download ${component.label}?\n\n` +
+          `Size: ${sizeHint}.\n` +
+          `Downloads resume automatically if interrupted.\n\nProceed?`,
+      )
+    ) {
       return;
     }
     setError(null);
@@ -334,12 +348,21 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
             <div key={c.id} className={`model-card ${c.present ? "model-card--present" : "model-card--missing"}`}>
               <div className="model-card__body">
                 <div className="model-card__row">
-                  <span className="model-card__label">{c.label}</span>
+                  <span className="model-card__label">
+                    {c.label}
+                    {c.essential ? <span className="model-card__essential"> essential</span> : null}
+                  </span>
                   <span className={`model-card__badge ${c.present ? "model-card__badge--ok" : "model-card__badge--missing"}`}>
                     {c.present ? "Present" : "Missing"}
                   </span>
                 </div>
-                {c.size_gib > 0 && <p className="model-card__size">{c.size_gib.toFixed(1)} GB on disk</p>}
+                {c.size_gib > 0 && (
+                  <p className="model-card__size">
+                    {c.size_gib >= 1
+                      ? `${c.size_gib.toFixed(1)} GB on disk`
+                      : `${Math.max(1, Math.round(c.size_gib * 1024))} MB on disk`}
+                  </p>
+                )}
                 <p className="model-card__note">{c.note}</p>
                 <p className="model-card__path">{c.path}</p>
 
@@ -356,6 +379,12 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
                       <span>
                         {progress.downloaded_gb > 0 && progress.speed.startsWith("resuming") ? (
                           <span className="download-progress__percent">Resuming {progress.downloaded_gb.toFixed(1)} GB…</span>
+                        ) : progress.expected_gb > 0 && progress.expected_gb < 0.1 ? (
+                          <>
+                            <span className="download-progress__percent">{progress.percent}%</span>
+                            {" · "}
+                            ~{(progress.expected_gb * 1024).toFixed(0)} MB
+                          </>
                         ) : (
                           <>
                             <span className="download-progress__percent">{progress.percent}%</span>
