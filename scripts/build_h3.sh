@@ -11,6 +11,15 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "h3.c targets Apple Silicon macOS."
   exit 1
 fi
+# Metal4 / MTLMathModeSafe / MPSGraph SDPA need the macOS 26+ SDK (Xcode 26+).
+SDKROOT="$(xcrun --sdk macosx --show-sdk-path 2>/dev/null || true)"
+METAL_HDR="${SDKROOT}/System/Library/Frameworks/Metal.framework/Headers/MTLDevice.h"
+if [[ -z "$SDKROOT" || ! -f "$METAL_HDR" ]] || ! grep -q 'MTLGPUFamilyMetal4' "$METAL_HDR"; then
+  echo "h3.c needs the macOS 26+ Metal SDK (Xcode 26+)."
+  echo "  SDKROOT=${SDKROOT:-unset}"
+  xcodebuild -version 2>/dev/null || true
+  exit 1
+fi
 jobs="$(sysctl -n hw.ncpu 2>/dev/null || echo 8)"
 PATCH="$ROOT/patches/h3-prefer-H3_AV.patch"
 if [[ -f "$PATCH" ]] && ! grep -q 'getenv("H3_AV")' "$SRC/h3_ffmpeg.c"; then

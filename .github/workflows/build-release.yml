@@ -16,12 +16,28 @@ permissions:
 jobs:
   build-macos:
     name: Build H3-WS.app
-    runs-on: macos-14
+    # h3.c needs Metal4 / MPS SDPA headers (macOS 26 SDK, Xcode 26+).
+    # macos-14 ships Xcode 15.4 and cannot compile the vendored fork.
+    runs-on: macos-26
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         # h3.c is vendored in-tree (local fork) — no submodules.
+
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          for app in /Applications/Xcode_26.6.app /Applications/Xcode_26.5.app \
+                     /Applications/Xcode_26.app /Applications/Xcode.app; do
+            if [ -d "$app/Contents/Developer" ]; then
+              sudo xcode-select -s "$app/Contents/Developer"
+              break
+            fi
+          done
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          clang --version | head -1
 
       - name: Set version
         run: |
@@ -42,7 +58,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -62,6 +78,7 @@ jobs:
         run: |
           ./scripts/build_h3.sh
           test -x third_party/h3.c/h3
+          file third_party/h3.c/h3
 
       - name: Check macOS build assets
         run: |
