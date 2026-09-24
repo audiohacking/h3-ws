@@ -4,8 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/third_party/h3.c"
 if [[ ! -f "$SRC/Makefile" ]]; then
-  echo "h3.c submodule missing. Run:"
-  echo "  git submodule update --init --recursive"
+  echo "h3.c sources missing at $SRC (vendored tree expected)."
   exit 1
 fi
 if [[ "$(uname -s)" != "Darwin" ]]; then

@@ -40,11 +40,15 @@ web/dist/
 # Runtime ffmpeg/ffprobe names for the PyAV shim
 scripts/.h3-av-bin/
 
-# h3.c build artifacts (submodule still tracked)
+# h3.c build artifacts (vendored tree)
 third_party/h3.c/h3
 third_party/h3.c/*.o
 third_party/h3.c/*.air
 third_party/h3.c/*.metallib
+
+# FastH3 Live experiment — set aside; never ship with Continuity
+h3_live/
+data/fasth3_live/
 
 # Local agent tooling caches (memories, settings, hooks) — not project source
 .claude/

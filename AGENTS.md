@@ -18,7 +18,7 @@ Canonical guide for AI agents using **h3-ws** to generate video on Apple Silicon
 
 The app opens in **Ref2VA** mode by default (add an image/video/audio reference to enable Generate; switch modes as needed).
 
-This stack does **not** run cloud prompt expansion. What you send is what H3 sees. h3.c media I/O is the PyAV shim (`scripts/h3-av`); no system ffmpeg. The `third_party/h3.c` submodule is a **local fork** — we manage it inside this repo (commit locally, never push upstream); it carries the PyAV shim wiring, LoRA fold, and INT8 support. See [`DEV.md`](DEV.md) for the current handoff state.
+This stack does **not** run cloud prompt expansion. What you send is what H3 sees. h3.c media I/O is the PyAV shim (`scripts/h3-av`); no system ffmpeg. `third_party/h3.c` is a **vendored local fork** of antirez/h3.c (PyAV shim wiring, LoRA fold, INT8, `--preview-latent`) — managed inside this repo, never pushed upstream. See [`DEV.md`](DEV.md) for the current handoff state.
 
 ## Weights (mandatory)
 
@@ -36,7 +36,7 @@ python scripts/download_model.py --with-ref2va   # + Ref2VA transformer ~62 GB
 python scripts/download_model.py --status        # what is already on disk
 ```
 
-Build the engine: `./scripts/build_h3.sh` (needs the `third_party/h3.c` submodule).
+Build the engine: `./scripts/build_h3.sh` (needs `third_party/h3.c` sources in-tree).
 
 ## Frame math
 

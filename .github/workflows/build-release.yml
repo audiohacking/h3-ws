@@ -21,8 +21,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+        # h3.c is vendored in-tree (local fork) — no submodules.
 
       - name: Set version
         run: |
@@ -124,9 +123,11 @@ jobs:
             checksums.txt
 
       - name: Attach to GitHub Release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'release' && github.event.release.tag_name || github.event.inputs.version }}
           files: |
             H3-WS-macOS.dmg
             checksums.txt
+          fail_on_unmatched_files: true

@@ -52,11 +52,8 @@ Building and running from a git checkout is for development, packaging, and CI. 
 ### Install from source
 
 ```bash
-git clone --recurse-submodules https://github.com/lmangani/h3-ws.git
+git clone https://github.com/lmangani/h3-ws.git
 cd h3-ws
-
-# If you already cloned without submodules:
-git submodule update --init --recursive
 
 uv venv --python 3.12 --seed && source .venv/bin/activate
 uv pip install -r requirements.txt
@@ -68,7 +65,7 @@ python scripts/download_model.py          # ~134 GB FL2VA only (enough to genera
 cd web && npm install && npm run build && cd ..
 ```
 
-Do **not** `hf download MiniMaxAI/MiniMax-H3` without filters. The Hugging Face repo is ~464 GB: native `FL2VA/` + `Ref2VA/` plus a Diffusers copy at the repo root that h3.c never opens. Default `python scripts/download_model.py` fetches **FL2VA only** (~134 GB). Pass `--with-ref2va` for the extra ~62 GB Ref2VA transformer. Existing files are never deleted; a second run resumes.
+`third_party/h3.c` is a **vendored local fork** of [antirez/h3.c](https://github.com/antirez/h3.c) (PyAV shim, LoRA fold, INT8, `--preview-latent`). It lives in this repo — no git submodules. Do **not** `hf download MiniMaxAI/MiniMax-H3` without filters; use `scripts/download_model.py` instead.
 
 ### Run (dev server)
 
