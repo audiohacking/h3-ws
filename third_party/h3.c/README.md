@@ -525,10 +525,11 @@ aggressive point. The latter produced a coherent walking fox and repeated at
 8.02 seconds of DiT versus about 15.82 seconds natively. Native 256 uses the
 same-cost spatial-RoPE adaptation described above; it remains a fast composition
 preview rather than a substitute for a 512- or 768-class final render.
-The video VAE automatically chooses a 256-320 pixel spatial tile from the
-requested canvas geometry, minimizing repeated overlap work while keeping peak
-storage bounded. `H3_VAE_TILE_PIXELS=256` restores the original conservative
-tile plan for close-reference diagnosis.
+The video VAE uses the released MiniMax plan: **256-pixel spatial tiles** with
+64-pixel minimum overlap, linearly blended. An earlier geometry search that
+picked up to 320-pixel tiles produced a visible 16-pixel quilt on Metal
+(antirez/h3.c#1); the default is locked to 256. `H3_VAE_TILE_PIXELS=N` (multiple
+of 16, 256–512) remains available for diagnosis only.
 
 ### Weight residency and streamed prompt encoding
 

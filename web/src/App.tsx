@@ -237,7 +237,7 @@ async function createPreset(preset: GenerationPreset): Promise<void> {
   });
 }
 
-async function uploadFile(file: File, kind: string): Promise<{ path: string; durationS?: number; filename?: string }> {
+async function uploadFile(file: File, kind: string): Promise<{ path: string; durationS?: number; filename?: string; hasAudio?: boolean }> {
   const fd = new FormData();
   fd.append("file", file);
   const r = await fetch(`${API}/api/upload?kind=${encodeURIComponent(kind)}`, {
@@ -250,6 +250,7 @@ async function uploadFile(file: File, kind: string): Promise<{ path: string; dur
     path: data.path as string,
     durationS: typeof data.duration_s === "number" ? data.duration_s : undefined,
     filename: data.filename as string | undefined,
+    hasAudio: typeof data.has_audio === "boolean" ? data.has_audio : undefined,
   };
 }
 
@@ -272,7 +273,9 @@ export default function App() {
   const [seed, setSeed] = useState("");
   const [ssdStreaming, setSsdStreaming] = useState(false);
   const [tokenReduction, setTokenReduction] = useState(true);
-  const [upscale, setUpscale] = useState(false);
+  // Lanczos post-upscale retired — wait for latent upscale. Keep false so old
+  // snapshots / generate bodies never re-arm the timeline-dupe path.
+  const upscale = false;
   const [loraPresetIds, setLoraPresetIds] = useState<string[]>([]);
   const [loraPresets, setLoraPresets] = useState<LoraPreset[]>([]);
   const [addingCustomLora, setAddingCustomLora] = useState(false);
@@ -516,7 +519,6 @@ export default function App() {
       setEndImageName(snap.endImagePath ? snap.endImagePath.split("/").pop() ?? "end" : null);
       setTokenReduction(Boolean(snap.tokenReduction));
       setSsdStreaming(Boolean(snap.ssdStreaming));
-      if (snap.upscale != null) setUpscale(Boolean(snap.upscale));
     },
     [config, selectClipId, prompt, refs, imagePath, endImagePath],
   );
@@ -1123,27 +1125,6 @@ export default function App() {
     );
   }
 
-  async function upscaleLibraryClip(clip: Clip) {
-    setBusy(true);
-    try {
-      const r = await fetch(`${API}/api/clips/${clip.id}/upscale`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scale: 2 }),
-      });
-      if (!r.ok) {
-        const body = await r.json().catch(() => null);
-        throw new Error((body && body.detail) || "Upscale failed");
-      }
-      const data = await r.json();
-      if (data.clip) setClips((prev) => [data.clip as Clip, ...prev]);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function saveCurrentFrame() {
     const video = playerVideoRef.current;
     if (!video || !activeClip) return;
@@ -1429,7 +1410,6 @@ export default function App() {
       autoconcat: multi,
       ssd_streaming: opts.loraPresetIds.length ? false : opts.ssdStreaming,
       token_reduction: tokenLocked ? false : opts.tokenReduction,
-      upscale: opts.upscale ? 2 : undefined,
       loras: loraPresets
         .filter((p) => opts.loraPresetIds.includes(p.id))
         .map((p) => ({ id: p.id, spec: p.spec, scale: p.scale })),
@@ -1895,8 +1875,6 @@ export default function App() {
               ssdStreaming={ssdStreaming}
               ssdLocked={loraPresetIds.length > 0}
               onSsdStreaming={setSsdStreaming}
-              upscale={upscale}
-              onUpscale={setUpscale}
               clipMultiplier={clipMultiplier}
               onClipMultiplier={setClipMultiplier}
               sceneQueue={sceneQueue}
@@ -1983,20 +1961,6 @@ export default function App() {
                 >
                   ×
                 </button>
-                {clip.status === "done" && clip.video_url && (
-                  <button
-                    type="button"
-                    className="library-upscale"
-                    title="Upscale ×2 into a new library clip"
-                    disabled={busy}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void upscaleLibraryClip(clip);
-                    }}
-                  >
-                    ↑2
-                  </button>
-                )}
               </div>
             ))}
           </div>

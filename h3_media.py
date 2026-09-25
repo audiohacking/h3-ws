@@ -332,29 +332,209 @@ def ffmpeg_ok() -> tuple[bool, str]:
     return media_shim_ok()
 
 
+def _make_audio_resampler(*, sample_fmt: str, layout: str = "stereo", rate: int = 48000):
+    """PyAV ≥16 dropped ``AudioFrame.reformat`` — use AudioResampler instead."""
+    from av.audio.resampler import AudioResampler
+
+    return AudioResampler(format=sample_fmt, layout=layout, rate=rate)
+
+
+def _mux_audio_frame(out, stream, resampler, frame) -> None:
+    """Resample one audio frame (or flush with ``frame=None``) and mux packets."""
+    for converted in resampler.resample(frame):
+        converted.pts = None
+        for packet in stream.encode(converted):
+            out.mux(packet)
+
+
+def _flush_audio_encoder(out, stream, resampler) -> None:
+    _mux_audio_frame(out, stream, resampler, None)
+    for packet in stream.encode(None):
+        out.mux(packet)
+
+
 def probe_duration_seconds(path: Path | str) -> float | None:
     """Duration in seconds via PyAV. No ffprobe CLI."""
+    info = probe_media(path)
+    return info.get("duration_s")
+
+
+def probe_media(path: Path | str) -> dict[str, Any]:
+    """Lightweight PyAV probe: streams + duration. Never shells out to ffprobe."""
     src = Path(path)
+    empty: dict[str, Any] = {
+        "has_audio": False,
+        "has_video": False,
+        "duration_s": None,
+        "audio_rate": None,
+        "audio_channels": None,
+        "audio_codec": None,
+    }
     if not src.is_file() or not media_available():
-        return None
+        return empty
     try:
         import av
 
         container = av.open(str(src))
         try:
+            has_audio = any(s.type == "audio" for s in container.streams)
+            has_video = any(s.type == "video" for s in container.streams)
+            duration_s: float | None = None
             if container.duration and container.duration > 0:
-                return float(container.duration) / float(av.time_base)
-            best = 0.0
-            for stream in container.streams:
-                if stream.duration and stream.time_base and stream.duration > 0:
-                    seconds = float(stream.duration * stream.time_base)
-                    if seconds > best:
-                        best = seconds
-            return best or None
+                duration_s = float(container.duration) / float(av.time_base)
+            else:
+                best = 0.0
+                for stream in container.streams:
+                    if stream.duration and stream.time_base and stream.duration > 0:
+                        seconds = float(stream.duration * stream.time_base)
+                        if seconds > best:
+                            best = seconds
+                duration_s = best or None
+            audio_rate = audio_channels = None
+            audio_codec = None
+            a_stream = next((s for s in container.streams if s.type == "audio"), None)
+            if a_stream is not None:
+                ctx = a_stream.codec_context
+                audio_codec = getattr(ctx, "name", None) if ctx is not None else None
+                audio_rate = int(a_stream.rate) if a_stream.rate else None
+                layout = getattr(a_stream, "layout", None)
+                if layout is not None and getattr(layout, "nb_channels", None):
+                    audio_channels = int(layout.nb_channels)
+                elif ctx is not None and getattr(ctx, "channels", None):
+                    audio_channels = int(ctx.channels)
+            return {
+                "has_audio": has_audio,
+                "has_video": has_video,
+                "duration_s": duration_s,
+                "audio_rate": audio_rate,
+                "audio_channels": audio_channels,
+                "audio_codec": audio_codec,
+            }
         finally:
             container.close()
     except Exception:
-        return None
+        return empty
+
+
+def audio_is_h3_ready(path: Path | str) -> bool:
+    """True when the file already has a stereo soundtrack PyAV/h3-av can ingest."""
+    info = probe_media(path)
+    if not info["has_audio"]:
+        return False
+    channels = info.get("audio_channels")
+    rate = info.get("audio_rate")
+    codec = (info.get("audio_codec") or "").lower()
+    # H3 ultimately wants stereo @ 32 kHz f32; h3-av resamples, so any stereo
+    # PCM/AAC/MP3 we can open is fine. Reject mono / multi / unknown layout so
+    # adapt_audio_for_h3 normalizes them up front.
+    if channels != 2:
+        return False
+    if rate is None or int(rate) < 16000:
+        return False
+    if codec in ("aac", "mp3", "pcm_s16le", "pcm_f32le", "flac", "opus", "vorbis"):
+        return True
+    # Unknown but stereo — still rewrite so decode path is deterministic.
+    return False
+
+
+def adapt_audio_for_h3(src: Path | str, dest: Path | str) -> Path:
+    """Rewrite media so H3 ingestion always gets a stereo soundtrack via PyAV.
+
+    * Video + audio → stream-copy video, re-encode audio as stereo AAC @ 48 kHz.
+    * Audio-only → stereo PCM WAV @ 48 kHz (no AAC encoder dependency).
+    * Video without audio → copy through unchanged (caller should use silent_video).
+
+    Never shells out to ffmpeg — PyAV only.
+    """
+    import shutil
+
+    import av
+    from av.audio.frame import AudioFrame
+    from av.video.frame import VideoFrame
+
+    source = Path(src)
+    target = Path(dest)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not source.is_file():
+        raise FileNotFoundError(f"media not found: {source}")
+
+    info = probe_media(source)
+    if not info["has_audio"] and not info["has_video"]:
+        raise ValueError(f"no audio/video streams in {source}")
+
+    # Silent video: nothing to adapt — keep bytes identical.
+    if info["has_video"] and not info["has_audio"]:
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+        return target
+
+    # Already a stereo soundtrack we can open — skip the re-encode.
+    if audio_is_h3_ready(source):
+        if source.resolve() != target.resolve():
+            shutil.copy2(source, target)
+        return target
+
+    inp = av.open(str(source))
+    try:
+        has_video = any(s.type == "video" for s in inp.streams)
+        if has_video:
+            if target.suffix.lower() not in _VIDEO_EXTS_ADAPT:
+                target = target.with_suffix(".mp4")
+            out = av.open(str(target), mode="w")
+        else:
+            if target.suffix.lower() not in (".wav", ".mp3", ".m4a", ".aac"):
+                target = target.with_suffix(".wav")
+            out = av.open(str(target), mode="w", format="wav")
+        try:
+            v_out = None
+            a_out = None
+            a_resampler = None
+            v_in = next((s for s in inp.streams if s.type == "video"), None)
+            if v_in is not None:
+                # Re-encode video (stream-copy + separate audio re-encode is
+                # fragile across containers); keep veryfast/CRF so refs stay light.
+                fps = float(v_in.average_rate) if v_in.average_rate else 24.0
+                v_out = out.add_stream("libx264", rate=max(1, int(round(fps))))
+                v_out.width = int(v_in.codec_context.width or 0)
+                v_out.height = int(v_in.codec_context.height or 0)
+                v_out.pix_fmt = "yuv420p"
+                v_out.options = {"preset": "veryfast", "crf": "18"}
+            if has_video:
+                a_out = out.add_stream("aac", rate=48000)
+                a_out.layout = "stereo"
+                a_resampler = _make_audio_resampler(
+                    sample_fmt="fltp", layout="stereo", rate=48000
+                )
+            else:
+                a_out = out.add_stream("pcm_s16le", rate=48000)
+                a_out.layout = "stereo"
+                a_resampler = _make_audio_resampler(
+                    sample_fmt="s16", layout="stereo", rate=48000
+                )
+
+            for frame in inp.decode():
+                if isinstance(frame, VideoFrame) and v_out is not None:
+                    frame = frame.reformat(format="yuv420p")
+                    frame.pts = None
+                    for packet in v_out.encode(frame):
+                        out.mux(packet)
+                elif isinstance(frame, AudioFrame) and a_out is not None and a_resampler is not None:
+                    _mux_audio_frame(out, a_out, a_resampler, frame)
+
+            if v_out is not None:
+                for packet in v_out.encode():
+                    out.mux(packet)
+            if a_out is not None and a_resampler is not None:
+                _flush_audio_encoder(out, a_out, a_resampler)
+        finally:
+            out.close()
+    finally:
+        inp.close()
+    return target
+
+
+# Suffixes we keep when adapting a video reference for H3.
+_VIDEO_EXTS_ADAPT = {".mp4", ".mov", ".m4v", ".mkv", ".webm"}
 
 
 def resize_still_to_canvas(src: Path | str, dest: Path | str, width: int, height: int) -> Path:
@@ -426,9 +606,11 @@ def frame_video(src: Path | str, dest: Path | str, crop: Any) -> Path:
         try:
             v_out = None
             a_out = None
+            a_resampler = None
             if any(s.type == "audio" for s in inp.streams):
                 a_out = out.add_stream("aac", rate=48000)
                 a_out.layout = "stereo"
+                a_resampler = _make_audio_resampler(sample_fmt="fltp", layout="stereo", rate=48000)
             for frame in inp.decode():
                 if isinstance(frame, VideoFrame):
                     img = Image.fromarray(frame.to_ndarray(format="rgb24"))
@@ -452,17 +634,13 @@ def frame_video(src: Path | str, dest: Path | str, crop: Any) -> Path:
                     new_frame.pts = None
                     for packet in v_out.encode(new_frame):
                         out.mux(packet)
-                elif isinstance(frame, AudioFrame) and a_out is not None:
-                    frame = frame.reformat(format="fltp", layout="stereo", rate=48000)
-                    frame.pts = None
-                    for packet in a_out.encode(frame):
-                        out.mux(packet)
+                elif isinstance(frame, AudioFrame) and a_out is not None and a_resampler is not None:
+                    _mux_audio_frame(out, a_out, a_resampler, frame)
             if v_out is not None:
                 for packet in v_out.encode():
                     out.mux(packet)
-            if a_out is not None:
-                for packet in a_out.encode():
-                    out.mux(packet)
+            if a_out is not None and a_resampler is not None:
+                _flush_audio_encoder(out, a_out, a_resampler)
         finally:
             out.close()
     finally:
@@ -554,6 +732,7 @@ def trim_media(
         try:
             v_out = None
             a_out = None
+            a_resampler = None
             if has_video:
                 v_in = next(s for s in inp.streams if s.type == "video")
                 fps = float(v_in.average_rate) if v_in.average_rate else 24.0
@@ -566,9 +745,15 @@ def trim_media(
                 if has_video:
                     a_out = out.add_stream("aac", rate=48000)
                     a_out.layout = "stereo"
+                    a_resampler = _make_audio_resampler(
+                        sample_fmt="fltp", layout="stereo", rate=48000
+                    )
                 else:
                     a_out = out.add_stream("pcm_s16le", rate=48000)
                     a_out.layout = "stereo"
+                    a_resampler = _make_audio_resampler(
+                        sample_fmt="s16", layout="stereo", rate=48000
+                    )
 
             for frame in inp.decode():
                 pts_s = float(frame.time) if frame.time is not None else 0.0
@@ -583,18 +768,14 @@ def trim_media(
                     frame.pts = None
                     for packet in v_out.encode(frame):
                         out.mux(packet)
-                elif isinstance(frame, AudioFrame) and a_out is not None:
-                    frame = frame.reformat(format="s16" if not has_video else "fltp", layout="stereo", rate=48000)
-                    frame.pts = None
-                    for packet in a_out.encode(frame):
-                        out.mux(packet)
+                elif isinstance(frame, AudioFrame) and a_out is not None and a_resampler is not None:
+                    _mux_audio_frame(out, a_out, a_resampler, frame)
 
             if v_out is not None:
                 for packet in v_out.encode():
                     out.mux(packet)
-            if a_out is not None:
-                for packet in a_out.encode():
-                    out.mux(packet)
+            if a_out is not None and a_resampler is not None:
+                _flush_audio_encoder(out, a_out, a_resampler)
         finally:
             out.close()
     finally:
@@ -648,9 +829,13 @@ def upscale_video(
             v_out.pix_fmt = "yuv420p"
             v_out.options = {"preset": "medium", "crf": "17"}
             a_out = None
+            a_resampler = None
             if any(s.type == "audio" for s in inp.streams):
                 a_out = out.add_stream("aac", rate=48000)
                 a_out.layout = "stereo"
+                a_resampler = _make_audio_resampler(
+                    sample_fmt="fltp", layout="stereo", rate=48000
+                )
 
             for frame in inp.decode():
                 if isinstance(frame, VideoFrame):
@@ -661,17 +846,13 @@ def upscale_video(
                     new_frame.pts = None
                     for packet in v_out.encode(new_frame):
                         out.mux(packet)
-                elif isinstance(frame, AudioFrame) and a_out is not None:
-                    frame = frame.reformat(format="fltp", layout="stereo", rate=48000)
-                    frame.pts = None
-                    for packet in a_out.encode(frame):
-                        out.mux(packet)
+                elif isinstance(frame, AudioFrame) and a_out is not None and a_resampler is not None:
+                    _mux_audio_frame(out, a_out, a_resampler, frame)
 
             for packet in v_out.encode():
                 out.mux(packet)
-            if a_out is not None:
-                for packet in a_out.encode():
-                    out.mux(packet)
+            if a_out is not None and a_resampler is not None:
+                _flush_audio_encoder(out, a_out, a_resampler)
         finally:
             out.close()
     finally:

@@ -252,7 +252,10 @@ def _decode_audio_f32le(path: str, *, rate: int, channels: int, max_seconds: flo
     try:
         stream = next((s for s in container.streams if s.type == "audio"), None)
         if stream is None:
-            _die(f"no audio stream in {path}")
+            _die(
+                f"no audio stream in {path} "
+                f"(use silent video / --ref-silent-video for picture-only clips)"
+            )
         # Use planar "fltp" (mirrors ltx-ws). For packed "flt" stereo,
         # AVAudioFrame.to_ndarray() returns one interleaved plane (1, N)
         # where N = samples*channels; reshaping that treats each interleaved

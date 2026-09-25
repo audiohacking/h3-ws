@@ -48,6 +48,7 @@ from h3_media import (
     DURATION_PRESETS,
     FPS,
     RESOLUTION_PRESETS,
+    adapt_audio_for_h3,
     audio_peaks,
     concat_mp4s,
     ensure_video_poster,
@@ -55,13 +56,13 @@ from h3_media import (
     frame_video,
     media_available,
     probe_duration_seconds,
+    probe_media,
     require_ui_canvas,
     resize_still_to_canvas,
     sanitize_filename,
     seconds_to_frames,
     snap_frames,
     trim_media,
-    upscale_video,
     validate_canvas,
     video_poster_path,
 )
@@ -812,6 +813,26 @@ async def _save_upload_file(
     dest.write_bytes(content)
     payload: dict[str, Any] = {"path": str(dest), "filename": filename, "kind": kind}
     if kind in ("audio", "video"):
+        # Normalize soundtracks with PyAV so h3-av can always decode stereo PCM.
+        # Silent videos stay silent — UI/backend will attach them as silent_video.
+        info = probe_media(dest)
+        payload["has_audio"] = bool(info.get("has_audio"))
+        if info.get("has_audio"):
+            tmp_suffix = ".wav" if kind == "audio" else ".mp4"
+            tmp = dest.with_name(f".{dest.stem}.adapt{tmp_suffix}")
+            try:
+                adapted = adapt_audio_for_h3(dest, tmp)
+                if adapted.resolve() != dest.resolve():
+                    if adapted.suffix.lower() != dest.suffix.lower():
+                        dest.unlink(missing_ok=True)
+                        dest = dest.with_suffix(adapted.suffix)
+                        adapted.replace(dest)
+                        payload["path"] = str(dest)
+                    else:
+                        adapted.replace(dest)
+            except Exception:
+                # Keep the original bytes; generate-time materialize retries.
+                tmp.unlink(missing_ok=True)
         duration = probe_duration_seconds(dest)
         if duration is not None:
             payload["duration_s"] = duration
@@ -823,6 +844,7 @@ async def _save_upload_file(
             "kind": kind,
             "created_at": datetime.now().isoformat(),
             **({"duration_s": payload["duration_s"]} if "duration_s" in payload else {}),
+            **({"has_audio": payload["has_audio"]} if "has_audio" in payload else {}),
         },
     )
     return payload
@@ -899,24 +921,28 @@ def list_library_assets(
         source: str = "upload",
         thumb_url: str | None = None,
         video_url: str | None = None,
+        has_audio: bool | None = None,
     ) -> None:
         if q and q not in name.lower() and q not in path.name.lower():
             return
         media = f"/api/media?path={path}"
-        rows.append(
-            {
-                "id": str(path),
-                "path": str(path),
-                "name": name,
-                "kind": kind,
-                "source": source,
-                "created_at": created_at,
-                "duration_s": duration_s,
-                "thumb_url": thumb_url or (media if kind == "image" else None),
-                "video_url": video_url or (media if kind == "video" else None),
-                "media_url": media,
-            }
-        )
+        row: dict[str, Any] = {
+            "id": str(path),
+            "path": str(path),
+            "name": name,
+            "kind": kind,
+            "source": source,
+            "created_at": created_at,
+            "duration_s": duration_s,
+            "thumb_url": thumb_url or (media if kind == "image" else None),
+            "video_url": video_url or (media if kind == "video" else None),
+            "media_url": media,
+        }
+        if kind == "video":
+            if has_audio is None:
+                has_audio = bool(probe_media(path).get("has_audio"))
+            row["has_audio"] = bool(has_audio)
+        rows.append(row)
 
     if tab in ("image", "video", "audio"):
         want = tab
@@ -934,6 +960,7 @@ def list_library_assets(
                 created_at=str(meta.get("created_at") or ""),
                 duration_s=float(meta["duration_s"]) if meta.get("duration_s") is not None else None,
                 source="upload",
+                has_audio=bool(meta["has_audio"]) if meta.get("has_audio") is not None else None,
             )
         # Also surface unindexed files still sitting in the upload dir.
         known = {Path(p).resolve() for p in indexed}
@@ -984,6 +1011,8 @@ def list_library_assets(
                     "video_url": clip.video_url or state.clip_url(clip.filename),
                     "media_url": clip.video_url or state.clip_url(clip.filename),
                     "clip_id": clip.id,
+                    # Renders from H3 always carry a stereo soundtrack.
+                    "has_audio": True,
                 }
             )
 
@@ -1115,64 +1144,23 @@ def _materialize_ref_edits(state: AppState, refs: list[Any]) -> list[Any]:
             if crop is not None:
                 dest = edit_dir / f"{uuid.uuid4().hex[:10]}_frame.mp4"
                 item.path = frame_video(item.path, dest, crop)
+        # H3 audio ingest: stereo soundtrack or silent_video — never feed a
+        # video-only file through --ref-video / h3_ffmpeg_read_audio_f32.
+        kind = (item.kind or "").strip().lower()
+        if kind == "video":
+            info = probe_media(item.path)
+            if not info.get("has_audio"):
+                item.kind = "silent_video"
+            else:
+                dest = edit_dir / f"{uuid.uuid4().hex[:10]}_audio.mp4"
+                item.path = adapt_audio_for_h3(item.path, dest)
+        elif kind == "video_audio" and item.audio_path is not None:
+            a_dest = edit_dir / f"{uuid.uuid4().hex[:10]}_audio.wav"
+            item.audio_path = adapt_audio_for_h3(item.audio_path, a_dest)
+        elif kind == "audio":
+            a_dest = edit_dir / f"{uuid.uuid4().hex[:10]}_audio.wav"
+            item.path = adapt_audio_for_h3(item.path, a_dest)
     return refs
-
-
-def _upscale_scale_from_body(body: dict[str, Any]) -> float | None:
-    raw = body.get("upscale_scale", body.get("upscale"))
-    if raw is None or raw is False or raw == "" or raw == 0:
-        return None
-    if raw is True:
-        return 2.0
-    try:
-        scale = float(raw)
-    except (TypeError, ValueError):
-        return None
-    if scale <= 1.0:
-        return None
-    return min(4.0, scale)
-
-
-def _register_upscaled_clip(
-    state: AppState,
-    source: ClipRecord,
-    dest: Path,
-    *,
-    width: int,
-    height: int,
-    scale: float,
-) -> ClipRecord:
-    mid = str(uuid.uuid4())
-    filename = dest.name
-    clip = ClipRecord(
-        id=mid,
-        prompt=f"{source.prompt} (×{scale:g} upscale)",
-        label="UPSCALED",
-        video_url=state.clip_url(filename),
-        filename=filename,
-        chain_id=source.chain_id,
-        clip_index=int(source.clip_index or 0) + 1000,
-        mode=source.mode,
-        status=RunStatus.DONE.value,
-        created_at=datetime.now().isoformat(),
-        elapsed_s=None,
-        bytes=dest.stat().st_size if dest.is_file() else None,
-        num_frames=source.num_frames,
-        width=width,
-        height=height,
-        seed=source.seed,
-        num_steps=source.num_steps,
-        layers=source.layers,
-        reuse=source.reuse,
-        duration_seconds=source.duration_seconds,
-        quality=source.quality,
-        loras=source.loras,
-        project_id=source.project_id,
-        generation=dict(source.generation) if source.generation else None,
-    )
-    state.clips[mid] = clip
-    state.save_index()
-    return clip
 
 
 def _request_from_body(
@@ -1445,39 +1433,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
             )
             _purge_preview_stem(preview_stem)
             done_paths.append(dest)
-            upscale_scale = _upscale_scale_from_body(body)
-            if upscale_scale and dest.is_file() and media_available():
-                await state.emit(
-                    run_id,
-                    {
-                        "type": "progress",
-                        "phase": "upscaling",
-                        "message": f"Upscaling ×{upscale_scale:g}…",
-                    },
-                )
-                up_name = f"{dest.stem}_x{upscale_scale:g}.mp4".replace(".", "p", 1) if False else f"{dest.stem}_up{upscale_scale:g}.mp4"
-                up_path = state.output_dir / up_name
-                try:
-                    _, uw, uh = await asyncio.to_thread(
-                        upscale_video, dest, up_path, scale=upscale_scale
-                    )
-                    up_clip = _register_upscaled_clip(
-                        state, clip, up_path, width=uw, height=uh, scale=upscale_scale
-                    )
-                    await state.emit(
-                        run_id,
-                        {
-                            "type": "clip_done",
-                            "clip_id": up_clip.id,
-                            "video_url": up_clip.video_url,
-                            "bytes": up_clip.bytes,
-                            "filename": up_clip.filename,
-                            "chain_id": up_clip.chain_id,
-                            "upscaled_from": clip.id,
-                        },
-                    )
-                except Exception:
-                    log.exception("upscale failed for %s", dest)
+            # Post-hoc Lanczos "upscale" retired — creates a timeline twin without
+            # real detail. Latent upscale (Continuity two-pass) is the future path.
             if run.autocontinue and i < len(run.prompts) - 1 and media_available():
                 tmp = mk_scratch_dir("h3_chain_")
                 prev_frame = extract_last_frame(dest, tmp / "last.png")
@@ -2672,22 +2629,14 @@ def create_app(
 
     @app.post("/api/clips/{clip_id}/upscale")
     async def upscale_clip(clip_id: str, body: dict[str, Any] | None = None):
-        clip = state.clips.get(clip_id)
-        if clip is None:
-            raise HTTPException(404, "Clip not found")
-        src = state.output_dir / clip.filename
-        if not src.is_file():
-            raise HTTPException(404, "Clip file not found")
-        body = body or {}
-        scale = _upscale_scale_from_body({**body, "upscale": body.get("scale", body.get("upscale", True))}) or 2.0
-        dest = state.output_dir / f"{src.stem}_up{scale:g}.mp4"
-        try:
-            _, uw, uh = await asyncio.to_thread(upscale_video, src, dest, scale=scale)
-        except Exception as exc:
-            log.exception("upscale failed for %s", src)
-            raise HTTPException(400, f"upscale failed: {exc}") from exc
-        made = _register_upscaled_clip(state, clip, dest, width=uw, height=uh, scale=scale)
-        return {"ok": True, "clip": _clip_for_api(state, made)}
+        # Lanczos post-process retired: it duplicated timeline clips without
+        # adding real detail. Continuity-style latent upscale is the future path.
+        raise HTTPException(
+            410,
+            "Pixel upscale is disabled. Use a larger resolution preset "
+            "(e.g. 768×768 or 1344×768) for native megapixel density. "
+            "Latent upscale is not available yet.",
+        )
 
     @app.get("/api/frames")
     async def list_frames():

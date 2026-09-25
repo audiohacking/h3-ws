@@ -99,8 +99,8 @@ export type ComposerPanelProps = {
   ssdStreaming: boolean;
   ssdLocked: boolean;
   onSsdStreaming: (v: boolean) => void;
-  upscale: boolean;
-  onUpscale: (v: boolean) => void;
+  upscale?: boolean;
+  onUpscale?: (v: boolean) => void;
   clipMultiplier: number;
   onClipMultiplier: (n: number) => void;
   sceneQueue: SceneQueueItem[];
@@ -370,8 +370,6 @@ export function ComposerPanel(props: ComposerPanelProps) {
           ssdStreaming={props.ssdStreaming}
           ssdLocked={props.ssdLocked}
           onSsdStreaming={props.onSsdStreaming}
-          upscale={props.upscale}
-          onUpscale={props.onUpscale}
           clipMultiplier={props.clipMultiplier}
           clipMultiplierMax={props.config.clip_multiplier_max ?? 10}
           showClips={compiled.modeHint !== "ref2va"}

@@ -16,6 +16,7 @@ export type LibraryAsset = {
   source: string;
   created_at?: string;
   duration_s?: number | null;
+  has_audio?: boolean | null;
   thumb_url?: string | null;
   video_url?: string | null;
   media_url?: string | null;
@@ -53,6 +54,7 @@ type Props = {
     path: string;
     durationS?: number;
     filename?: string;
+    hasAudio?: boolean;
   }>;
   /** Attach selected library assets as new references (purpose=refs). */
   onAdd: (items: LibraryPickItem[]) => void;
@@ -225,6 +227,7 @@ export function MediaLibraryModal({
         kind,
         source: "upload",
         duration_s: up.durationS,
+        has_audio: kind === "video" ? up.hasAudio ?? null : undefined,
         thumb_url: kind === "image" ? `/api/media?path=${encodeURIComponent(up.path)}` : null,
         video_url: kind === "video" ? `/api/media?path=${encodeURIComponent(up.path)}` : null,
         media_url: `/api/media?path=${encodeURIComponent(up.path)}`,
@@ -260,7 +263,12 @@ export function MediaLibraryModal({
       selected.map((a) => {
         let kind: RefKind = a.kind as RefKind;
         if (a.kind === "video") {
-          kind = tab === "renders" || videoAttachKind === "silent_video" ? "silent_video" : "video";
+          // Video-only files have no soundtrack for H3 — attach as silent_video.
+          const silent =
+            tab === "renders" ||
+            videoAttachKind === "silent_video" ||
+            a.has_audio === false;
+          kind = silent ? "silent_video" : "video";
         }
         return {
           kind,

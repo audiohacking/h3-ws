@@ -664,32 +664,21 @@ static int tile_count_for_extent(int extent, int tile_pixels) {
 }
 
 static int configured_tile_pixels(int pixel_height, int pixel_width) {
+    (void)pixel_height;
+    (void)pixel_width;
     const char *value = getenv("H3_VAE_TILE_PIXELS");
     if (value && *value) {
         char *end = NULL;
         long pixels = strtol(value, &end, 10);
-        /* Cap at 320 to match the automatic search: tiles above 320 pixels
-         * produce a visible grid/quilt artifact across the whole frame
-         * (reproduced at 512 and 1088 on M5 Max). */
-        if (end && !*end && pixels >= TILE_PIXELS && pixels <= 320 &&
+        /* Official MiniMax-H3 config is 256 px tiles / 64 px overlap. Overrides
+         * must stay multiples of SPATIAL_RATIO. Values above 256 — especially
+         * the old auto-picked 320 — produce a visible 16-pixel quilt on Metal
+         * (antirez/h3.c#1: same Ref2VA latents, 320 vs 256 A/B on M5 Max). */
+        if (end && !*end && pixels >= TILE_PIXELS && pixels <= 512 &&
             pixels % SPATIAL_RATIO == 0) return (int)pixels;
     }
-    int best = TILE_PIXELS;
-    uint64_t best_score = UINT64_MAX;
-    for (int pixels = TILE_PIXELS; pixels <= 320;
-         pixels += SPATIAL_RATIO) {
-        uint64_t tiles = (uint64_t)tile_count_for_extent(pixel_height, pixels) *
-            (uint64_t)tile_count_for_extent(pixel_width, pixels);
-        /* The resident VAE is dominated by linears and activation traffic;
-         * measured tile cost follows area more closely than cubic sequence
-         * growth at these shapes. Attention is still included in each tile. */
-        uint64_t score = tiles * (uint64_t)pixels * (uint64_t)pixels;
-        if (score < best_score) {
-            best = pixels;
-            best_score = score;
-        }
-    }
-    return best;
+    /* Always 256 by default — do not geometry-search up to 320. */
+    return TILE_PIXELS;
 }
 
 static int tile_axis_build(int extent, int tile_pixels, tile_axis *axis,
