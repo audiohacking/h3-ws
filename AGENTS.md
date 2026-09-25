@@ -9,7 +9,7 @@ Canonical guide for AI agents using **h3-ws** to generate video on Apple Silicon
 | Piece | Role |
 |-------|------|
 | `server.py` | Local MiniMax-H3 inference via native **h3.c**. One job at a time. Embeds Web UI. |
-| `h3_backend.py` | Spawns `./h3 -p … -o`. FL2VA keeps a resident interactive session; Ref2VA is one-shot. |
+| `h3_backend.py` | Spawns `./h3`. Warm interactive session for FL2VA **and** Ref2VA (`h3_session.py`); one-shot fallback if the session dies. |
 | `web_ui.py` + `web/` | Browser library, quality presets, SSE progress. |
 | Weights | `models/MiniMax-H3/{FL2VA,Ref2VA}` from `MiniMaxAI/MiniMax-H3` |
 
@@ -18,7 +18,29 @@ Canonical guide for AI agents using **h3-ws** to generate video on Apple Silicon
 
 The app opens in **Ref2VA** mode by default (add an image/video/audio reference to enable Generate; switch modes as needed).
 
-This stack does **not** run cloud prompt expansion. What you send is what H3 sees. h3.c media I/O is the PyAV shim (`scripts/h3-av`); no system ffmpeg. `third_party/h3.c` is a **vendored local fork** of antirez/h3.c (PyAV shim wiring, LoRA fold, INT8, `--preview-latent`) — managed inside this repo, never pushed upstream. See [`DEV.md`](DEV.md) for the current handoff state.
+This stack does **not** run cloud prompt expansion. What you send is what H3 sees. h3.c media I/O is the PyAV shim (`scripts/h3-av`); no system ffmpeg. `third_party/h3.c` is a **vendored local fork** of antirez/h3.c (in-tree sources, not a git submodule) — managed inside this repo, never pushed upstream. See [`DEV.md`](DEV.md) for the current handoff state.
+
+## Vendored h3.c fork (agents)
+
+Rebuild after any fork edit: `./scripts/build_h3.sh`. Package the desktop app with PyInstaller (`H3WS.spec`) so `dist/H3-WS.app` embeds the new binary. Never push Continuity/`main` to `fasth3-live` or patches to upstream antirez/h3.c.
+
+Already in this fork (do not re-port):
+
+| Topic | Notes |
+|-------|--------|
+| VAE tiles | Locked to **256** px (`configured_tile_pixels`); Metal 320 auto-pick caused 16px quilt seams ([antirez/h3.c#1](https://github.com/antirez/h3.c/pull/1) lesson). Keep 256. |
+| LoRA | Runtime `--lora PATH:SCALE` fuse in `h3_lora.c` (up to 8). Offline Turbo fold PRs are redundant. |
+| Preview latents | `--preview-latent` / `preview_estimate` already present. |
+| GQA precision | Causal GQA keeps Q×scale in F32; barrier before reusing reduction scratch (#4, #63). |
+| Metal TG align | GQA `score_bytes` rounded to 16 bytes (#44) — required under `MTL_DEBUG_LAYER`. |
+| VAE RGB | Unpack clamps with `fminf(fmaxf(...))` so NaNs become 0 (#9). |
+| Warm VAE cache | `h3_cache_invalidate_inputs()` drops conditioning/DiT but keeps Video VAE when latent WxH unchanged (#68). CLI `!ref-*` / first-last use it; `!cache clear` still full-clears. |
+| Long SDPA | Non-causal MPSGraph SDPA splits when `sequence > 12288` (block 2048). Kill-switch: `H3_SDPA_MAX_QUERY_ROWS=0` or `--sdpa-query-block 0`. Needed on M2/M3 Ultra (#64 / Apple FB24605554). |
+| Safetensors | Headers must be padded so `(8 + header_size) % 8 == 0` or `h3_st_read_header` refuses (GPU mmap). Unit fixtures must pad with spaces. |
+
+**Deferred:** [antirez/h3.c#55](https://github.com/antirez/h3.c/pull/55) `H3_ATTENTION_CACHE` int8 stream — later product/Models phase for lower-RAM Macs; not urgent on 128–512 GB Studio.
+
+**Tests (in `third_party/h3.c`):** `./h3_tests`, `./h3_gqa_tests`, `./h3_cache_invalidate_tests`. Skip CUDA / GUI / packaging upstream PRs.
 
 ## Weights (mandatory)
 

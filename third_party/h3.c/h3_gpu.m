@@ -1490,17 +1490,42 @@ int h3_gpu_qkv_rope_f32(h3_gpu *opaque, h3_gpu_tensor *query,
         });
 }
 
+/* MPSGraph native SDPA silently corrupts output on M2/M3 Ultra above ~15k
+ * query rows (antirez/h3.c#16 / Apple FB24605554). Split non-causal queries
+ * into blocks. Defaults: split when sequence > 12288, block size 2048.
+ * H3_SDPA_MAX_QUERY_ROWS=0 disables splitting. */
+static unsigned h3_gpu_env_u32(const char *name, unsigned fallback) {
+    const char *text = getenv(name);
+    if (!text || !*text) return fallback;
+    char *end = NULL;
+    unsigned long value = strtoul(text, &end, 10);
+    if (end == text || *end) return fallback;
+    if (value > UINT32_MAX) return fallback;
+    return (unsigned)value;
+}
+
+static unsigned h3_gpu_sdpa_query_block(void) {
+    /* 0 disables query splitting. */
+    return h3_gpu_env_u32("H3_SDPA_MAX_QUERY_ROWS", 2048u);
+}
+
+static unsigned h3_gpu_sdpa_split_min_rows(void) {
+    return h3_gpu_env_u32("H3_SDPA_SPLIT_MIN_ROWS", 12288u);
+}
+
 static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
                                  uint32_t sequence,
                                  uint32_t heads, uint32_t head_dim, float scale,
                                  MPSDataType dataType, int causal,
                                  int headMajor, int outputHeadMajor) {
     @autoreleasepool {
+        unsigned query_block = h3_gpu_sdpa_query_block();
+        unsigned split_min = h3_gpu_sdpa_split_min_rows();
         NSString *cacheKey = [NSString stringWithFormat:
-                              @"%u:%u:%u:%u:%u:%.9g:%d:%d:%d",
+                              @"%u:%u:%u:%u:%u:%.9g:%d:%d:%d:%u:%u",
                               (unsigned)dataType, batch, sequence, heads,
                               head_dim, scale, causal, headMajor,
-                              outputHeadMajor];
+                              outputHeadMajor, query_block, split_min];
         H3SDPA *cached = gpu.sdpaCache[cacheKey];
         if (cached) return cached;
         MPSGraph *graph = [[MPSGraph alloc] init];
@@ -1545,6 +1570,26 @@ static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
             attention = [graph
                 scaledDotProductAttentionWithQueryTensor:qt keyTensor:kt
                 valueTensor:vt maskTensor:mask scale:scale name:nil];
+        } else if (query_block && sequence > split_min &&
+                   sequence > query_block) {
+            /* Non-causal rows are independent; chunk queries so each
+             * MPSGraph SDPA op stays under the Ultra silent-corruption
+             * threshold (see antirez/h3.c#16). */
+            NSMutableArray<MPSGraphTensor *> *parts =
+                [NSMutableArray array];
+            for (uint32_t start = 0; start < sequence; start += query_block) {
+                uint32_t rows = query_block;
+                if (start + rows > sequence) rows = sequence - start;
+                MPSGraphTensor *q_rows = [graph sliceTensor:qt
+                                                   dimension:2
+                                                       start:start
+                                                      length:rows
+                                                        name:nil];
+                [parts addObject:[graph
+                    scaledDotProductAttentionWithQueryTensor:q_rows
+                    keyTensor:kt valueTensor:vt scale:scale name:nil]];
+            }
+            attention = [graph concatTensors:parts dimension:2 name:nil];
         } else {
             attention = [graph scaledDotProductAttentionWithQueryTensor:qt
                 keyTensor:kt valueTensor:vt scale:scale name:nil];
@@ -4331,7 +4376,9 @@ int h3_gpu_gqa_causal_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
     if (getenv("H3_MPS_GQA") && h3_gpu_gqa_mps(
             gpu, output, query, key, value, sequence, query_heads,
             kv_heads, head_dim, scale)) return 1;
-    size_t score_bytes = (size_t)sequence * sizeof(float);
+    /* Metal requires threadgroup memory lengths to be 16-byte multiples;
+     * the API validation layer aborts on unaligned lengths. */
+    size_t score_bytes = ((size_t)sequence * sizeof(float) + 15) & ~(size_t)15;
     id<MTLComputePipelineState> pipeline = h3_gpu_pipeline(gpu,
                                                            @"h3_gqa_causal_bf16");
     if (!pipeline) return 0;

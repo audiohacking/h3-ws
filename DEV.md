@@ -1,111 +1,102 @@
 # DEV.md — h3-ws development state & notes
 
 Handoff doc for the next agent. Captures the current working state, what was just
-implemented, known constraints, and the open roadmap items. Read
-[`ROADMAP.md`](ROADMAP.md) for architecture/phases and [`AGENTS.md`](AGENTS.md) for
-operating guidance.
+shipped, known constraints, and open items. Read [`ROADMAP.md`](ROADMAP.md) for
+architecture/phases and [`AGENTS.md`](AGENTS.md) for operating guidance.
 
-**Read this first, then ROADMAP.md.** The docs in this repo are kept close to the
-walking state of the tree.
-
----
-
-## Current running state (commit `2b46c46` + uncommitted work below)
-
-- **Engine**: local MiniMax-H3 via native `third_party/h3.c` (Metal) on Apple Silicon.
-  M3 Ultra, 512 GiB unified, Metal (not Metal 4).
-- **Server**: `python server.py --host 0.0.0.0 --port 8765`. Web UI + `/ws` protocol.
-- **Models** (`models/MiniMax-H3`): FL2VA ✅, Ref2VA ✅ (both fully present, verified),
-  video VAE ✅, audio VAE ✅. Health `engine_ok:true`.
-- **Muxer**: `h3-av` PyAV shim (system Homebrew ffmpeg is broken/dyld-crashed and is
-  skipped; the shim is the only media path).
-
-### Committed so far (`2b46c46`)
-- Model download progress via SSE + task-aware resume + non-blocking Models modal UX.
-- Web UI auto-build on startup (`server.py` → `ensure_web_dist_built`).
+**Read this first, then ROADMAP.md.** Keep this file close to the walking state of
+the tree when you land meaningful engine or Continuity UX work.
 
 ---
 
-## Uncommitted work in the tree (this branch)
+## Current running state
 
-> These are the changes NOT yet committed as of this handoff. The submodule is a
-> **local fork** — we do NOT push to upstream `antirez/h3.c`. We commit the submodule
-> locally and the parent tracks our gitlink. Sync upstream only manually if ever needed.
-
-### Parent repo (Python + web)
-- **`h3_av.py` — PyAV audio decode fix (IMPORTANT).**
-  - Bug: audio import failed with `h3: FFmpeg could not decode a stereo soundtrack`.
-  - Root cause: packed `format="flt"` for stereo. PyAV `to_ndarray()` on packed stereo
-    returns a single interleaved plane `(1, N)` where N = samples × channels; the code's
-    `.T`/reshape treated each interleaved element as a separate sample. For a mono→stereo
-    upmix that yielded an odd frame count → byte length not a multiple of 8 →
-    h3's `received % frame_bytes` check failed.
-  - Fix: use planar `format="fltp"` (mirrors `../ltx-ws/ltx_media.py`), giving clean
-    `(channels, samples)`; upmix mono, interleave exactly, and exclude the frame exactly
-    at the `-t` boundary so output fits h3.c's capacity read + trailing EOF check.
-  - Verified: 57 tests pass; exact h3 spawn produces frame-aligned stereo for both
-    non-truncate (ref-audio) and truncate (video soundtrack) paths; live gen wrote MP4.
-- **`web/src/App.tsx` — Ref2VA is now the DEFAULT mode** (`useState("ref2va")`).
-  App opens in Ref2VA with the reference picker visible; Generate is disabled until a
-  ref is added. Loading a clip/preset still restores that item's own stored mode.
-- **`web/src/App.tsx` — UI/UX cleanups**: "Model Reads" (`WhatTheModelReads`) moved below
-  the prompt and made compact; removed the `TurboInfo` overlay; Models modal no longer
-  locks on close/backdrop (`openModels` always opens; `closeModels` guards on download).
-- **`web/src/components/media/ModelsManager.tsx`**: releases the download-active flag on
-  unmount so the Models modal can re-open.
-- **`web/web_ui.py`**: simplified `/api/info` note (dropped RAM/SSD/Metal-4 prose).
-- **`web/h3_media.py`**: relabeled 512×512 default ("Balanced default resolution.").
-- **`.gitignore`**: added `.claude/`, `.serena/`, `web/.claude/` (local tooling caches).
-
-### `third_party/h3.c` submodule (local fork — commit inside, do NOT push upstream)
-- **`H3_AV` shim wiring** in `h3_ffmpeg.c` (`ffmpeg_program()`/`ffprobe_program()` honor
-  `H3_AV` env first) — this makes the PyAV audio/video shim actually get used.
-- **LoRA support**: `h3_lora.c` / `h3_lora.h` (Accelerate fold of `W += scale*B@A`) and
-  `tools/fold_turbo_lora.py`.
-- **INT8 quantization support** across `h3_weights.c`, `h3_dit.c`, `h3_gpu.m`,
-  `h3_shaders.metal`, `h3_tokenizer.m`, `h3_safetensors.c`, `h3_video_vae.c`.
-- Makefile, main.c tweaks for the above. (317 insertions / 35 deletions across 12 files.)
-- The `h3` binary at `third_party/h3.c/h3` is a local build already containing these;
-  it is gitignored.
+- **Product remote:** `origin` = `https://github.com/audiohacking/h3-ws` (Continuity /
+  `main`). `fasth3-live` is a separate experiment remote — never push Continuity
+  work there. See `.cursor/rules/git-remote-fasth3-live.mdc`.
+- **Engine:** vendored **local fork** at `third_party/h3.c` (in-tree sources, **not**
+  a git submodule). Never push patches to upstream `antirez/h3.c`.
+- **Host:** Apple Silicon Metal. Studio under test has been M3 Ultra / 512 GiB;
+  patches stay portable (GQA align, SDPA split for Ultra, 256 VAE tiles).
+- **Server / app:** Web UI on `:8765`; packaged app is `dist/H3-WS.app`
+  (PyInstaller `H3WS.spec` + `./build/macos/codesign.sh`). Rebuild `./h3` then the
+  `.app` after fork changes before user validation.
+- **Models** (`models/MiniMax-H3`): FL2VA + Ref2VA native trees. Download **only** on
+  the Apple Silicon test host (`scripts/download_model.py`), never on a remote
+  workstation.
 
 ---
 
-## Working / verified
+## Just landed (local fork Metal / session backports)
 
-- FL2VA generation (t2va) ✅
-- Ref2VA generation with **image + audio references** ✅ (produces video+audio with the
-  subject matching the image and voice from the audio). This is the primary daily flow.
-- Audio decode via PyAV shim ✅ (fixed, see above).
-- Model download + resume + live progress ✅.
-- Models modal open/close/reopen ✅.
+Upstream triage plan (antirez/h3.c PRs) → ported into `third_party/h3.c`:
+
+| Upstream | What we took |
+|----------|----------------|
+| #4 + #63 | Causal GQA: keep Q×scale in F32; barrier before reusing `reductions[]` |
+| #44 | Round GQA threadgroup `score_bytes` to 16 bytes (`MTL_DEBUG_LAYER`) |
+| #9 | Finite VAE RGB clamp (`fminf(fmaxf)`) |
+| #68 | `h3_cache_invalidate_inputs()` — warm Ref2VA keeps ~9 GiB Video VAE across ref/anchor edits |
+| #64 | Split long non-causal SDPA queries (`H3_SDPA_MAX_QUERY_ROWS` / `--sdpa-query-block`) |
+| (test) | `tests/test_h3.c` safetensors fixture padded to 8-byte header alignment |
+
+**Skipped / already ours:** #1 (256 tiles — locked in `beb9d93`), #14 (runtime LoRA fuse), #34 (preview estimate). **Deferred:** #55 `H3_ATTENTION_CACHE` → Models/product phase.
+
+**Verify after rebuild:**
+
+```
+./scripts/build_h3.sh
+cd third_party/h3.c && make h3_tests h3_gqa_tests h3_cache_invalidate_tests
+./h3_tests && ./h3_gqa_tests && ./h3_cache_invalidate_tests
+```
+
+GQA expected ballpark: max abs ~0.0039, BF16 mismatch ≪1%. Then rebuild
+`dist/H3-WS.app` if the user is testing the packaged app.
+
+---
+
+## Earlier Continuity commits still relevant
+
+- **`beb9d93`** — Metal VAE tile seams fixed by locking tiles to 256 (320 Metal path
+  quilted at 16px); silent-video ingest + PyAV `adapt_audio_for_h3`; Lanczos
+  “upscale” retired from UI/API (latent density later).
+- Warm interactive session in `h3_backend.py` / `h3_session.py` for FL2VA **and**
+  Ref2VA (one-shot fallback if the session dies).
+- PyAV shim (`scripts/h3-av` / `h3_av.py`) is the only media I/O path; Homebrew
+  ffmpeg is skipped when dyld-broken.
+- Ref2VA is the default UI mode; Continuity-style segment editors for trim/crop
+  (see `.cursor/rules/continuity-segment.mdc`).
+- TAEH3 / TaoMate / Refine / Console / LAN listen — see recent `main` history;
+  Models page can fetch TAEH3.
 
 ---
 
 ## Known constraints / gotchas
 
-- **No system ffmpeg.** Homebrew `/opt/homebrew/bin/ffmpeg` & `ffprobe` crash on missing
-  dylibs and are skipped by `_tool_runs()`. All media I/O goes through the PyAV shim
-  (`scripts/h3-av` → `h3_av.py`), wired via `H3_AV`/`H3_FFMPEG`/`H3_FFPROBE`.
-- **h3.c audio decode byte rule**: decoded f32le byte count must satisfy
-  `received % (channels*4) == 0` and `trailing == 0`. Mono→stereo upmix and
-  `-t` boundary frames are the two places this silently breaks.
-- **Standalone audio ref is invalid**: audio must accompany an image or video reference.
-- **INT8 convrot model worked well for Ref2VA** → default NEW installs to
-  `minimax_h3_fl2va_pruned_int8_convrot` (same Comfy-Org source as the Ref2VA int8).
-  Only for new installs/downloads; do not change existing setups. **Not yet implemented.**
-- No generation **preview** yet (see roadmap below).
+- **VAE tiles stay 256.** Do not reintroduce 256–320 auto-search from older
+  upstream; Metal seams reappear at 320.
+- **Safetensors alignment:** fork refuses headers where `(8 + header_size) % 8 != 0`
+  (GPU mmap). Pad JSON with spaces in fixtures and any hand-written `.safetensors`.
+- **SDPA Ultra:** long sequences can silently corrupt without #64. Defaults split
+  only when `sequence > 12288`; short 512² jobs stay on the fast path. Set
+  `H3_SDPA_MAX_QUERY_ROWS=0` to disable.
+- **Warm cache:** input edits should call `h3_cache_invalidate_inputs`, not
+  `h3_cache_clear`, or the Video VAE reloads every ref change.
+- **No system ffmpeg** when dyld-broken; rely on `H3_AV` / PyAV shim.
+- **Standalone audio ref invalid** unless paired with image or video.
+- **`--ssd-streaming`** vs LoRA fuse: incompatible; leave streaming off unless OOM.
+- **Weights policy:** never `hf download` MiniMax-H3 on the development workstation.
 
 ---
 
-## Open roadmap items (next)
+## Open / next (agents)
 
-1. **Default new installs to INT8 convrot FL2VA** (`minimax_h3_fl2va_pruned_int8_convrot`)
-   in `scripts/download_model.py`, only for new setups. Keep existing installs on BF16 FL2VA.
-2. **Live generation preview + cancel** (ComfyUI-Continuity style). Research
-   https://github.com/roadmaus/ComfyUI-Continuity and replicate a frame-by-frame preview
-   of the running generation plus a cancel control.
-3. P7: CLI client + MCP server (`h3cli.py`, `mcp_server.py`).
-4. P8: more tests (frame snap, canvas limits, FL2VA/Ref2VA exclusion, queue fairness);
-   frontend hot reload (Vite `:5299` → `:8765`); benchmark wrapper.
+1. **#55 attention cache** — productize for lower-RAM Macs (build cache once, wire
+   env via `h3_backend.py` / Models page). Not needed on 512 GiB Studio.
+2. Continuity polish / ROADMAP P7+ (DIRECTOR.md, CLI/MCP) as scheduled.
+3. Optional: validate large-canvas × long-clip jobs exercise the SDPA split path
+   on Ultra without regressing short jobs.
 
-See `ROADMAP.md` P5–P8 for the fuller phase context.
+Community map for checkpoints/LoRAs/Metal ideas (ideas only; engine stays h3.c):
+https://github.com/wildminder/awesome-minimax-H3 — fetch live README + performance
+guide before adopting adapters. See `.cursor/rules/awesome-minimax-h3.mdc`.

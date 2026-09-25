@@ -34,6 +34,7 @@ static void usage(const char *program) {
         "      --core-reuse N     Core refresh: 1 exact, 4 fast, 6 aggressive\n"
         "      --token-reduction  Pair video tokens in middle DiT blocks\n"
         "      --ssd-streaming    Stream original BF16 DiT layers from SSD\n"
+        "      --sdpa-query-block N  Split long non-causal SDPA (0=off; Ultra #16)\n"
         "      --lora PATH        Fuse a DiT LoRA (.safetensors) at load\n"
         "      --lora-scale N     LoRA strength (default: 1.0; or PATH:SCALE)\n"
         "      --use-int8-row-fc2 Faster one-scale int8 FC2 (M5)\n"
@@ -239,6 +240,7 @@ int main(int argc, char **argv) {
            OPT_CORE_REUSE,
            OPT_TOKEN_REDUCTION,
            OPT_SSD_STREAMING,
+           OPT_SDPA_QUERY_BLOCK,
            OPT_LORA, OPT_LORA_SCALE,
            OPT_USE_INT8_ROW_FC2,
            OPT_USE_REFERENCE_ROPE,
@@ -274,6 +276,7 @@ int main(int argc, char **argv) {
         {"core-reuse", required_argument, NULL, OPT_CORE_REUSE},
         {"token-reduction", no_argument, NULL, OPT_TOKEN_REDUCTION},
         {"ssd-streaming", no_argument, NULL, OPT_SSD_STREAMING},
+        {"sdpa-query-block", required_argument, NULL, OPT_SDPA_QUERY_BLOCK},
         {"lora", required_argument, NULL, OPT_LORA},
         {"lora-scale", required_argument, NULL, OPT_LORA_SCALE},
         {"use-int8-row-fc2", no_argument, NULL, OPT_USE_INT8_ROW_FC2},
@@ -407,6 +410,15 @@ int main(int argc, char **argv) {
                 break;
             case OPT_TOKEN_REDUCTION: params.token_reduction = 1; break;
             case OPT_SSD_STREAMING: params.ssd_streaming = 1; break;
+            case OPT_SDPA_QUERY_BLOCK: {
+                /* Sets H3_SDPA_MAX_QUERY_ROWS for the Ultra SDPA workaround (#16). */
+                int rows = parse_int(optarg, "sdpa query block");
+                if (rows < 0) return 1;
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%d", rows);
+                setenv("H3_SDPA_MAX_QUERY_ROWS", buf, 1);
+                break;
+            }
             case OPT_LORA: {
                 const char *prev = getenv("H3_LORA");
                 if (prev && *prev) {
