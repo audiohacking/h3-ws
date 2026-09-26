@@ -149,6 +149,9 @@ class ClipRecord:
     # Full composer snapshot so Library can re-run the generation (prompt with
     # @handles, refs + trim/crop, mode/routing, sampler, LoRAs, anchors…).
     generation: Optional[dict[str, Any]] = None
+    # Wall time per h3.c phase (+ --profile Metal summaries), kept for done,
+    # failed and cancelled clips so slow stages can be inspected later.
+    timings: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -1385,6 +1388,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
             try:
                 await asyncio.to_thread(state.engine.generate, req, on_progress=_progress)
             except GenerationCancelledError:
+                clip.timings = getattr(state.engine, "last_timings", None)
                 if watcher is not None:
                     watcher.stop(cleanup=False)
                 state.engine.clear_preview_latent_dumps()
@@ -1392,6 +1396,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                 await _abort_run_cancelled(state, run_id)
                 return
             except Exception:
+                clip.timings = getattr(state.engine, "last_timings", None)
                 # Full failure — stop watcher, then drop all preview scratch.
                 if watcher is not None:
                     watcher.stop(cleanup=False)
@@ -1404,6 +1409,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                 if watcher is not None:
                     watcher.stop(cleanup=False)
                 state.engine.clear_preview_latent_dumps()
+            clip.timings = getattr(state.engine, "last_timings", None)
             elapsed = round(time.time() - t0, 2)
             size = dest.stat().st_size if dest.is_file() else 0
             clip.status = RunStatus.DONE.value

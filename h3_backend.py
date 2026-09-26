@@ -170,6 +170,101 @@ class ProgressEta:
         return mp
 
 
+_PROFILE_RE = re.compile(
+    r"h3 profile:\s+(?P<name>.+?)\s{2,}(?P<mark>\S+)\s+wall=\s*(?P<wall>[\d.]+)s"
+    r"(?:.*?peak=\s*(?P<peak>[\d.]+)GiB)?"
+)
+
+
+class PhaseTimer:
+    """Wall-clock duration of each h3.c phase, for generation metadata.
+
+    A phase starts at its first ``phase completed/total`` line and ends when
+    the next phase starts. Status lines before the first counter are the
+    ``startup`` phase (weight/tokenizer load); later ones are ignored, except
+    ``--profile`` summaries, which are kept verbatim as Metal timings.
+    """
+
+    def __init__(self) -> None:
+        self.start()
+
+    def start(self, *, now: float | None = None) -> None:
+        self.t0 = time.time() if now is None else now
+        self.phases: list[dict[str, Any]] = []
+        self.profile: list[dict[str, Any]] = []
+        self._counted = False
+
+    def observe(self, mp: dict[str, Any], *, now: float | None = None) -> None:
+        clock = time.time() if now is None else now
+        label = str(mp.get("label") or "")
+        match = _PROFILE_RE.search(label)
+        if match:
+            entry: dict[str, Any] = {
+                "name": match.group("name").strip(),
+                "mark": match.group("mark"),
+                "wall_s": float(match.group("wall")),
+            }
+            if match.group("peak"):
+                entry["peak_gib"] = float(match.group("peak"))
+            self.profile.append(entry)
+            return
+        step, total = mp.get("step"), mp.get("total")
+        if isinstance(step, int) and isinstance(total, int):
+            self._counted = True
+            name = str(mp.get("stage") or "generating")
+        elif not self._counted:
+            name, step, total = "startup", None, None
+        else:
+            return
+        if self.phases and self.phases[-1]["phase"] == name:
+            current = self.phases[-1]
+            if step is not None:
+                current["steps"] = max(current.get("steps") or 0, step)
+                current["total"] = total
+            return
+        self.phases.append(
+            {"phase": name, "start": clock, "steps": step, "total": total}
+        )
+
+    def summary(self, *, outcome: str, now: float | None = None) -> dict[str, Any]:
+        clock = time.time() if now is None else now
+        phases = []
+        for index, item in enumerate(self.phases):
+            end = (
+                self.phases[index + 1]["start"]
+                if index + 1 < len(self.phases)
+                else clock
+            )
+            entry = {
+                "phase": item["phase"],
+                "start_s": round(item["start"] - self.t0, 2),
+                "seconds": round(end - item["start"], 2),
+            }
+            if item.get("total"):
+                entry["steps"] = item.get("steps")
+                entry["total"] = item["total"]
+                if item.get("steps"):
+                    entry["s_per_step"] = round(entry["seconds"] / item["steps"], 2)
+            phases.append(entry)
+        return {
+            "outcome": outcome,
+            "total_s": round(clock - self.t0, 2),
+            "phases": phases,
+            "profile": list(self.profile),
+        }
+
+
+def timings_console_line(timings: dict[str, Any]) -> str:
+    parts = [
+        f"{item['phase']} {_format_mmss(item['seconds'])}"
+        for item in timings.get("phases", [])
+    ]
+    return (
+        f"h3 timings ({timings.get('outcome')}, total "
+        f"{_format_mmss(timings.get('total_s', 0))}): " + " · ".join(parts)
+    )
+
+
 def progress_console_line(mp: dict[str, Any]) -> str:
     label = str(mp.get("label") or mp.get("stage") or "h3")
     parts = [label]
@@ -679,6 +774,8 @@ class H3Engine:
         self._cancel = threading.Event()
         self._progress: dict[str, Any] = {}
         self._t0 = 0.0
+        self._phases = PhaseTimer()
+        self.last_timings: dict[str, Any] | None = None
         self._session: Any | None = None
         self._session_boot_key: tuple[Any, ...] | None = None
         self._preview_latent_dir: Path | None = None
@@ -794,6 +891,7 @@ class H3Engine:
         elif steps > 0:
             mp["total"] = steps
         self._eta.enrich(mp)
+        self._phases.observe(mp)
         self._progress = mp
 
     def generate(
@@ -825,9 +923,14 @@ class H3Engine:
 
         from h3_session import SessionError
 
+        self.last_timings = None
+        outcome = "failed"
         try:
-            return self._generate_session(req, on_progress=on_progress)
+            result = self._generate_session(req, on_progress=on_progress)
+            outcome = "done"
+            return result
         except GenerationCancelledError:
+            outcome = "cancelled"
             self._cleanup_job_temps(req)
             self._stop_session()
             raise
@@ -836,12 +939,20 @@ class H3Engine:
             self._cleanup_job_temps(req)
             self._stop_session()
             try:
-                return self._generate_oneshot(req, on_progress=on_progress)
+                result = self._generate_oneshot(req, on_progress=on_progress)
+                outcome = "done"
+                return result
+            except GenerationCancelledError:
+                outcome = "cancelled"
+                raise
             finally:
                 self._cleanup_job_temps(req)
         except Exception:
             self._cleanup_job_temps(req)
             raise
+        finally:
+            self.last_timings = self._phases.summary(outcome=outcome)
+            log.info("%s", timings_console_line(self.last_timings))
 
     def ensure_preview_latent_dir(self) -> Path:
         """Stable ``--preview-latent`` directory for the life of this engine."""
@@ -940,6 +1051,7 @@ class H3Engine:
         self._cancel.clear()
         self._t0 = time.time()
         self._eta.reset()
+        self._phases.start()
         loading_msg = (
             "Loading Ref2VA weights (first run can take several minutes)…"
             if uses_ref2va(req)
@@ -958,6 +1070,7 @@ class H3Engine:
             mp = dict(mp)
             mp["elapsed_s"] = round(time.time() - self._t0, 1)
             self._eta.enrich(mp)
+            self._phases.observe(mp)
             self._progress = mp
             console_h3("%s", progress_console_line(mp) if mp.get("step") is not None else mp.get("label") or mp.get("stage") or "")
             if on_progress:
@@ -1029,6 +1142,7 @@ class H3Engine:
         self._cancel.clear()
         self._t0 = time.time()
         self._eta.reset()
+        self._phases.start()
         loading_msg = (
             "Loading Ref2VA weights (first run can take several minutes)…"
             if uses_ref2va(req)
