@@ -14,9 +14,11 @@ from collections import deque
 from pathlib import Path
 from typing import Any
 
-_MAX_LINES = 2500
+_MAX_LINES = 5000
 _lock = threading.Lock()
-_lines: deque[str] = deque(maxlen=_MAX_LINES)
+# (sequence, line): the sequence lets the live console stream only new lines.
+_lines: deque[tuple[int, str]] = deque(maxlen=_MAX_LINES)
+_seq = 0
 _handler_installed = False
 
 
@@ -28,10 +30,12 @@ def append_console(message: str, *args: object) -> None:
         return
     ts = time.strftime("%H:%M:%S")
     entry = f"[{ts}] {text[:800]}"
+    global _seq
     with _lock:
-        if _lines and _lines[-1][11:] == entry[11:]:
+        if _lines and _lines[-1][1][11:] == entry[11:]:
             return
-        _lines.append(entry)
+        _seq += 1
+        _lines.append((_seq, entry))
 
 
 def clear_console() -> None:
@@ -42,8 +46,27 @@ def clear_console() -> None:
 def get_console_lines(limit: int = 800) -> list[str]:
     n = max(1, min(int(limit), _MAX_LINES))
     with _lock:
-        items = list(_lines)
+        items = [line for _, line in _lines]
     return items[-n:]
+
+
+def get_console_since(after: int, limit: int = 2000) -> dict[str, Any]:
+    """Lines with a sequence above ``after`` (newest ``limit``).
+
+    ``dropped`` counts lines the caller missed because the ring wrapped (or
+    because ``limit`` cut them); ``seq`` is the cursor for the next call.
+    """
+    n = max(1, min(int(limit), _MAX_LINES))
+    with _lock:
+        newer = [(seq, line) for seq, line in _lines if seq > after]
+        latest = _seq
+    kept = newer[-n:]
+    first = kept[0][0] if kept else latest + 1
+    return {
+        "lines": [line for _, line in kept],
+        "seq": latest,
+        "dropped": max(0, first - after - 1) if after < latest else 0,
+    }
 
 
 def _tail_file(path: Path, max_lines: int = 200) -> list[str]:

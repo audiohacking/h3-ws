@@ -1914,3 +1914,153 @@ body {
   font-size: 0.75rem;
   color: var(--muted);
 }
+
+/* Debug panel (console + self-test) */
+.debug-modal__tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: 16px;
+  margin-right: auto;
+}
+
+.debug-modal__tab {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.debug-modal__tab.is-on {
+  background: var(--text, #0f172a);
+  border-color: var(--text, #0f172a);
+  color: #fff;
+}
+
+.debug-modal__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.debug-modal__live {
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.debug-modal__live.is-on {
+  color: #16a34a;
+}
+
+.debug-modal__filter {
+  flex: 1;
+  min-width: 160px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.8rem;
+}
+
+.debug-modal__follow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.debug-modal__state {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.debug-modal__state.is-passed { color: #16a34a; }
+.debug-modal__state.is-failed { color: #dc2626; }
+.debug-modal__state.is-running { color: #2563eb; }
+
+.debug-modal__results {
+  flex: 1;
+  min-height: 200px;
+  max-height: 48vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.debug-modal__step {
+  display: grid;
+  grid-template-columns: 78px 1fr auto;
+  gap: 2px 10px;
+  align-items: baseline;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 0.8rem;
+}
+
+.debug-modal__badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.debug-modal__step.is-passed .debug-modal__badge { color: #16a34a; }
+.debug-modal__step.is-running .debug-modal__badge { color: #2563eb; }
+.debug-modal__step.is-failed .debug-modal__badge,
+.debug-modal__step.is-timeout .debug-modal__badge,
+.debug-modal__step.is-missing .debug-modal__badge { color: #dc2626; }
+
+.debug-modal__stepmeta {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.debug-modal__summary {
+  grid-column: 2 / 4;
+  color: var(--muted);
+  font-size: 0.75rem;
+  word-break: break-word;
+}
+
+.debug-modal__table {
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  width: 100%;
+}
+
+.debug-modal__table th,
+.debug-modal__table td {
+  text-align: left;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+
+.debug-modal__saved,
+.debug-modal__link {
+  margin-right: auto;
+  align-self: center;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.debug-modal__linkbtn {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: #2563eb;
+  cursor: pointer;
+  font-size: inherit;
+}
+
+.debug-modal__privacy {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}

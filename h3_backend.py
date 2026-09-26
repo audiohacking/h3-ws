@@ -268,6 +268,101 @@ def timings_console_line(timings: dict[str, Any]) -> str:
     )
 
 
+def gpu_utilization_percent() -> int | None:
+    """Apple GPU busy percentage from IOAccelerator statistics (no sudo)."""
+    try:
+        out = subprocess.run(
+            ["ioreg", "-r", "-d", "1", "-w", "0", "-c", "IOAccelerator"],
+            capture_output=True, text=True, timeout=2,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r'"Device Utilization %"=(\d+)', out)
+    return int(match.group(1)) if match else None
+
+
+def process_rss_gib(pid: int | None) -> float | None:
+    if not pid:
+        return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2,
+        ).stdout.strip()
+        return int(out) / (1024 * 1024) if out else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def heartbeat_line(
+    progress: dict[str, Any] | None,
+    *,
+    job_s: float,
+    phase_s: float | None,
+    gpu: int | None,
+    rss_gib: float | None,
+) -> str:
+    """One console status line; h3 is silent for minutes inside a denoise step."""
+    mp = progress or {}
+    parts = ["heartbeat"]
+    stage = str(mp.get("stage") or "starting")
+    if isinstance(mp.get("step"), int) and isinstance(mp.get("total"), int):
+        stage = f"{stage} {mp['step']}/{mp['total']}"
+    parts.append(stage)
+    if phase_s is not None:
+        parts.append(f"phase {_format_mmss(phase_s)}")
+    if mp.get("eta_s") is not None:
+        parts.append(f"ETA {_format_mmss(float(mp['eta_s']))}")
+    parts.append(f"job {_format_mmss(job_s)}")
+    if gpu is not None:
+        parts.append(f"GPU {gpu}%")
+    if rss_gib is not None:
+        parts.append(f"h3 {rss_gib:.1f} GiB")
+    return " · ".join(parts)
+
+
+class Heartbeat:
+    """Every ``interval`` seconds, mirror generation state into the console."""
+
+    def __init__(self, engine: "H3Engine", interval: float = 10.0) -> None:
+        self.engine = engine
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name="h3-heartbeat", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+            self._thread = None
+
+    def _run(self) -> None:
+        from h3_console import append_console
+
+        while not self._stop.wait(self.interval):
+            engine = self.engine
+            eta = engine._eta
+            phase_s = time.time() - eta.t0 if eta.stage else None
+            try:
+                line = heartbeat_line(
+                    engine._progress,
+                    job_s=time.time() - engine._t0,
+                    phase_s=phase_s,
+                    gpu=gpu_utilization_percent(),
+                    rss_gib=process_rss_gib(engine.h3_pid()),
+                )
+            except Exception as exc:  # never let diagnostics break a job
+                line = f"heartbeat unavailable: {exc}"
+            append_console("%s", line)
+
+
 def progress_console_line(mp: dict[str, Any]) -> str:
     label = str(mp.get("label") or mp.get("stage") or "h3")
     parts = [label]
@@ -928,6 +1023,8 @@ class H3Engine:
 
         self.last_timings = None
         outcome = "failed"
+        heartbeat = Heartbeat(self)
+        heartbeat.start()
         try:
             result = self._generate_session(req, on_progress=on_progress)
             outcome = "done"
@@ -954,8 +1051,16 @@ class H3Engine:
             self._cleanup_job_temps(req)
             raise
         finally:
+            heartbeat.stop()
             self.last_timings = self._phases.summary(outcome=outcome)
             log.info("%s", timings_console_line(self.last_timings))
+
+    def h3_pid(self) -> int | None:
+        """PID of the h3 process running the current job (session or one-shot)."""
+        for proc in (getattr(self._session, "_proc", None), self._proc):
+            if proc is not None and proc.poll() is None:
+                return proc.pid
+        return None
 
     def ensure_preview_latent_dir(self) -> Path:
         """Stable ``--preview-latent`` directory for the life of this engine."""

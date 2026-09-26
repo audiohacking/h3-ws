@@ -36,6 +36,9 @@ if [[ -f "$LORA_DIR/h3_lora.c" ]]; then
 fi
 echo "Building h3.c with make -j${jobs} …"
 make -C "$SRC" -j"$jobs"
+# Correctness tests + GPU micro-bench bundled for the app's Debug self-test.
+echo "Building self-test binaries …"
+make -C "$SRC" -j"$jobs" selftest
 if [[ -x "$SRC/h3" ]]; then
   echo "OK: $SRC/h3"
   "$SRC/h3" --help | head -n 20 || true

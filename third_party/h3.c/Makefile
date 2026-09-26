@@ -17,7 +17,7 @@ LIB_M := h3_metal.m h3_gpu.m h3_tokenizer.m
 LIB_OBJ := $(LIB_C:.c=.o) $(LIB_M:.m=.o)
 CLI_OBJ := main.o h3_cli.o linenoise.o
 
-.PHONY: all test parity real-parity clean
+.PHONY: all test parity real-parity clean selftest
 
 all: h3 libh3.a
 
@@ -56,6 +56,15 @@ h3_conv3d_tests: tests/test_conv3d.o $(LIB_OBJ)
 
 h3_sdpa_split_tests: tests/test_sdpa_split.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
+
+h3_bench: tests/bench_ops.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+# Binaries the desktop app bundles for its built-in self-test.
+SELFTEST_BINS = h3_tests h3_gqa_tests h3_conv3d_tests h3_sdpa_split_tests \
+	h3_cache_invalidate_tests h3_bench
+
+selftest: $(SELFTEST_BINS)
 
 h3_real_audio_vae_test: tests/test_real_audio_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
@@ -223,7 +232,7 @@ linenoise.o: CFLAGS += -Wno-conversion -Wno-variadic-macro-arguments-omitted
 clean:
 	rm -f h3 h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 		h3_text_tests h3_real_prompt_test h3_real_dit_block_test \
-		h3_audio_gpu_tests h3_gqa_tests h3_cache_invalidate_tests h3_conv3d_tests h3_sdpa_split_tests \
+		h3_audio_gpu_tests h3_gqa_tests h3_cache_invalidate_tests h3_conv3d_tests h3_sdpa_split_tests h3_bench \
 		h3_real_audio_vae_test \
 		h3_real_audio_encoder_test \
 		h3_av_mux_test \

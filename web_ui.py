@@ -192,6 +192,10 @@ class AppState:
         self.output_dir = Path(output_dir)
         self.upload_dir = Path(upload_dir)
         self.engine = engine
+        from h3_selftest import SelfTestRunner
+
+        # Debug panel self-test; generation waits while it holds the GPU.
+        self.selftest = SelfTestRunner(engine)
         self.embedded = embedded
         self.http_url = http_url
         self.server_url = server_url
@@ -1507,6 +1511,10 @@ async def _execute_run(state: AppState, run_id: str) -> None:
 async def _worker_loop(state: AppState) -> None:
     while True:
         run_id = await state._pending.get()
+        # A running self-test owns the GPU; timings would be meaningless and
+        # the deep test stops the warm session.
+        while state.selftest.running:
+            await asyncio.sleep(1.0)
         try:
             await _execute_run(state, run_id)
         except Exception:
@@ -1620,6 +1628,113 @@ def create_app(
 
         clear_console()
         return {"ok": True}
+
+    @app.get("/api/console/stream")
+    async def api_console_stream(request: Request, after: int = 0):
+        """Near-realtime console: pushes new lines as they are appended."""
+        from sse_starlette.sse import EventSourceResponse
+
+        from h3_console import get_console_since
+
+        # sse_starlette logs every chunk at DEBUG; the console would echo
+        # itself into server.log.
+        logging.getLogger("sse_starlette").setLevel(logging.INFO)
+
+        async def events():
+            cursor = max(0, after)
+            while not await request.is_disconnected():
+                chunk = get_console_since(cursor)
+                if chunk["lines"] or chunk["dropped"]:
+                    cursor = chunk["seq"]
+                    yield {"event": "lines", "data": json.dumps(chunk)}
+                await asyncio.sleep(0.25)
+
+        return EventSourceResponse(events(), ping=15)
+
+    def _generation_active() -> bool:
+        # Worker state, not index.json statuses: a crash can leave runs
+        # marked "running" forever.
+        return not state.is_pipeline_idle()
+
+    @app.get("/api/debug/selftest")
+    async def api_selftest_status():
+        return state.selftest.status()
+
+    @app.post("/api/debug/selftest")
+    async def api_selftest_start(body: dict[str, Any]):
+        mode = str(body.get("mode") or "quick")
+        if _generation_active():
+            raise HTTPException(409, "Wait for the current generation to finish")
+        try:
+            return state.selftest.start(mode)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/debug/selftest/cancel")
+    async def api_selftest_cancel():
+        state.selftest.cancel()
+        return state.selftest.status()
+
+    saved_reports: set[str] = set()
+
+    @app.post("/api/debug/report/save")
+    async def api_debug_report_save(body: dict[str, Any]):
+        """Write the report zip to ~/Downloads (the desktop webview cannot
+        download files) and return its path for "Show in Finder"."""
+        from h3_selftest import build_report_zip
+
+        kind = str(body.get("kind") or "snapshot")
+        status = state.selftest.status()
+        payload = await asyncio.to_thread(
+            build_report_zip,
+            engine=state.engine,
+            clips=[asdict(clip) for clip in state.clips.values()],
+            selftest=status if status.get("state") != "idle" else None,
+            kind=kind,
+        )
+        folder = Path.home() / "Downloads"
+        if not folder.is_dir():
+            folder = state.output_dir / "reports"
+            folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"h3-ws-{kind}-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        path.write_bytes(payload)
+        saved_reports.add(str(path))
+        log.info("debug report saved: %s (%d KiB)", path, len(payload) // 1024)
+        return {"ok": True, "path": str(path), "name": path.name,
+                "bytes": len(payload)}
+
+    @app.post("/api/debug/reveal")
+    async def api_debug_reveal(body: dict[str, Any]):
+        path = str(body.get("path") or "")
+        # Only reveal reports this server wrote; never an arbitrary path.
+        if path not in saved_reports or not Path(path).is_file():
+            raise HTTPException(404, "Unknown report")
+        subprocess.run(["open", "-R", path], check=False)
+        return {"ok": True}
+
+    @app.get("/api/debug/report")
+    async def api_debug_report(kind: str = "snapshot"):
+        """Zip for bug reports: device facts, self-test, timings, console, logs."""
+        from fastapi import Response
+
+        from h3_selftest import build_report_zip
+
+        status = state.selftest.status()
+        payload = await asyncio.to_thread(
+            build_report_zip,
+            engine=state.engine,
+            clips=[asdict(clip) for clip in state.clips.values()],
+            selftest=status if status.get("state") != "idle" else None,
+            kind=kind,
+        )
+        name = f"h3-ws-{kind}-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        return Response(
+            payload,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
 
     @app.get("/api/config")
     async def api_config(request: Request):

@@ -11,7 +11,7 @@ import { ModelsManager } from "./components/media/ModelsManager";
 import { ComposerPanel } from "./components/composer/ComposerPanel";
 import { isTurboPreset, pickDefaultTurboId } from "./components/composer/TurboToggle";
 import { FeaturesPopup } from "./components/composer/FeaturesPopup";
-import { ConsoleModal } from "./components/ConsoleModal";
+import { DebugModal } from "./components/DebugModal";
 import { RefinePanel } from "./components/composer/RefinePanel";
 import { ProjectSwitcher, type Project } from "./components/ProjectSwitcher";
 import { compilePrompt } from "./compile";
@@ -1611,8 +1611,8 @@ export default function App() {
               Models
             </button>
           )}
-          <button type="button" className="btn-secondary" onClick={() => setConsoleOpen(true)} title="Backend console for bug reports">
-            Console
+          <button type="button" className="btn-secondary" onClick={() => setConsoleOpen(true)} title="Live console, self-test and bug-report export">
+            Debug
           </button>
           <ProjectSwitcher
             projects={projects}
@@ -2097,7 +2097,7 @@ export default function App() {
         onNetworkSaved={setNetworkSettings}
       />
 
-      <ConsoleModal open={consoleOpen} api={API} onClose={() => setConsoleOpen(false)} />
+      <DebugModal open={consoleOpen} api={API} onClose={() => setConsoleOpen(false)} />
 
       <RefinePanel
         open={refineOpen}
