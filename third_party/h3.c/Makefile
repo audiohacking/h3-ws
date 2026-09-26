@@ -51,6 +51,12 @@ h3_gqa_tests: tests/test_gqa.o $(LIB_OBJ)
 h3_cache_invalidate_tests: tests/test_cache_invalidate.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_conv3d_tests: tests/test_conv3d.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+h3_sdpa_split_tests: tests/test_sdpa_split.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_real_audio_vae_test: tests/test_real_audio_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
@@ -104,7 +110,7 @@ h3_semantic_vae_test: tests/test_semantic_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
-	h3_audio_gpu_tests h3_gqa_tests h3_cache_invalidate_tests \
+	h3_audio_gpu_tests h3_gqa_tests h3_cache_invalidate_tests h3_conv3d_tests h3_sdpa_split_tests \
 	h3_real_audio_vae_test \
 	h3_real_audio_encoder_test \
 	h3_av_mux_test \
@@ -132,6 +138,8 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	./h3_audio_gpu_tests
 	./h3_gqa_tests
 	./h3_cache_invalidate_tests
+	./h3_conv3d_tests
+	./h3_sdpa_split_tests
 	@if test -f MiniMax-H3/FL2VA/audio_vae/model.safetensors && \
 	         test -f misc/fixtures/h3_real_audio_vae_37.safetensors; then \
 		./h3_real_audio_vae_test; \
@@ -215,7 +223,7 @@ linenoise.o: CFLAGS += -Wno-conversion -Wno-variadic-macro-arguments-omitted
 clean:
 	rm -f h3 h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 		h3_text_tests h3_real_prompt_test h3_real_dit_block_test \
-		h3_audio_gpu_tests h3_gqa_tests h3_cache_invalidate_tests \
+		h3_audio_gpu_tests h3_gqa_tests h3_cache_invalidate_tests h3_conv3d_tests h3_sdpa_split_tests \
 		h3_real_audio_vae_test \
 		h3_real_audio_encoder_test \
 		h3_av_mux_test \

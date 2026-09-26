@@ -440,7 +440,8 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             @"h3_vision_qkv_rope_bf16",
             @"h3_embedding_bf16", @"h3_text_qk_rope_bf16",
             @"h3_head_rms_norm_bf16", @"h3_rope_text_bf16",
-            @"h3_gqa_causal_bf16", @"h3_add_bf16", @"h3_sub_bf16",
+            @"h3_gqa_causal_bf16", @"h3_gqa_causal_tiled_bf16",
+            @"h3_add_bf16", @"h3_sub_bf16",
             @"h3_token_pool_bf16", @"h3_token_pool_adaln_bf16",
             @"h3_token_expand_delta_bf16",
             @"h3_token_expand_adaln_bf16",
@@ -1492,8 +1493,10 @@ int h3_gpu_qkv_rope_f32(h3_gpu *opaque, h3_gpu_tensor *query,
 
 /* MPSGraph native SDPA silently corrupts output on M2/M3 Ultra above ~15k
  * query rows (antirez/h3.c#16 / Apple FB24605554). Split non-causal queries
- * into blocks. Defaults: split when sequence > 12288, block size 2048.
- * H3_SDPA_MAX_QUERY_ROWS=0 disables splitting. */
+ * into blocks. Defaults: split when sequence > 12288, block size 4096.
+ * On M3 Ultra at a 97k-token Ref2VA sequence (56 heads x 128) one attention
+ * takes 29.2 s with 2048-row blocks, 15.1 s with 4096 (MLX's fused kernel:
+ * 15.2 s) and 16.9 s unsplit. H3_SDPA_MAX_QUERY_ROWS=0 disables splitting. */
 static unsigned h3_gpu_env_u32(const char *name, unsigned fallback) {
     const char *text = getenv(name);
     if (!text || !*text) return fallback;
@@ -1506,11 +1509,20 @@ static unsigned h3_gpu_env_u32(const char *name, unsigned fallback) {
 
 static unsigned h3_gpu_sdpa_query_block(void) {
     /* 0 disables query splitting. */
-    return h3_gpu_env_u32("H3_SDPA_MAX_QUERY_ROWS", 2048u);
+    return h3_gpu_env_u32("H3_SDPA_MAX_QUERY_ROWS", 4096u);
 }
 
 static unsigned h3_gpu_sdpa_split_min_rows(void) {
     return h3_gpu_env_u32("H3_SDPA_SPLIT_MIN_ROWS", 12288u);
+}
+
+/* MPSGraph SDPA takes a ~2x slower kernel when the sequence is not a
+ * multiple of 8: 39.0 s vs 18.4 s for one 105377-row Ref2VA attention
+ * (56 heads x 128) on M3 Ultra. Non-causal graphs pad Q/K/V to this
+ * multiple, give padded keys a -inf mask and slice the padded rows off.
+ * H3_SDPA_PAD_ROWS=0 disables. */
+static unsigned h3_gpu_sdpa_pad_rows(void) {
+    return h3_gpu_env_u32("H3_SDPA_PAD_ROWS", 32u);
 }
 
 static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
@@ -1521,11 +1533,15 @@ static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
     @autoreleasepool {
         unsigned query_block = h3_gpu_sdpa_query_block();
         unsigned split_min = h3_gpu_sdpa_split_min_rows();
+        unsigned pad_rows = causal ? 0u : h3_gpu_sdpa_pad_rows();
+        uint32_t padded = pad_rows && sequence % pad_rows ?
+            (sequence / pad_rows + 1) * pad_rows : sequence;
         NSString *cacheKey = [NSString stringWithFormat:
-                              @"%u:%u:%u:%u:%u:%.9g:%d:%d:%d:%u:%u",
+                              @"%u:%u:%u:%u:%u:%.9g:%d:%d:%d:%u:%u:%u",
                               (unsigned)dataType, batch, sequence, heads,
                               head_dim, scale, causal, headMajor,
-                              outputHeadMajor, query_block, split_min];
+                              outputHeadMajor, query_block, split_min,
+                              padded];
         H3SDPA *cached = gpu.sdpaCache[cacheKey];
         if (cached) return cached;
         MPSGraph *graph = [[MPSGraph alloc] init];
@@ -1553,6 +1569,39 @@ static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
             h3_gpu_set_error(gpu, @"native MPSGraph SDPA is unavailable");
             return nil;
         }
+        MPSGraphTensor *key_mask = nil;
+        if (padded != sequence) {
+            NSArray<NSNumber *> *none = @[@0, @0, @0, @0];
+            NSArray<NSNumber *> *tail = @[@0, @0, @(padded - sequence), @0];
+            qt = [graph padTensor:qt withPaddingMode:MPSGraphPaddingModeConstant
+                      leftPadding:none rightPadding:tail constantValue:0.0
+                             name:nil];
+            kt = [graph padTensor:kt withPaddingMode:MPSGraphPaddingModeConstant
+                      leftPadding:none rightPadding:tail constantValue:0.0
+                             name:nil];
+            vt = [graph padTensor:vt withPaddingMode:MPSGraphPaddingModeConstant
+                      leftPadding:none rightPadding:tail constantValue:0.0
+                             name:nil];
+            float *mask_values = calloc(padded, sizeof(*mask_values));
+            if (!mask_values) return nil;
+            for (uint32_t column = sequence; column < padded; column++)
+                mask_values[column] = -INFINITY;
+            NSData *mask_data = [NSData dataWithBytesNoCopy:mask_values
+                length:padded * sizeof(*mask_values) freeWhenDone:YES];
+            key_mask = [graph constantWithData:mask_data
+                shape:@[@1, @1, @1, @(padded)] dataType:MPSDataTypeFloat32];
+            if (dataType != MPSDataTypeFloat32)
+                key_mask = [graph castTensor:key_mask toType:dataType name:nil];
+        }
+        MPSGraphTensor *(^attend)(MPSGraphTensor *) =
+            ^MPSGraphTensor *(MPSGraphTensor *rows) {
+                return key_mask ?
+                    [graph scaledDotProductAttentionWithQueryTensor:rows
+                        keyTensor:kt valueTensor:vt maskTensor:key_mask
+                        scale:scale name:nil] :
+                    [graph scaledDotProductAttentionWithQueryTensor:rows
+                        keyTensor:kt valueTensor:vt scale:scale name:nil];
+            };
         MPSGraphTensor *attention;
         if (causal) {
             size_t mask_count = (size_t)sequence * sequence;
@@ -1577,23 +1626,19 @@ static H3SDPA *h3_gpu_sdpa_graph(H3GPU *gpu, uint32_t batch,
              * threshold (see antirez/h3.c#16). */
             NSMutableArray<MPSGraphTensor *> *parts =
                 [NSMutableArray array];
-            for (uint32_t start = 0; start < sequence; start += query_block) {
+            for (uint32_t start = 0; start < padded; start += query_block) {
                 uint32_t rows = query_block;
-                if (start + rows > sequence) rows = sequence - start;
-                MPSGraphTensor *q_rows = [graph sliceTensor:qt
-                                                   dimension:2
-                                                       start:start
-                                                      length:rows
-                                                        name:nil];
-                [parts addObject:[graph
-                    scaledDotProductAttentionWithQueryTensor:q_rows
-                    keyTensor:kt valueTensor:vt scale:scale name:nil]];
+                if (start + rows > padded) rows = padded - start;
+                [parts addObject:attend([graph sliceTensor:qt dimension:2
+                    start:start length:rows name:nil])];
             }
             attention = [graph concatTensors:parts dimension:2 name:nil];
         } else {
-            attention = [graph scaledDotProductAttentionWithQueryTensor:qt
-                keyTensor:kt valueTensor:vt scale:scale name:nil];
+            attention = attend(qt);
         }
+        if (padded != sequence)
+            attention = [graph sliceTensor:attention dimension:2 start:0
+                                    length:sequence name:nil];
         H3SDPA *result = [[H3SDPA alloc] init];
         result.graph = graph;
         result.query = q;
@@ -1922,11 +1967,17 @@ static H3Conv *h3_gpu_conv3d_graph(
         uint32_t output_depth, uint32_t output_height, uint32_t output_width,
         int has_bias) {
     @autoreleasepool {
+        /* MPSGraph's native Conv3d reaches ~6 TFLOPS F32 on M3 Ultra at the
+         * video VAE encoder shapes; the same contraction as one Conv2d per
+         * temporal tap (frames folded into the batch) reaches ~29 TFLOPS.
+         * Only the summation order changes. H3_CONV3D_NATIVE=1 restores the
+         * single native op. */
+        BOOL decompose = batch == 1 && getenv("H3_CONV3D_NATIVE") == NULL;
         NSString *key = [NSString stringWithFormat:
-            @"3:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%d", batch, depth,
+            @"3:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%u:%d:%d", batch, depth,
             height, width, input_channels, output_channels, kernel_depth,
             kernel_height, kernel_width, stride_depth, stride_height,
-            stride_width, has_bias];
+            stride_width, has_bias, decompose];
         H3Conv *cached = gpu.convCache[key];
         if (cached) return cached;
         H3Conv *conv = [[H3Conv alloc] init];
@@ -1944,19 +1995,60 @@ static H3Conv *h3_gpu_conv3d_graph(
         conv.weight = [conv.graph placeholderWithShape:conv.weightShape
                                                dataType:MPSDataTypeFloat32
                                                    name:nil];
-        MPSGraphConvolution3DOpDescriptor *descriptor =
-            [MPSGraphConvolution3DOpDescriptor
-                descriptorWithStrideInX:stride_width
-                strideInY:stride_height strideInZ:stride_depth
-                dilationRateInX:1 dilationRateInY:1 dilationRateInZ:1 groups:1
-                paddingLeft:0 paddingRight:0 paddingTop:0 paddingBottom:0
-                paddingFront:0 paddingBack:0
-                paddingStyle:MPSGraphPaddingStyleExplicit
-                dataLayout:MPSGraphTensorNamedDataLayoutNDHWC
-                weightsLayout:MPSGraphTensorNamedDataLayoutOIDHW];
-        MPSGraphTensor *result = [conv.graph
-            convolution3DWithSourceTensor:conv.input weightsTensor:conv.weight
-            descriptor:descriptor name:nil];
+        MPSGraphTensor *result = nil;
+        if (decompose) {
+            MPSGraph *graph = conv.graph;
+            MPSGraphConvolution2DOpDescriptor *descriptor =
+                [MPSGraphConvolution2DOpDescriptor
+                    descriptorWithStrideInX:stride_width
+                    strideInY:stride_height
+                    dilationRateInX:1 dilationRateInY:1 groups:1
+                    paddingLeft:0 paddingRight:0 paddingTop:0 paddingBottom:0
+                    paddingStyle:MPSGraphPaddingStyleExplicit
+                    dataLayout:MPSGraphTensorNamedDataLayoutNHWC
+                    weightsLayout:MPSGraphTensorNamedDataLayoutOIHW];
+            for (uint32_t tap = 0; tap < kernel_depth; tap++) {
+                /* Output frame t reads input frame tap + stride_depth * t. */
+                uint32_t end = tap + stride_depth * (output_depth - 1) + 1;
+                MPSGraphTensor *frames = [graph sliceTensor:conv.input
+                    starts:@[@0, @(tap), @0, @0, @0]
+                    ends:@[@1, @(end), @(height), @(width),
+                           @(input_channels)]
+                    strides:@[@1, @(stride_depth), @1, @1, @1] name:nil];
+                frames = [graph reshapeTensor:frames
+                    withShape:@[@(output_depth), @(height), @(width),
+                                @(input_channels)] name:nil];
+                MPSGraphTensor *weights = [graph sliceTensor:conv.weight
+                    dimension:2 start:tap length:1 name:nil];
+                weights = [graph reshapeTensor:weights
+                    withShape:@[@(output_channels), @(input_channels),
+                                @(kernel_height), @(kernel_width)] name:nil];
+                MPSGraphTensor *partial = [graph
+                    convolution2DWithSourceTensor:frames weightsTensor:weights
+                    descriptor:descriptor name:nil];
+                result = result ? [graph additionWithPrimaryTensor:result
+                                                   secondaryTensor:partial
+                                                              name:nil] :
+                                  partial;
+            }
+            result = [graph reshapeTensor:result withShape:conv.outputShape
+                                     name:nil];
+        } else {
+            MPSGraphConvolution3DOpDescriptor *descriptor =
+                [MPSGraphConvolution3DOpDescriptor
+                    descriptorWithStrideInX:stride_width
+                    strideInY:stride_height strideInZ:stride_depth
+                    dilationRateInX:1 dilationRateInY:1 dilationRateInZ:1
+                    groups:1
+                    paddingLeft:0 paddingRight:0 paddingTop:0 paddingBottom:0
+                    paddingFront:0 paddingBack:0
+                    paddingStyle:MPSGraphPaddingStyleExplicit
+                    dataLayout:MPSGraphTensorNamedDataLayoutNDHWC
+                    weightsLayout:MPSGraphTensorNamedDataLayoutOIDHW];
+            result = [conv.graph
+                convolution3DWithSourceTensor:conv.input
+                weightsTensor:conv.weight descriptor:descriptor name:nil];
+        }
         if (has_bias) {
             conv.bias = [conv.graph placeholderWithShape:conv.biasShape
                                                 dataType:MPSDataTypeFloat32
@@ -4242,8 +4334,17 @@ static H3GQA *h3_gpu_gqa_graph(H3GPU *gpu, uint32_t sequence,
                                uint32_t query_heads, uint32_t kv_heads,
                                uint32_t head_dim, float scale) {
     @autoreleasepool {
-        NSString *key = [NSString stringWithFormat:@"%u:%u:%u:%u:%.9g",
-                         sequence, query_heads, kv_heads, head_dim, scale];
+        /* BF16 SDPA internals fail the GQA oracle (~1.9% BF16 mismatch vs
+         * 0.02%); casting to F32 inside the graph passes it at 13x the speed
+         * of h3_gqa_causal_bf16 for a 12k-token Ref2VA prompt. */
+        BOOL f32 = getenv("H3_MPS_GQA_BF16") == NULL;
+        unsigned query_block = h3_gpu_sdpa_query_block();
+        unsigned split_min = h3_gpu_sdpa_split_min_rows();
+        BOOL split = query_block && sequence > split_min &&
+                     sequence > query_block;
+        NSString *key = [NSString stringWithFormat:@"%u:%u:%u:%u:%.9g:%d:%u",
+                         sequence, query_heads, kv_heads, head_dim, scale, f32,
+                         split ? query_block : 0u];
         H3GQA *cached = gpu.gqaCache[key];
         if (cached) return cached;
         if (!kv_heads || query_heads % kv_heads) return nil;
@@ -4265,6 +4366,11 @@ static H3GQA *h3_gpu_gqa_graph(H3GPU *gpu, uint32_t sequence,
                                       withDimension:2 name:nil];
         MPSGraphTensor *vt = [graph transposeTensor:value dimension:1
                                       withDimension:2 name:nil];
+        if (f32) {
+            qt = [graph castTensor:qt toType:MPSDataTypeFloat32 name:nil];
+            kt = [graph castTensor:kt toType:MPSDataTypeFloat32 name:nil];
+            vt = [graph castTensor:vt toType:MPSDataTypeFloat32 name:nil];
+        }
         uint32_t groups = query_heads / kv_heads;
         MPSShape *split_shape = @[@1, @(kv_heads), @1, @(sequence), @(head_dim)];
         MPSShape *broadcast_shape = @[@1, @(kv_heads), @(groups),
@@ -4278,21 +4384,57 @@ static H3GQA *h3_gpu_gqa_graph(H3GPU *gpu, uint32_t sequence,
         kt = [graph reshapeTensor:kt withShape:expanded_shape name:nil];
         vt = [graph reshapeTensor:vt withShape:expanded_shape name:nil];
         size_t mask_count = (size_t)sequence * sequence;
-        uint16_t *mask_values = malloc(mask_count * sizeof(*mask_values));
+        size_t mask_item = f32 ? sizeof(float) : sizeof(uint16_t);
+        uint8_t *mask_values = malloc(mask_count * mask_item);
         if (!mask_values) return nil;
         for (uint32_t row = 0; row < sequence; row++)
-            for (uint32_t column = 0; column < sequence; column++)
-                mask_values[(size_t)row * sequence + column] =
-                    column <= row ? 0u : UINT16_C(0xff80);
+            for (uint32_t column = 0; column < sequence; column++) {
+                size_t index = (size_t)row * sequence + column;
+                if (f32)
+                    ((float *)mask_values)[index] =
+                        column <= row ? 0.0f : -INFINITY;
+                else
+                    ((uint16_t *)mask_values)[index] =
+                        column <= row ? 0u : UINT16_C(0xff80);
+            }
         NSData *mask_data = [NSData dataWithBytesNoCopy:mask_values
-                                                 length:mask_count * sizeof(*mask_values)
+                                                 length:mask_count * mask_item
                                            freeWhenDone:YES];
         MPSGraphTensor *mask = [graph constantWithData:mask_data
             shape:@[@1, @1, @(sequence), @(sequence)]
-            dataType:MPSDataTypeBFloat16];
-        MPSGraphTensor *attention = [graph
-            scaledDotProductAttentionWithQueryTensor:qt keyTensor:kt
-            valueTensor:vt maskTensor:mask scale:scale name:nil];
+            dataType:f32 ? MPSDataTypeFloat32 : MPSDataTypeBFloat16];
+        MPSGraphTensor *attention;
+        if (split) {
+            /* Same Ultra query-row limit as the non-causal path. Rows
+             * [start, end) only see keys [0, end), so each block also skips
+             * the fully masked columns to its right. */
+            NSMutableArray<MPSGraphTensor *> *parts = [NSMutableArray array];
+            for (uint32_t start = 0; start < sequence; start += query_block) {
+                uint32_t end = MIN(start + query_block, sequence);
+                MPSGraphTensor *q_rows = [graph sliceTensor:qt dimension:2
+                    start:start length:end - start name:nil];
+                MPSGraphTensor *k_rows = [graph sliceTensor:kt dimension:2
+                    start:0 length:end name:nil];
+                MPSGraphTensor *v_rows = [graph sliceTensor:vt dimension:2
+                    start:0 length:end name:nil];
+                MPSGraphTensor *mask_rows = [graph sliceTensor:mask
+                    starts:@[@0, @0, @(start), @0]
+                    ends:@[@1, @1, @(end), @(end)]
+                    strides:@[@1, @1, @1, @1] name:nil];
+                [parts addObject:[graph
+                    scaledDotProductAttentionWithQueryTensor:q_rows
+                    keyTensor:k_rows valueTensor:v_rows maskTensor:mask_rows
+                    scale:scale name:nil]];
+            }
+            attention = [graph concatTensors:parts dimension:2 name:nil];
+        } else {
+            attention = [graph
+                scaledDotProductAttentionWithQueryTensor:qt keyTensor:kt
+                valueTensor:vt maskTensor:mask scale:scale name:nil];
+        }
+        if (f32)
+            attention = [graph castTensor:attention
+                                   toType:MPSDataTypeBFloat16 name:nil];
         H3GQA *result = [[H3GQA alloc] init];
         result.graph = graph;
         result.query = query;
@@ -4373,7 +4515,13 @@ int h3_gpu_gqa_causal_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
         !h3_gpu_require_bf16(gpu, value, kv_count, @"GQA value") ||
         !h3_gpu_require_bf16(gpu, output, query_count, @"GQA output") ||
         !h3_gpu_require_command(gpu)) return 0;
-    if (getenv("H3_MPS_GQA") && h3_gpu_gqa_mps(
+    /* Prompts from H3_GQA_MPS_MIN_ROWS tokens (default 1024) run MPSGraph
+     * SDPA in F32; shorter ones keep the Metal kernel bit-for-bit.
+     * H3_GQA_KERNEL=1 forces the kernel, H3_MPS_GQA=1 forces MPSGraph. */
+    BOOL use_mps = !getenv("H3_GQA_KERNEL") &&
+        (getenv("H3_MPS_GQA") ||
+         sequence >= h3_gpu_env_u32("H3_GQA_MPS_MIN_ROWS", 1024u));
+    if (use_mps && h3_gpu_gqa_mps(
             gpu, output, query, key, value, sequence, query_heads,
             kv_heads, head_dim, scale)) return 1;
     /* Metal requires threadgroup memory lengths to be 16-byte multiples;
@@ -4382,15 +4530,32 @@ int h3_gpu_gqa_causal_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
     id<MTLComputePipelineState> pipeline = h3_gpu_pipeline(gpu,
                                                            @"h3_gqa_causal_bf16");
     if (!pipeline) return 0;
+    /* Rows that fit keep the single-pass kernel bit-for-bit; longer Ref2VA
+     * multimodal prompts switch to the tiled online-softmax kernel.
+     * H3_GQA_FORCE_TILED exercises the tiled path on short prompts. */
+    uint32_t tile_keys = 0;
     if (score_bytes + pipeline.staticThreadgroupMemoryLength >
-        gpu.device.maxThreadgroupMemoryLength) {
-        h3_gpu_set_error(gpu, @"causal attention sequence exceeds threadgroup memory");
-        return 0;
+            gpu.device.maxThreadgroupMemoryLength ||
+        getenv("H3_GQA_FORCE_TILED")) {
+        pipeline = h3_gpu_pipeline(gpu, @"h3_gqa_causal_tiled_bf16");
+        if (!pipeline) return 0;
+        tile_keys = h3_gpu_env_u32("H3_GQA_TILE_KEYS", 4096u) & ~3u;
+        if (!tile_keys) tile_keys = 4096;
+        score_bytes = (size_t)tile_keys * sizeof(float);
+        if (score_bytes + pipeline.staticThreadgroupMemoryLength >
+            gpu.device.maxThreadgroupMemoryLength) {
+            h3_gpu_set_error(gpu, @"causal attention tile exceeds threadgroup memory");
+            return 0;
+        }
     }
     NSUInteger maximum_threads = MIN((NSUInteger)128,
                                      pipeline.maxTotalThreadsPerThreadgroup);
     NSUInteger threads = 1;
     while (threads * 2 <= maximum_threads) threads *= 2;
+    if (tile_keys && threads * 4 < head_dim) {
+        h3_gpu_set_error(gpu, @"tiled causal attention needs head_dim <= 4 * threads");
+        return 0;
+    }
     @autoreleasepool {
         id<MTLComputeCommandEncoder> encoder = [gpu.command computeCommandEncoder];
         [encoder setComputePipelineState:pipeline];
@@ -4400,6 +4565,8 @@ int h3_gpu_gqa_causal_bf16(h3_gpu *opaque, h3_gpu_tensor *output,
         [encoder setBuffer:TENSOR(output).buffer offset:0 atIndex:3];
         gqa_args args = {sequence, query_heads, kv_heads, head_dim, scale};
         [encoder setBytes:&args length:sizeof(args) atIndex:4];
+        if (tile_keys)
+            [encoder setBytes:&tile_keys length:sizeof(tile_keys) atIndex:5];
         [encoder setThreadgroupMemoryLength:score_bytes atIndex:0];
         [encoder dispatchThreadgroups:MTLSizeMake(sequence, query_heads, 1)
                  threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];

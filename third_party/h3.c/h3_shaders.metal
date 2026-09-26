@@ -4037,6 +4037,101 @@ kernel void h3_gqa_causal_bf16(
     }
 }
 
+/* Long-prompt causal GQA: the single-pass kernel above stores one score per
+ * key in threadgroup memory, which caps Ref2VA multimodal prompts near 7.9k
+ * tokens. This variant walks keys in tiles with an online softmax (running
+ * max and sum, rescaling the accumulator per tile), so length is unbounded.
+ * Each thread owns up to four head dimensions: head_dim <= 128 and the host
+ * dispatches at least 32 threads. */
+kernel void h3_gqa_causal_tiled_bf16(
+        device const ushort *query [[buffer(0)]],
+        device const ushort *key [[buffer(1)]],
+        device const ushort *value [[buffer(2)]],
+        device ushort *output [[buffer(3)]],
+        constant gqa_args &args [[buffer(4)]],
+        constant uint &tile_keys [[buffer(5)]],
+        threadgroup float *scores [[threadgroup(0)]],
+        uint3 group [[threadgroup_position_in_grid]],
+        uint3 thread_position [[thread_position_in_threadgroup]],
+        uint3 threadgroup_size [[threads_per_threadgroup]]) {
+    uint tid = thread_position.x;
+    uint threads = threadgroup_size.x;
+    uint query_row = group.x;
+    uint query_head = group.y;
+    if (query_row >= args.sequence || query_head >= args.query_heads) return;
+    uint kv_head = query_head / (args.query_heads / args.kv_heads);
+    uint q_base = (query_row * args.query_heads + query_head) * args.head_dim;
+    uint key_count = query_row + 1;
+    threadgroup float reductions[128];
+    threadgroup float shared_query[128];
+
+    for (uint d = tid; d < args.head_dim; d += threads)
+        shared_query[d] = h3_bf16_to_f32(query[q_base + d]) * args.scale;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float accumulator[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    float running_max = -INFINITY;
+    float running_sum = 0.0f;
+    for (uint tile_start = 0; tile_start < key_count; tile_start += tile_keys) {
+        uint tile_count = min(tile_keys, key_count - tile_start);
+        float local_max = -INFINITY;
+        for (uint index = tid; index < tile_count; index += threads) {
+            uint k_base = ((tile_start + index) * args.kv_heads + kv_head) *
+                          args.head_dim;
+            float dot = 0.0f;
+            for (uint d = 0; d < args.head_dim; d++)
+                dot = fma(shared_query[d], h3_bf16_to_f32(key[k_base + d]), dot);
+            scores[index] = dot;
+            local_max = max(local_max, dot);
+        }
+        reductions[tid] = local_max;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint stride = threads / 2; stride; stride >>= 1) {
+            if (tid < stride)
+                reductions[tid] = max(reductions[tid], reductions[tid + stride]);
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        float tile_max = max(running_max, reductions[0]);
+        /* reductions[] is reused for the sum; see h3_gqa_causal_bf16. */
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float correction = exp(running_max - tile_max);
+        float local_sum = 0.0f;
+        for (uint index = tid; index < tile_count; index += threads) {
+            float probability = exp(scores[index] - tile_max);
+            scores[index] = probability;
+            local_sum += probability;
+        }
+        reductions[tid] = local_sum;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint stride = threads / 2; stride; stride >>= 1) {
+            if (tid < stride) reductions[tid] += reductions[tid + stride];
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        running_sum = running_sum * correction + reductions[0];
+        running_max = tile_max;
+        for (uint slot = 0; slot < 4; slot++) {
+            uint d = tid + slot * threads;
+            if (d >= args.head_dim) break;
+            float sum = accumulator[slot] * correction;
+            for (uint index = 0; index < tile_count; index++) {
+                uint v_index = ((tile_start + index) * args.kv_heads + kv_head) *
+                               args.head_dim + d;
+                sum = fma(scores[index], h3_bf16_to_f32(value[v_index]), sum);
+            }
+            accumulator[slot] = sum;
+        }
+        /* Every thread reads all tile scores and reductions[0] above; the
+         * next tile must not overwrite them early. */
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    float inverse_sum = 1.0f / running_sum;
+    for (uint slot = 0; slot < 4; slot++) {
+        uint d = tid + slot * threads;
+        if (d >= args.head_dim) break;
+        output[q_base + d] = h3_f32_to_bf16(accumulator[slot] * inverse_sum);
+    }
+}
+
 kernel void h3_add_bf16(device const ushort *left [[buffer(0)]],
                          device const ushort *right [[buffer(1)]],
                          device ushort *output [[buffer(2)]],

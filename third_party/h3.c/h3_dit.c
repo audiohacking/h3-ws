@@ -1668,6 +1668,10 @@ static h3_dit *load_dit(const char *weight_directory,
              "condition row elements do not match the packed DiT layout");
         goto failed;
     }
+    fprintf(stderr, "h3: DiT sequence %u rows (text %u, video %u, audio %u, "
+            "video condition %u, audio condition %u)\n", dit->sequence,
+            dit->text_rows, dit->video_rows, dit->audio_rows,
+            dit->video_condition_rows, dit->audio_condition_rows);
     dit->sigmas = *sigmas;
     dit->weights = h3_weight_store_open(weight_directory, error, error_size);
     if (!dit->weights) goto failed;
@@ -1936,6 +1940,67 @@ static int leave_token_reduction_adaln(h3_dit *dit, unsigned block,
     return 1;
 }
 
+/* H3_DIT_OP_PROFILE=N: for the first N blocks run by this process, wait for
+ * the GPU after every block op and report wall time per op label. Timing
+ * only; the math is unchanged. */
+typedef struct {
+    const char *label;
+    double seconds;
+    unsigned calls;
+} op_profile_entry;
+
+static op_profile_entry op_profile_table[48];
+static unsigned op_profile_entries;
+static unsigned op_profile_blocks_done;
+static int op_profile_limit = -1;
+
+static int op_profile_active(void) {
+    if (op_profile_limit < 0) {
+        const char *value = getenv("H3_DIT_OP_PROFILE");
+        op_profile_limit = value && *value ? atoi(value) : 0;
+    }
+    return op_profile_blocks_done < (unsigned)op_profile_limit;
+}
+
+static double op_profile_begin(h3_dit *dit) {
+    h3_gpu_submit(dit->gpu);
+    h3_gpu_begin(dit->gpu);
+    return stream_now();
+}
+
+static void op_profile_end(h3_dit *dit, const char *label, double start) {
+    h3_gpu_submit(dit->gpu);
+    h3_gpu_begin(dit->gpu);
+    double seconds = stream_now() - start;
+    unsigned slot = 0;
+    while (slot < op_profile_entries && op_profile_table[slot].label != label)
+        slot++;
+    if (slot == op_profile_entries) {
+        if (slot == sizeof(op_profile_table) / sizeof(op_profile_table[0]))
+            return;
+        op_profile_table[slot].label = label;
+        op_profile_entries++;
+    }
+    op_profile_table[slot].seconds += seconds;
+    op_profile_table[slot].calls++;
+}
+
+static void op_profile_block_done(const h3_dit *dit, uint32_t rows) {
+    if (++op_profile_blocks_done != (unsigned)op_profile_limit) return;
+    double total = 0.0;
+    for (unsigned slot = 0; slot < op_profile_entries; slot++)
+        total += op_profile_table[slot].seconds;
+    fprintf(stderr, "h3: DiT op profile over %u blocks at %u rows "
+            "(%.3f s/block)\n", op_profile_blocks_done, rows,
+            total / op_profile_blocks_done);
+    for (unsigned slot = 0; slot < op_profile_entries; slot++)
+        fprintf(stderr, "h3:   %-48s %8.1f ms/block %5.1f%%\n",
+                op_profile_table[slot].label,
+                1e3 * op_profile_table[slot].seconds / op_profile_blocks_done,
+                total > 0 ? 100.0 * op_profile_table[slot].seconds / total : 0);
+    (void)dit;
+}
+
 static int run_block(h3_dit *dit, unsigned index, int step,
                      h3_dit_block *weight,
                      int attention_adaln_ready,
@@ -1954,8 +2019,11 @@ static int run_block(h3_dit *dit, unsigned index, int step,
         dit->reduced_rope_sin : dit->rope_sin;
     uint32_t rows = dit->token_reduction_active ?
         dit->reduced_sequence : dit->sequence;
+    int profiling = op_profile_active();
 #define OP(call, label) do {                                                    \
+    double op_start = profiling ? op_profile_begin(dit) : 0.0;                   \
     if (!gpu_op(dit, (call), error, error_size, label)) return 0;               \
+    if (profiling) op_profile_end(dit, label, op_start);                         \
 } while (0)
     if (!attention_adaln_ready)
         OP(h3_gpu_adaln_bf16(dit->gpu, dit->mod_attention, dit->hidden,
@@ -2107,6 +2175,7 @@ static int run_block(h3_dit *dit, unsigned index, int step,
             modulation, row_map, rows, HIDDEN, SLOTS, 5), "DiT MLP gate");
     }
 #undef OP
+    if (profiling) op_profile_block_done(dit, rows);
     return 1;
 }
 

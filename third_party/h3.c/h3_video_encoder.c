@@ -19,7 +19,8 @@ enum {
     GROUPS = 32,
     SPATIAL_RATIO = 16,
     TILE_PIXELS = 256,
-    TILE_OVERLAP_MIN = 64
+    TILE_OVERLAP_MIN = 64,
+    SCRATCH_SLOTS = 24
 };
 
 static const uint32_t level_channels[LEVELS] = {128, 256, 256, 512, 512, 1024};
@@ -62,9 +63,19 @@ typedef struct {
     int has_downsample;
 } encoder_level;
 
+/* Activation buffers recycled across blocks and tiles. A fresh multi-GB
+ * Metal buffer is zero-filled by the kernel on first touch, which cost ~3 s
+ * per 256px tile at 209 frames; every kernel here writes its whole output. */
+typedef struct {
+    h3_gpu_tensor *tensor;
+    size_t elements;
+    int busy;
+} scratch_slot;
+
 typedef struct {
     h3_gpu *gpu;
     h3_weight_store *store;
+    scratch_slot scratch[SCRATCH_SLOTS];
     encoder_conv conv_in;
     encoder_level levels[LEVELS];
     encoder_norm norm_out;
@@ -111,8 +122,46 @@ static void free_norm(encoder_norm *norm) {
     free_tensor(&norm->bias);
 }
 
+static h3_gpu_tensor *scratch_get(encoder_context *encoder, size_t elements) {
+    scratch_slot *best = NULL, *empty = NULL;
+    for (int index = 0; index < SCRATCH_SLOTS; index++) {
+        scratch_slot *slot = &encoder->scratch[index];
+        if (!slot->tensor) {
+            if (!empty) empty = slot;
+        } else if (!slot->busy && slot->elements >= elements &&
+                   (!best || slot->elements < best->elements)) {
+            best = slot;
+        }
+    }
+    if (best) {
+        best->busy = 1;
+        return best->tensor;
+    }
+    h3_gpu_tensor *tensor = h3_gpu_tensor_new_f32(encoder->gpu, elements);
+    if (tensor && empty) {
+        empty->tensor = tensor;
+        empty->elements = elements;
+        empty->busy = 1;
+    }
+    return tensor;
+}
+
+static void scratch_put(encoder_context *encoder, h3_gpu_tensor **tensor) {
+    if (!*tensor) return;
+    for (int index = 0; index < SCRATCH_SLOTS; index++) {
+        if (encoder->scratch[index].tensor == *tensor) {
+            encoder->scratch[index].busy = 0;
+            *tensor = NULL;
+            return;
+        }
+    }
+    free_tensor(tensor);
+}
+
 static void cleanup(encoder_context *encoder) {
     if (!encoder) return;
+    for (int index = 0; index < SCRATCH_SLOTS; index++)
+        h3_gpu_tensor_free(encoder->scratch[index].tensor);
     free_conv(&encoder->conv_in);
     for (int level = 0; level < LEVELS; level++) {
         for (int block = 0; block < BLOCKS; block++) {
@@ -389,12 +438,12 @@ static h3_gpu_tensor *run_conv(encoder_context *encoder,
     h3_gpu_tensor *padded = NULL;
     if (conv->depth_front || conv->height_before || conv->height_after ||
         conv->width_before || conv->width_after)
-        padded = h3_gpu_tensor_new_f32(
-            encoder->gpu, tensor_elements(padded_d, padded_h, padded_w,
-                                           conv->input_channels));
-    h3_gpu_tensor *output = h3_gpu_tensor_new_f32(
-        encoder->gpu, tensor_elements(*output_depth, *output_height,
-                                      *output_width, conv->output_channels));
+        padded = scratch_get(
+            encoder, tensor_elements(padded_d, padded_h, padded_w,
+                                     conv->input_channels));
+    h3_gpu_tensor *output = scratch_get(
+        encoder, tensor_elements(*output_depth, *output_height,
+                                 *output_width, conv->output_channels));
     int ok = output && (!((conv->depth_front || conv->height_before ||
                            conv->height_after || conv->width_before ||
                            conv->width_after)) || padded);
@@ -408,9 +457,9 @@ static h3_gpu_tensor *run_conv(encoder_context *encoder,
              gpu_op(encoder, h3_gpu_submit(encoder->gpu), error, error_size,
                     "submit visual encoder convolution");
     }
-    h3_gpu_tensor_free(padded);
+    scratch_put(encoder, &padded);
     if (!ok) {
-        h3_gpu_tensor_free(output);
+        scratch_put(encoder, &output);
         return NULL;
     }
     return output;
@@ -429,14 +478,14 @@ static h3_gpu_tensor *run_block(encoder_context *encoder,
                                         input_channels);
     size_t pad2_count = tensor_elements(depth + 2, height + 2, width + 2,
                                         output_channels);
-    h3_gpu_tensor *norm1 = h3_gpu_tensor_new_f32(encoder->gpu, input_count);
-    h3_gpu_tensor *pad1 = h3_gpu_tensor_new_f32(encoder->gpu, pad1_count);
-    h3_gpu_tensor *hidden = h3_gpu_tensor_new_f32(encoder->gpu, output_count);
-    h3_gpu_tensor *norm2 = h3_gpu_tensor_new_f32(encoder->gpu, output_count);
-    h3_gpu_tensor *pad2 = h3_gpu_tensor_new_f32(encoder->gpu, pad2_count);
-    h3_gpu_tensor *output = h3_gpu_tensor_new_f32(encoder->gpu, output_count);
+    h3_gpu_tensor *norm1 = scratch_get(encoder, input_count);
+    h3_gpu_tensor *pad1 = scratch_get(encoder, pad1_count);
+    h3_gpu_tensor *hidden = scratch_get(encoder, output_count);
+    h3_gpu_tensor *norm2 = scratch_get(encoder, output_count);
+    h3_gpu_tensor *pad2 = scratch_get(encoder, pad2_count);
+    h3_gpu_tensor *output = scratch_get(encoder, output_count);
     h3_gpu_tensor *shortcut = block->has_shortcut ?
-        h3_gpu_tensor_new_f32(encoder->gpu, output_count) : NULL;
+        scratch_get(encoder, output_count) : NULL;
     int ok = norm1 && pad1 && hidden && norm2 && pad2 && output &&
              (!block->has_shortcut || shortcut);
     if (!ok) {
@@ -471,14 +520,14 @@ static h3_gpu_tensor *run_block(encoder_context *encoder,
                         "submit visual encoder residual block");
 
 done:
-    h3_gpu_tensor_free(norm1);
-    h3_gpu_tensor_free(pad1);
-    h3_gpu_tensor_free(hidden);
-    h3_gpu_tensor_free(norm2);
-    h3_gpu_tensor_free(pad2);
-    h3_gpu_tensor_free(shortcut);
+    scratch_put(encoder, &norm1);
+    scratch_put(encoder, &pad1);
+    scratch_put(encoder, &hidden);
+    scratch_put(encoder, &norm2);
+    scratch_put(encoder, &pad2);
+    scratch_put(encoder, &shortcut);
     if (!ok) {
-        h3_gpu_tensor_free(output);
+        scratch_put(encoder, &output);
         return NULL;
     }
     return output;
@@ -517,7 +566,7 @@ static float *encode_tile(encoder_context *encoder, const float *pixels,
     h3_gpu_tensor *next = run_conv(encoder, hidden, &encoder->conv_in,
                                    depth, h, w, &next_d, &next_h, &next_w,
                                    error, error_size);
-    free_tensor(&hidden);
+    scratch_put(encoder, &hidden);
     hidden = next;
     if (!hidden) return NULL;
     depth = next_d; h = next_h; w = next_w;
@@ -529,14 +578,14 @@ static float *encode_tile(encoder_context *encoder, const float *pixels,
             next = run_block(encoder, hidden,
                              &encoder->levels[level].blocks[block], depth, h, w,
                              input_channels, channels, error, error_size);
-            free_tensor(&hidden);
+            scratch_put(encoder, &hidden);
             hidden = next;
         }
         if (hidden && encoder->levels[level].has_downsample) {
             next = run_conv(encoder, hidden,
                             &encoder->levels[level].downsample, depth, h, w,
                             &next_d, &next_h, &next_w, error, error_size);
-            free_tensor(&hidden);
+            scratch_put(encoder, &hidden);
             hidden = next;
             depth = next_d; h = next_h; w = next_w;
         }
@@ -547,10 +596,10 @@ static float *encode_tile(encoder_context *encoder, const float *pixels,
     size_t hidden_count = tensor_elements(depth, h, w, 1024);
     size_t padded_count = tensor_elements(depth + 2, h + 2, w + 2, 1024);
     size_t moment_count = tensor_elements(depth, h, w, MOMENT_CHANNELS);
-    h3_gpu_tensor *norm = h3_gpu_tensor_new_f32(encoder->gpu, hidden_count);
-    h3_gpu_tensor *padded = h3_gpu_tensor_new_f32(encoder->gpu, padded_count);
-    h3_gpu_tensor *moments = h3_gpu_tensor_new_f32(encoder->gpu, moment_count);
-    h3_gpu_tensor *quant = h3_gpu_tensor_new_f32(encoder->gpu, moment_count);
+    h3_gpu_tensor *norm = scratch_get(encoder, hidden_count);
+    h3_gpu_tensor *padded = scratch_get(encoder, padded_count);
+    h3_gpu_tensor *moments = scratch_get(encoder, moment_count);
+    h3_gpu_tensor *quant = scratch_get(encoder, moment_count);
     int ok = norm && padded && moments && quant;
     if (!ok) {
         fail(error, error_size, "cannot allocate visual encoder output");
@@ -588,11 +637,11 @@ static float *encode_tile(encoder_context *encoder, const float *pixels,
                                      encoder->latent_std[channel];
                 }
     free(raw);
-    free_tensor(&hidden);
-    h3_gpu_tensor_free(norm);
-    h3_gpu_tensor_free(padded);
-    h3_gpu_tensor_free(moments);
-    h3_gpu_tensor_free(quant);
+    scratch_put(encoder, &hidden);
+    scratch_put(encoder, &norm);
+    scratch_put(encoder, &padded);
+    scratch_put(encoder, &moments);
+    scratch_put(encoder, &quant);
     if (!ok) {
         free(latent);
         return NULL;
