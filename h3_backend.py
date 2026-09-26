@@ -241,10 +241,13 @@ class PhaseTimer:
                 "seconds": round(end - item["start"], 2),
             }
             if item.get("total"):
-                entry["steps"] = item.get("steps")
+                # h3 moves on without printing the final N/N of a phase, so a
+                # phase followed by another one counts as fully completed.
+                done = item["total"] if index + 1 < len(self.phases) else item.get("steps")
+                entry["steps"] = done
                 entry["total"] = item["total"]
-                if item.get("steps"):
-                    entry["s_per_step"] = round(entry["seconds"] / item["steps"], 2)
+                if done:
+                    entry["s_per_step"] = round(entry["seconds"] / done, 2)
             phases.append(entry)
         return {
             "outcome": outcome,

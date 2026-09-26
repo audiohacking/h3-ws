@@ -52,6 +52,19 @@ def test_profile_lines_are_kept_not_treated_as_phases():
         "wall_s": 164.329, "peak_gib": 50.298}]
 
 
+def test_phase_followed_by_another_counts_as_complete():
+    timer = _run([
+        (100.0, {"stage": "denoise", "step": 1, "total": 3}),
+        (500.0, {"stage": "denoise", "step": 2, "total": 3}),
+        # h3 goes straight to the decoder without printing "denoise 3/3".
+        (1000.0, {"stage": "audio VAE", "step": 0, "total": 7}),
+    ])
+    phases = timer.summary(outcome="done", now=1001.0)["phases"]
+    assert phases[0]["steps"] == 3 and phases[0]["s_per_step"] == 300.0
+    # The last phase is only as complete as its last counter.
+    assert phases[1]["steps"] == 0 and "s_per_step" not in phases[1]
+
+
 def test_console_line_lists_every_phase():
     timer = _run([
         (100.0, {"stage": "text encoder", "step": 0, "total": 50}),
