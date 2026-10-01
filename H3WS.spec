@@ -29,7 +29,8 @@ if (h3_dir / "h3_shaders.metal").is_file():
     datas.append((str(h3_dir / "h3_shaders.metal"), "third_party/h3.c"))
 # Debug self-test: oracle tests + GPU micro-bench (built by scripts/build_h3.sh).
 for name in ("h3_tests", "h3_gqa_tests", "h3_conv3d_tests",
-             "h3_sdpa_split_tests", "h3_cache_invalidate_tests", "h3_bench"):
+             "h3_sdpa_split_tests", "h3_cache_invalidate_tests",
+             "h3_ref_cache_tests", "h3_bench"):
     if (h3_dir / name).is_file():
         datas.append((str(h3_dir / name), "third_party/h3.c"))
 

@@ -5,6 +5,7 @@
 #include "h3_ffmpeg.h"
 #include "h3_metal.h"
 #include "h3_multimodal.h"
+#include "h3_ref_cache.h"
 #include "h3_safetensors.h"
 #include "h3_text_encoder.h"
 #include "h3_tokenizer.h"
@@ -1360,6 +1361,14 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             goto cleanup;
         }
         size_t condition_offset = 0;
+        /* Reference latents depend only on the decoded pixels and the
+         * encoder, never on prompt or seed: reuse them across runs. The
+         * identity changes whenever the encoder's numerics could. */
+        const char *latent_cache = h3_ref_cache_dir();
+        char encoder_identity[1200];
+        snprintf(encoder_identity, sizeof(encoder_identity),
+                 "%s|conv3d-native=%d|video-vae-encoder-v2", vae_path,
+                 getenv("H3_CONV3D_NATIVE") != NULL);
         for (size_t image = 0; image < visual_count; image++) {
             int image_latent_w, image_latent_h;
             h3_latent_canvas(condition_widths[image], condition_heights[image],
@@ -1369,6 +1378,25 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             size_t row_elements = (size_t)image_latent_t *
                                   (size_t)image_latent_h *
                                   (size_t)image_latent_w / 4 * 96;
+            float *rows = condition_video_rows + condition_offset;
+            h3_ref_cache_key cache_key;
+            if (latent_cache) {
+                cache_key = h3_ref_cache_key_for(
+                    condition_pixels[image], condition_frames[image],
+                    condition_heights[image], condition_widths[image],
+                    encoder_identity);
+                if (h3_ref_cache_load(latent_cache, &cache_key,
+                                      image_latent_t, image_latent_h,
+                                      image_latent_w, rows, row_elements)) {
+                    fprintf(stderr, "h3: reference latent cache hit "
+                            "(visual %zu, %dx%dx%d)\n", image + 1,
+                            condition_frames[image], condition_heights[image],
+                            condition_widths[image]);
+                    condition_offset += row_elements;
+                    if (progress.cancelled) goto cleanup;
+                    continue;
+                }
+            }
             h3_video_latent latent;
             memset(&latent, 0, sizeof(latent));
             if (!h3_video_vae_encode(
@@ -1389,7 +1417,6 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
                     "visual condition VAE produced unexpected latent geometry");
                 goto cleanup;
             }
-            float *rows = condition_video_rows + condition_offset;
             if (!h3_dit_patchify_video(
                     latent.values, 24, image_latent_t,
                     image_latent_h, image_latent_w,
@@ -1399,6 +1426,11 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
                 goto cleanup;
             }
             h3_video_latent_free(&latent);
+            if (latent_cache && h3_ref_cache_store(
+                    latent_cache, &cache_key, image_latent_t, image_latent_h,
+                    image_latent_w, rows, row_elements))
+                fprintf(stderr, "h3: reference latent cache stored "
+                        "(visual %zu)\n", image + 1);
             condition_offset += row_elements;
             if (progress.cancelled) goto cleanup;
         }

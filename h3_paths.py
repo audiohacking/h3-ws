@@ -642,6 +642,11 @@ def ffmpeg_shim_bindir() -> Path:
     return bindir
 
 
+def default_ref_cache_dir() -> Path:
+    """Reference-latent cache for h3.c (``H3_REF_CACHE_DIR``); macOS may purge it."""
+    return Path.home() / "Library" / "Caches" / _APP_SUPPORT_NAME / "ref-latents"
+
+
 def h3_media_env(base: dict[str, str] | None = None) -> dict[str, str]:
     """h3.c mux/decode: a working system ffmpeg, otherwise the PyAV shim.
 
@@ -654,6 +659,9 @@ def h3_media_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
     env = dict(base if base is not None else os.environ)
     env["H3_PYTHON"] = sys.executable
+    # Reuse reference-video VAE latents across prompts and restarts (exact:
+    # keyed on the decoded pixels). An explicit H3_REF_CACHE_DIR wins.
+    env.setdefault("H3_REF_CACHE_DIR", str(default_ref_cache_dir()))
     ffmpeg = real_ffmpeg()
     ffprobe = real_ffprobe()
     shim = str(default_h3_av())

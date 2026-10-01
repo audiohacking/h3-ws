@@ -205,3 +205,11 @@ def test_runs_left_running_by_a_crash_are_marked_failed_on_load(tmp_path):
     saved = json.loads((out / "index.json").read_text())
     assert {r["id"]: r["status"] for r in saved["runs"]} == {
         "r1": "failed", "r2": "failed", "r3": "done"}
+
+
+def test_h3_env_enables_reference_cache_but_respects_override():
+    from h3_paths import default_ref_cache_dir, h3_media_env
+
+    assert h3_media_env({})["H3_REF_CACHE_DIR"] == str(default_ref_cache_dir())
+    assert h3_media_env({"H3_REF_CACHE_DIR": "/elsewhere"})[
+        "H3_REF_CACHE_DIR"] == "/elsewhere"

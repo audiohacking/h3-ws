@@ -34,6 +34,7 @@ QUICK_STEPS: list[tuple[str, list[str], float]] = [
     ("h3_conv3d_tests", [], 120.0),
     ("h3_sdpa_split_tests", [], 180.0),
     ("h3_cache_invalidate_tests", [], 60.0),
+    ("h3_ref_cache_tests", [], 60.0),
     ("h3_bench", ["1"], 300.0),
 ]
 
@@ -366,6 +367,13 @@ def system_facts(engine: Any = None) -> dict[str, Any]:
         from h3_backend import model_layout_ok
 
         model_dir = Path(engine.model_dir)
+        from h3_paths import default_ref_cache_dir
+
+        cache = default_ref_cache_dir()
+        entries = list(cache.glob("*.h3rc")) if cache.is_dir() else []
+        facts["ref_cache_entries"] = len(entries)
+        facts["ref_cache_mib"] = round(
+            sum(entry.stat().st_size for entry in entries) / 2**20, 1)
         facts["fl2va_installed"] = model_layout_ok(model_dir)[0]
         facts["ref2va_installed"] = model_layout_ok(
             model_dir, need_ref2va=True)[0]

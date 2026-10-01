@@ -51,6 +51,7 @@ const STEP_LABELS: Record<string, string> = {
   h3_conv3d_tests: "Video VAE Conv3d (vs double oracle)",
   h3_sdpa_split_tests: "DiT attention, odd lengths (vs double oracle)",
   h3_cache_invalidate_tests: "Warm-session cache",
+  h3_ref_cache_tests: "Reference latent disk cache",
   h3_bench: "GPU throughput bench",
   dit_op_profile: "Real-weights DiT op profile",
 };

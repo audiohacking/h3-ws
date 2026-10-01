@@ -9,7 +9,7 @@ FRAMEWORKS := -framework Foundation -framework Metal \
 LDLIBS := $(FRAMEWORKS) -licucore -lm
 
 LIB_C := h3.c h3_host.c h3_safetensors.c h3_weights.c h3_text_encoder.c \
-	h3_dit_schedule.c h3_dit.c h3_lora.c
+	h3_dit_schedule.c h3_dit.c h3_lora.c h3_ref_cache.c
 
 LIB_C += h3_video_vae.c h3_video_encoder.c h3_audio_vae.c h3_ffmpeg.c \
 	h3_terminal.c h3_vision_encoder.c h3_multimodal.c
@@ -60,9 +60,12 @@ h3_sdpa_split_tests: tests/test_sdpa_split.o $(LIB_OBJ)
 h3_bench: tests/bench_ops.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_ref_cache_tests: tests/test_ref_cache.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 # Binaries the desktop app bundles for its built-in self-test.
 SELFTEST_BINS = h3_tests h3_gqa_tests h3_conv3d_tests h3_sdpa_split_tests \
-	h3_cache_invalidate_tests h3_bench
+	h3_cache_invalidate_tests h3_ref_cache_tests h3_bench
 
 selftest: $(SELFTEST_BINS)
 
@@ -149,6 +152,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	./h3_cache_invalidate_tests
 	./h3_conv3d_tests
 	./h3_sdpa_split_tests
+	./h3_ref_cache_tests
 	@if test -f MiniMax-H3/FL2VA/audio_vae/model.safetensors && \
 	         test -f misc/fixtures/h3_real_audio_vae_37.safetensors; then \
 		./h3_real_audio_vae_test; \
@@ -232,7 +236,7 @@ linenoise.o: CFLAGS += -Wno-conversion -Wno-variadic-macro-arguments-omitted
 clean:
 	rm -f h3 h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests \
 		h3_text_tests h3_real_prompt_test h3_real_dit_block_test \
-		h3_audio_gpu_tests h3_gqa_tests h3_cache_invalidate_tests h3_conv3d_tests h3_sdpa_split_tests h3_bench \
+		h3_audio_gpu_tests h3_gqa_tests h3_cache_invalidate_tests h3_conv3d_tests h3_sdpa_split_tests h3_bench h3_ref_cache_tests \
 		h3_real_audio_vae_test \
 		h3_real_audio_encoder_test \
 		h3_av_mux_test \
