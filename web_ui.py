@@ -473,6 +473,16 @@ class AppState:
                 )
         except (json.JSONDecodeError, TypeError, KeyError):
             pass
+        # Nothing is queued when the server starts, so a run or clip still
+        # marked queued/running was interrupted (app closed or crashed).
+        interrupted = "interrupted: H3-WS closed during generation"
+        busy = {RunStatus.QUEUED.value, RunStatus.RUNNING.value}
+        stale = False
+        for record in [*self.runs.values(), *self.clips.values()]:
+            if record.status in busy:
+                record.status = RunStatus.FAILED.value
+                record.error = record.error or interrupted
+                stale = True
         # Assign legacy clips (no project_id) to the oldest project.
         self.ensure_projects()
         default_id = next(iter(self.projects))
@@ -481,7 +491,7 @@ class AppState:
             if not clip.project_id:
                 clip.project_id = default_id
                 migrated = True
-        if migrated:
+        if migrated or stale:
             self.save_index()
 
     def save_index(self) -> None:

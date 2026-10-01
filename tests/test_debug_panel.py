@@ -182,3 +182,26 @@ def test_logs_in_report_mask_prompt_file_names_and_home(client, tmp_path,
     assert "web_…_20260925_134234_0.mp4" in text
     assert "subject_definitions" not in text
     assert home not in text and "~/Documents/git/h3-ws/h3" in text
+
+
+def test_runs_left_running_by_a_crash_are_marked_failed_on_load(tmp_path):
+    out = tmp_path / "out"
+    out.mkdir()
+    clip = {"id": "c1", "prompt": "p", "label": "", "video_url": "",
+            "filename": "x.mp4", "chain_id": "k", "clip_index": 0,
+            "mode": "ref2va", "status": "running", "created_at": "t"}
+    done = dict(clip, id="c2", status="done")
+    runs = [{"id": "r1", "status": "running", "prompts": ["p"], "chain_id": "k"},
+            {"id": "r2", "status": "queued", "prompts": ["p"], "chain_id": "k"},
+            {"id": "r3", "status": "done", "prompts": ["p"], "chain_id": "k"}]
+    (out / "index.json").write_text(json.dumps({"clips": [clip, done], "runs": runs}))
+    engine = SimpleNamespace(h3_bin=tmp_path / "h3", model_dir=tmp_path / "m")
+    state = web_ui.AppState(out, tmp_path / "up", engine)
+    state.load_index()
+    assert state.runs["r1"].status == "failed" and "interrupted" in state.runs["r1"].error
+    assert state.runs["r2"].status == "failed"
+    assert state.runs["r3"].status == "done" and state.runs["r3"].error is None
+    assert state.clips["c1"].status == "failed" and state.clips["c2"].status == "done"
+    saved = json.loads((out / "index.json").read_text())
+    assert {r["id"]: r["status"] for r in saved["runs"]} == {
+        "r1": "failed", "r2": "failed", "r3": "done"}
