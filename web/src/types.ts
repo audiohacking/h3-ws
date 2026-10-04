@@ -143,6 +143,8 @@ export interface Clip {
   loras?: { id?: string; spec?: string; scale?: number }[];
   /** Full composer snapshot for re-running from the library. */
   generation?: Record<string, unknown> | null;
+  /** Owning generation run — used by library queue / tracking cards. */
+  run_id?: string | null;
 }
 
 export interface LibraryFrame {

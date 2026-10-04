@@ -18,6 +18,19 @@ This is a parallel of [ltx-ws](https://github.com/audiohacking/ltx-ws): **same U
 
 **Not in v1:** face swap, IC-LoRA, LipDub, ID-LoRA, LTX retake/extend pipelines, CFG/STG, distilled vs HQ profiles, H3-Regenerate-2K (unreleased), hosted H3-Context-IR. **DiT LoRA picker is in:** catalog + HF download + `--lora` fuse at load (Tutu 20→8 NFE first).
 
+### Continuity generation options (selection)
+
+Inspiration: [ComfyUI-Continuity](https://github.com/roadmaus/ComfyUI-Continuity) / Continuity-Mac sampler pills and post-passes. Only wire what h3.c can run natively — no dead UI toggles.
+
+| Continuity option | Verdict | Why |
+|-------------------|---------|-----|
+| **Faces** | **Next epic** (highest interest) | Continuity crop → low-denoise re-draw → composite (`faces.py` / `facepass.py`). Needs SAM3 + h3.c video-init / partial denoise / denoise-mask — not in the engine yet. |
+| **block_cache / Tea / Easy** | Skip | Comfy sampler step-skip plugins. Different from our warm VAE session + `H3_REF_CACHE_DIR` ref-latent disk cache. |
+| **Spectrum** | Skip | External forecast sampler ([ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)); fidelity tradeoffs; no h3.c path. |
+| **Motion fix** | Skip for now | Second pass (slow / re-draw / restore timing) needs latent motion profile + re-sample. |
+
+Do **not** ship Faces/Spectrum/Motion/Cache pills until the engine path exists. Faces is the planned follow-up.
+
 ---
 
 ## Engine facts (source of truth)

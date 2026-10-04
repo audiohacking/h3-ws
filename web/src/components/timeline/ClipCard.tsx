@@ -43,7 +43,11 @@ export function ClipCard({
   dragging,
   dragOverPosition,
 }: ClipCardProps) {
-  const isGenerating = clip.status === "pending" || clip.status === "generating";
+  const isGenerating =
+    clip.status === "pending"
+    || clip.status === "generating"
+    || clip.status === "queued"
+    || clip.status === "running";
   const isFailed = clip.status === "failed";
   const isDone = clip.status === "done" && clip.video_url;
 

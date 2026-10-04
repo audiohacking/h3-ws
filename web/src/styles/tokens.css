@@ -131,4 +131,49 @@
   --danger: var(--color-danger);
   --radius: var(--radius-xl);
   --shadow: var(--shadow-md);
+  color-scheme: light;
+}
+
+/* Dark palette — applied via documentElement.dataset.theme */
+[data-theme="dark"] {
+  --color-bg: #0f1012;
+  --color-surface: #18191c;
+  --color-text: #ececf0;
+  --color-muted: #9ca3af;
+  --color-border: #2a2b30;
+  --color-border-hover: #3f4046;
+
+  --color-accent: #3b82f6;
+  --color-accent-soft: #1e3a5f;
+  --color-accent-dark: #93c5fd;
+  --color-accent-border: #1e40af;
+
+  --color-success: #4ade80;
+  --color-danger: #f87171;
+  --color-danger-soft: #3f1d1d;
+  --color-danger-border: #7f1d1d;
+
+  --color-overlay-dark: rgba(0, 0, 0, 0.65);
+  --color-overlay-light: rgba(24, 25, 28, 0.92);
+  --color-backdrop: rgba(0, 0, 0, 0.8);
+
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 4px 24px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 10px 28px rgba(0, 0, 0, 0.55);
+
+  --chip-bg: var(--color-accent-soft);
+  --chip-color: var(--color-accent-dark);
+  --chip-border: var(--color-accent-border);
+
+  --turbo-color: #f59e0b;
+  --turbo-color-soft: #422006;
+  --turbo-color-dark: #fbbf24;
+
+  --pill-divider-color: var(--color-border);
+
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
 }

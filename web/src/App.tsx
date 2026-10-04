@@ -16,6 +16,16 @@ import { RefinePanel } from "./components/composer/RefinePanel";
 import { ProjectSwitcher, type Project } from "./components/ProjectSwitcher";
 import { compilePrompt } from "./compile";
 import { leadWithStyle } from "./styleAtlas";
+import {
+  applyTheme,
+  cycleTheme,
+  getStoredTheme,
+  resolveTheme,
+  setThemePreference,
+  subscribeSystemTheme,
+  themeLabel,
+  type ThemePreference,
+} from "./theme";
 import type { CastMediaType, CastMember, CastMedia, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, NetworkSettingsPublic, PillOption, ProgressState, QualityPreset, ReferenceItem, RefineSettingsPublic, RefKind, RoutingMode, SceneQueueItem, UpdateCheckPublic } from "./types";
 
 const H3_DEFAULT_STEPS = 20;
@@ -28,6 +38,31 @@ const BASE_QUALITY_IDS = new Set(["fast", "balanced", "close"]);
 function coerceBaseQuality(id: string | undefined | null): string {
   const raw = (id || "fast").trim().toLowerCase();
   return BASE_QUALITY_IDS.has(raw) ? raw : "balanced";
+}
+
+function ThemeIcon({ pref }: { pref: ThemePreference }) {
+  if (pref === "light") {
+    return (
+      <svg className="theme-toggle__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+      </svg>
+    );
+  }
+  if (pref === "dark") {
+    return (
+      <svg className="theme-toggle__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+        <path d="M21 14.5A8.5 8.5 0 0 1 9.5 3 7 7 0 1 0 21 14.5z" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="theme-toggle__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 3v18" />
+      <path d="M12 3a9 9 0 0 0 0 18" fill="currentColor" fillOpacity="0.22" stroke="none" />
+    </svg>
+  );
 }
 
 function fieldsFromPreset(preset: QualityPreset | undefined) {
@@ -290,6 +325,8 @@ export default function App() {
   const [loraBusy, setLoraBusy] = useState(false);
   const [loraActivity, setLoraActivity] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Player shows live preview / progress for the followed run (vs a finished clip). */
+  const [watchLive, setWatchLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const [chainId, setChainId] = useState<string | null>(null);
@@ -299,6 +336,10 @@ export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
+  activeRunIdRef.current = activeRunId;
+  const watchLiveRef = useRef(false);
+  watchLiveRef.current = watchLive;
   const [imagePath, setImagePath] = useState<string | null>(null);
   const [imageName, setImageName] = useState<string | null>(null);
   const [endImagePath, setEndImagePath] = useState<string | null>(null);
@@ -334,6 +375,7 @@ export default function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckPublic | null>(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [featuresOpen, setFeaturesOpen] = useState(false);
+  const [themePref, setThemePref] = useState<ThemePreference>(() => getStoredTheme());
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [refineOpen, setRefineOpen] = useState(false);
   const [refineBusy, setRefineBusy] = useState(false);
@@ -345,6 +387,15 @@ export default function App() {
   const clipsRef = useRef<Clip[]>([]);
   clipsRef.current = clips;
 
+  const inProgressClips = useMemo(
+    () =>
+      clips
+        .filter((c) => c.status === "queued" || c.status === "running")
+        .slice()
+        .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || "")),
+    [clips],
+  );
+  const pipelineActive = busy || inProgressClips.length > 0;
   const libraryClips = useMemo(
     () =>
       clips
@@ -406,6 +457,13 @@ export default function App() {
         })),
     [config?.quality_presets],
   );
+
+  useEffect(() => {
+    applyTheme(themePref);
+    return subscribeSystemTheme(() => {
+      if (getStoredTheme() === "auto") applyTheme("auto");
+    });
+  }, [themePref]);
 
   useEffect(() => {
     // Best-effort warm ask; Generate also requests (needs a user gesture in some WebKits).
@@ -478,6 +536,8 @@ export default function App() {
 
   const applyClipSelection = useCallback(
     (clip: Clip) => {
+      // Leave the run subscribed in the background; library "In progress" brings it back.
+      if (clip.status === "done") setWatchLive(false);
       if (!config) {
         selectClipId(clip.id);
         setChainId(clip.chain_id);
@@ -1259,14 +1319,25 @@ export default function App() {
     setRefs((prev) => prev.filter((r) => r.path !== frame.path));
   }
 
+  async function cancelRun(runId: string | null | undefined) {
+    if (!runId) return;
+    await fetch(`${API}/api/runs/${runId}/cancel`, { method: "POST" });
+  }
+
   async function cancelActiveRun() {
-    if (!activeRunId) return;
-    await fetch(`${API}/api/runs/${activeRunId}/cancel`, { method: "POST" });
+    await cancelRun(activeRunId);
+  }
+
+  async function refreshProjectClips() {
+    const next = await fetchClips();
+    setClips((prev) => mergeClips(prev, next));
+    return next;
   }
 
   function subscribeRun(runId: string, runChainId: string): Promise<void> {
     runEventSourceRef.current?.close();
     setActiveRunId(runId);
+    setBusy(true);
     const es = new EventSource(`${API}/api/runs/${runId}/events`);
     runEventSourceRef.current = es;
     return new Promise((resolve, reject) => {
@@ -1275,18 +1346,58 @@ export default function App() {
         if (closed) return;
         closed = true;
         es.close();
-        runEventSourceRef.current = null;
-        setActiveRunId(null);
-        setBusy(false);
-        setProgress(null);
-        setLivePreviewUrl(null);
-        setLivePreviewMime("image/webp");
-        if (err) {
-          reject(new Error(err));
-          return;
-        }
-        notifyGenerationReady();
-        resolve();
+        if (runEventSourceRef.current === es) runEventSourceRef.current = null;
+
+        void (async () => {
+          let nextJob: Clip | undefined;
+          try {
+            const refreshed = await fetchClips();
+            setClips((prev) => mergeClips(prev, refreshed));
+            nextJob = refreshed
+              .filter(
+                (c) =>
+                  (c.status === "queued" || c.status === "running")
+                  && c.run_id
+                  && c.run_id !== runId,
+              )
+              .sort((a, b) => (a.created_at || "").localeCompare(b.created_at || ""))[0];
+          } catch {
+            /* ignore refresh errors */
+          }
+
+          if (nextJob?.run_id) {
+            setProgress({ phase: "queued", message: "Starting next in queue…" });
+            setLivePreviewUrl(null);
+            setLivePreviewMime("image/webp");
+            if (watchLiveRef.current) {
+              selectClipId(nextJob.id);
+              setChainId(nextJob.chain_id);
+            }
+            // Resolve this run's waiter before attaching the next job so a
+            // Cancelled reject cannot clear the new subscription.
+            if (err && err !== "Cancelled") {
+              reject(new Error(err));
+            } else {
+              if (!err) notifyGenerationReady();
+              resolve();
+            }
+            void subscribeRun(nextJob.run_id, nextJob.chain_id);
+            return;
+          }
+
+          setActiveRunId(null);
+          setBusy(false);
+          setProgress(null);
+          setLivePreviewUrl(null);
+          setLivePreviewMime("image/webp");
+          setWatchLive(false);
+          if (err && err !== "Cancelled") {
+            reject(new Error(err));
+          } else {
+            if (!err) notifyGenerationReady();
+            resolve();
+          }
+        })();
       };
       es.onmessage = (ev) => {
         const msg = JSON.parse(ev.data) as Record<string, unknown>;
@@ -1315,6 +1426,13 @@ export default function App() {
           return;
         }
         if (msg.type === "clip_started") {
+          const clipId = String(msg.clip_id ?? "");
+          if (clipId) {
+            setClips((prev) =>
+              prev.map((c) => (c.id === clipId ? { ...c, status: "running" } : c)),
+            );
+            if (watchLiveRef.current) selectClipId(clipId);
+          }
           setLivePreviewUrl(null);
           setLivePreviewMime("image/webp");
           setProgress({
@@ -1328,8 +1446,11 @@ export default function App() {
           const clipId = String(msg.clip_id ?? "");
           fetchClips(runChainId).then((chainClips) => {
             setClips((prev) => replaceChainClips(prev, runChainId, chainClips));
-            selectClipId(pickPlaybackClip(chainClips, runChainId) ?? clipId ?? null);
+            if (watchLiveRef.current) {
+              selectClipId(pickPlaybackClip(chainClips, runChainId) ?? clipId ?? null);
+            }
           });
+          void fetchClips().then((all) => setClips((prev) => mergeClips(prev, all)));
         }
         if (msg.type === "run_cancelled") {
           setProgress({ phase: "cancelled", message: String(msg.message || "Cancelled") });
@@ -1352,13 +1473,52 @@ export default function App() {
     });
   }
 
-  async function postGenerate(body: Record<string, unknown>): Promise<void> {
+  function resumeLiveTracking(clip: Clip) {
+    selectClipId(clip.id);
+    setChainId(clip.chain_id);
     setError(null);
-    setBusy(true);
+    // Queued cards are selectors only — keep watching the active run's preview.
+    if (clip.status === "queued" && activeRunIdRef.current && clip.run_id !== activeRunIdRef.current) {
+      return;
+    }
+    setWatchLive(true);
+    if (clip.run_id && clip.run_id !== activeRunIdRef.current) {
+      void subscribeRun(clip.run_id, clip.chain_id);
+    }
+  }
+
+  async function editQueuedJob(clip: Clip) {
+    applyClipSelection(clip);
+    setWatchLive(false);
+    if (clip.status === "queued" && clip.run_id) {
+      await cancelRun(clip.run_id);
+      await refreshProjectClips();
+    }
+  }
+
+  async function killJob(clip: Clip) {
+    if (!clip.run_id) return;
+    await cancelRun(clip.run_id);
+    if (clip.run_id !== activeRunIdRef.current) {
+      await refreshProjectClips();
+    }
+  }
+
+  async function postGenerate(
+    body: Record<string, unknown>,
+    opts?: { follow?: boolean },
+  ): Promise<void> {
+    const follow = opts?.follow ?? !activeRunIdRef.current;
+    setError(null);
     setLoraModalOpen(false);
-    setLivePreviewUrl(null);
-    setLivePreviewMime("image/webp");
-    setProgress({ phase: "starting", message: "Submitting…" });
+    if (follow) {
+      setBusy(true);
+      setWatchLive(true);
+      setLivePreviewUrl(null);
+      setLivePreviewMime("image/webp");
+      setProgress({ phase: "starting", message: "Submitting…" });
+      selectClipId(null);
+    }
     const r = await fetch(`${API}/api/generate`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1370,17 +1530,17 @@ export default function App() {
       throw new Error(typeof detail === "string" ? detail : "Generate failed");
     }
     const data = await r.json();
-    setChainId(data.chain_id);
-    selectClipId(null);
-    setProgress(
-      data.started_immediately
-        ? { phase: "starting", message: "Starting…" }
-        : { phase: "queued", message: "Queued — waiting for current job…" },
-    );
-    const wait = subscribeRun(data.run_id, data.chain_id);
-    const chainClips = await fetchClips(data.chain_id);
-    setClips((prev) => mergeClips(prev, chainClips));
-    await wait;
+    const projectClips = await fetchClips();
+    setClips((prev) => mergeClips(prev, projectClips));
+    if (follow) {
+      setChainId(data.chain_id);
+      setProgress(
+        data.started_immediately
+          ? { phase: "starting", message: "Starting…" }
+          : { phase: "queued", message: "Queued — waiting for current job…" },
+      );
+      await subscribeRun(data.run_id, data.chain_id);
+    }
   }
 
   function generateBody(opts: {
@@ -1496,12 +1656,14 @@ export default function App() {
         upscale,
         generation: buildGenerationSnapshot({ ...scene, upscale }),
       }),
+      { follow: true },
     );
   }
 
   async function handleGenerate() {
-    if (!canSubmit || !prompt.trim() || busy) return;
+    if (!canSubmit || !prompt.trim()) return;
     await ensureNotifyPermission();
+    const follow = !activeRunIdRef.current;
     try {
       await postGenerate(
         generateBody({
@@ -1547,13 +1709,17 @@ export default function App() {
             upscale,
           }),
         }),
+        { follow },
       );
     } catch (e) {
       setError(String(e));
-      setBusy(false);
-      setProgress(null);
-      setLivePreviewUrl(null);
-      setLivePreviewMime("image/webp");
+      if (follow) {
+        setBusy(false);
+        setProgress(null);
+        setLivePreviewUrl(null);
+        setLivePreviewMime("image/webp");
+        setWatchLive(false);
+      }
     }
   }
 
@@ -1593,13 +1759,13 @@ export default function App() {
 
   const serverOk = config?.server_connected;
   const canSubmit = useMemo(() => {
-    if (!prompt.trim() || busy || !serverOk) return false;
+    if (!prompt.trim() || !serverOk) return false;
     if (isRef2va) return refsAreValid(compiled.refs).ok;
     if (needsFirst && !imagePath) return false;
     if (effectiveMode === "last_frame" && !imagePath && !endImagePath) return false;
     if (effectiveMode === "fl2va" && (!imagePath || !endImagePath)) return false;
     return true;
-  }, [prompt, busy, serverOk, isRef2va, compiled.refs, needsFirst, imagePath, endImagePath, effectiveMode]);
+  }, [prompt, serverOk, isRef2va, compiled.refs, needsFirst, imagePath, endImagePath, effectiveMode]);
 
   const endpointLabel = useMemo(() => {
     if (typeof window === "undefined") return config?.server_url ?? "";
@@ -1627,6 +1793,27 @@ export default function App() {
           <span className="brand-sub">MiniMax-H3</span>
         </div>
         <div className="header-status">
+          <button
+            type="button"
+            className="btn-secondary theme-toggle"
+            title={
+              themePref === "auto"
+                ? `Theme: Auto (using ${resolveTheme("auto")})`
+                : `Theme: ${themeLabel(themePref)}`
+            }
+            aria-label={
+              themePref === "auto"
+                ? `Theme Auto, currently ${resolveTheme("auto")}`
+                : `Theme ${themeLabel(themePref)}`
+            }
+            onClick={() => {
+              const next = cycleTheme(themePref);
+              setThemePreference(next);
+              setThemePref(next);
+            }}
+          >
+            <ThemeIcon pref={themePref} />
+          </button>
           {FEATURES.MODELS_PAGE && (
             <button type="button" className="btn-secondary" onClick={openModels}>
               Models
@@ -1658,7 +1845,7 @@ export default function App() {
         <div className="app-main">
           <section className="player-section">
             <div className="player-wrap">
-              {busy && livePreviewUrl ? (
+              {watchLive && busy && livePreviewUrl ? (
                 livePreviewMime.startsWith("video/") ? (
                   <video
                     key={livePreviewUrl}
@@ -1679,7 +1866,7 @@ export default function App() {
                     alt="Denoise preview"
                   />
                 )
-              ) : activeClip?.video_url ? (
+              ) : activeClip?.video_url && !watchLive ? (
                 <video
                   key={activeClip.id}
                   ref={playerVideoRef}
@@ -1693,10 +1880,12 @@ export default function App() {
                 />
               ) : (
                 <div className="player placeholder">
-                  {busy ? progress?.message ?? "Generating…" : "Your video will appear here"}
+                  {watchLive || busy
+                    ? progress?.message ?? "Generating…"
+                    : "Your video will appear here"}
                 </div>
               )}
-              {busy && (
+              {watchLive && busy && (
                 <div className="progress-overlay">
                   <div className="progress-bar">
                     {progress?.pct != null ? (
@@ -1715,7 +1904,7 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {activeClip?.video_url && !busy && (
+              {activeClip?.video_url && !watchLive && !busy && (
                 <button
                   type="button"
                   className="player-capture-btn"
@@ -1776,6 +1965,7 @@ export default function App() {
           {config && (
             <ComposerPanel
               busy={busy}
+              pipelineActive={pipelineActive}
               canSubmit={canSubmit}
               prompt={prompt}
               onPromptChange={setPrompt}
@@ -1926,6 +2116,85 @@ export default function App() {
             </div>
           )}
 
+          {inProgressClips.length > 0 && (
+            <div className="library-queue">
+              <div className="library-queue__header">
+                <span className="library-title">In progress</span>
+                <span className="library-count">{inProgressClips.length}</span>
+              </div>
+              <div className="library-grid">
+                {inProgressClips.map((clip) => {
+                  const isRunning = clip.status === "running";
+                  const isFollowed = Boolean(clip.run_id && clip.run_id === activeRunId);
+                  const showPreview = isFollowed && watchLive && isRunning && livePreviewUrl;
+                  const active =
+                    selectedClipId === clip.id
+                    || (watchLive && isFollowed);
+                  return (
+                    <div
+                      key={clip.id}
+                      className={`library-card-wrap library-card-wrap--job${active ? " active" : ""}`}
+                    >
+                      <button
+                        type="button"
+                        className="library-card"
+                        onClick={() => resumeLiveTracking(clip)}
+                        title={isRunning ? "Watch live preview" : "Queued — waiting"}
+                      >
+                        {showPreview ? (
+                          livePreviewMime.startsWith("video/") ? (
+                            <video
+                              className="library-thumb"
+                              src={livePreviewUrl}
+                              muted
+                              playsInline
+                              autoPlay
+                              loop
+                            />
+                          ) : (
+                            <img className="library-thumb" src={livePreviewUrl!} alt="" />
+                          )
+                        ) : (
+                          <div className={`library-thumb library-thumb--job${isRunning ? " is-running" : ""}`}>
+                            {isRunning ? (isFollowed && progress?.message ? progress.message : "Generating") : "Queued"}
+                          </div>
+                        )}
+                        <span className={`library-label ${isRunning ? "current" : "queue"}`}>
+                          {isRunning ? "NOW" : "QUEUE"}
+                        </span>
+                        <span className="library-prompt">{clipDisplayPrompt(clip.prompt)}</span>
+                      </button>
+                      <div className="library-job-actions">
+                        <button
+                          type="button"
+                          className="library-job-btn"
+                          title={clip.status === "queued" ? "Edit (pull into composer & remove from queue)" : "Edit (load into composer)"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void editQueuedJob(clip);
+                          }}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          type="button"
+                          className="library-job-btn library-job-btn--kill"
+                          title="Cancel"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void killJob(clip);
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <button
             type="button"
             className="library-header library-header--toggle"
@@ -1945,7 +2214,7 @@ export default function App() {
             {libraryClips.map((clip) => (
               <div
                 key={clip.id}
-                className={`library-card-wrap ${activeClip?.id === clip.id ? "active" : ""}`}
+                className={`library-card-wrap ${activeClip?.id === clip.id && !watchLive ? "active" : ""}`}
               >
                 <button
                   type="button"
@@ -1976,7 +2245,7 @@ export default function App() {
                   type="button"
                   className="library-delete"
                   title="Delete"
-                  disabled={busy}
+                  disabled={busy && watchLive}
                   onClick={(e) => {
                     e.stopPropagation();
                     void deleteClip(clip);

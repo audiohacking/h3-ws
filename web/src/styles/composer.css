@@ -283,27 +283,34 @@
 
 .composer-prompt {
   display: flex;
+  flex-direction: column;
   gap: 8px;
-  align-items: flex-end;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: 16px;
-  padding: 8px 8px 8px 14px;
+  padding: 10px 14px 10px;
   box-shadow: var(--shadow-sm);
   position: relative;
+}
+
+.composer-prompt .prompt-field-wrap {
+  width: 100%;
+  min-width: 0;
 }
 
 .composer-prompt__actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: flex-end;
+  gap: 8px;
   flex-shrink: 0;
+  width: 100%;
 }
 
 .btn-add-scene {
   width: 40px;
   height: 40px;
-  margin-bottom: 2px;
+  margin: 0;
   border: 1px solid var(--color-border);
   border-radius: 50%;
   background: var(--color-surface);

@@ -15,6 +15,8 @@ import { CastPicker } from "../media/CastPicker";
 
 export type ComposerPanelProps = {
   busy: boolean;
+  /** True when a job is running or queued — composer stays editable; submit queues. */
+  pipelineActive?: boolean;
   canSubmit: boolean;
   prompt: string;
   onPromptChange: (v: string) => void;
@@ -115,8 +117,10 @@ export type ComposerPanelProps = {
 
 export function ComposerPanel(props: ComposerPanelProps) {
   const {
-    busy, canSubmit, prompt, onPromptChange, onGenerate, compiled, refs, onRefsChange,
+    pipelineActive = false, canSubmit, prompt, onPromptChange, onGenerate, compiled, refs, onRefsChange,
   } = props;
+  // Composer stays editable while a generation runs so the next job can be queued.
+  const locked = false;
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<{ start: number; filter: string } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -165,12 +169,12 @@ export function ComposerPanel(props: ComposerPanelProps) {
           onEdit={props.onEditScene}
           onRunAll={props.onRunQueue}
           onClear={props.onClearQueue}
-          disabled={busy}
+          disabled={locked}
           running={props.queueRunning}
         />
       )}
       <ComposerRail
-        disabled={busy}
+        disabled={locked}
         loraCount={props.loraCount}
         refs={refs}
         onUpload={props.onUpload}
@@ -190,7 +194,7 @@ export function ComposerPanel(props: ComposerPanelProps) {
             onDelete={props.onDeleteCast}
             onAttachMedia={props.onAttachCastMedia}
             onRemoveMedia={props.onRemoveCastMedia}
-            disabled={busy}
+            disabled={locked}
           />
         }
         librarySlot={
@@ -199,7 +203,7 @@ export function ComposerPanel(props: ComposerPanelProps) {
               variant="rail"
               label="Library clip"
               items={clipItems}
-              disabled={busy}
+              disabled={locked}
               emptyHint="Generate a clip to reuse it as a silent-video reference."
               onPick={(id) => {
                 const clip = props.clips.find((c) => c.id === id);
@@ -210,7 +214,7 @@ export function ComposerPanel(props: ComposerPanelProps) {
               variant="rail"
               label="Frame as ref"
               items={frameItems}
-              disabled={busy || props.routing === "fl2va"}
+              disabled={locked || props.routing === "fl2va"}
               emptyHint="Capture a frame from the player first."
               onPick={(id) => {
                 const frame = props.frames.find((f) => f.id === id);
@@ -225,7 +229,7 @@ export function ComposerPanel(props: ComposerPanelProps) {
             onSave={props.onSavePreset}
             onLoad={props.onLoadPreset}
             onDelete={props.onDeletePreset}
-            disabled={busy}
+            disabled={locked}
             activeStyleId={props.activeStyleId}
             onApplyStyle={props.onApplyStyle}
           />
@@ -234,7 +238,7 @@ export function ComposerPanel(props: ComposerPanelProps) {
 
       <AssetCapsules
         refs={refs}
-        disabled={busy}
+        disabled={locked}
         onChange={onRefsChange}
         shotAspect={(() => {
           const res = props.config.resolution_presets.find((p) => p.id === props.resolutionId);
@@ -302,28 +306,35 @@ export function ComposerPanel(props: ComposerPanelProps) {
                 onGenerate();
               }
             }}
-            disabled={busy}
+            disabled={locked}
           />
           <WhatTheModelReads
             compiledPrompt={compiled.compiledPrompt}
             tokens={compiled.tokens}
             warnings={compiled.warnings}
-            disabled={busy}
+            disabled={locked}
           />
         </div>
         <div className="composer-prompt__actions">
-          <button type="button" className="btn-add-scene" onClick={props.onAddShot} disabled={busy} title="Add scene">
+          <button type="button" className="btn-add-scene" onClick={props.onAddShot} disabled={locked} title="Add scene">
             +
           </button>
-          <button type="button" className="btn-generate gen-submit" onClick={onGenerate} disabled={!canSubmit}>
-            ↑
+          <button
+            type="button"
+            className={`btn-generate gen-submit${pipelineActive ? "" : " gen-submit--icon"}`}
+            onClick={onGenerate}
+            disabled={!canSubmit}
+            title={pipelineActive ? "Queue generation" : "Generate"}
+            aria-label={pipelineActive ? "Queue" : "Generate"}
+          >
+            {pipelineActive ? "Queue" : "↑"}
           </button>
         </div>
       </div>
 
       <div className="config-card">
         <ConfigRow
-          disabled={busy}
+          disabled={locked}
           routing={props.routing}
           onRoutingChange={props.onRoutingChange}
           durationId={props.durationId}
@@ -343,7 +354,7 @@ export function ComposerPanel(props: ComposerPanelProps) {
           engineNote={props.config.engine_ok === false ? (props.config.engine_error ?? undefined) : undefined}
         />
         <SamplerRow
-          disabled={busy}
+          disabled={locked}
           seed={props.seed}
           onSeed={props.onSeed}
           numSteps={props.numSteps}

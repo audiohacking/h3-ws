@@ -152,6 +152,8 @@ class ClipRecord:
     # Wall time per h3.c phase (+ --profile Metal summaries), kept for done,
     # failed and cancelled clips so slow stages can be inspected later.
     timings: Optional[dict[str, Any]] = None
+    # Owning run — library queue cards use this to follow / cancel.
+    run_id: Optional[str] = None
 
 
 @dataclass
@@ -1484,11 +1486,12 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                 bytes=merged_path.stat().st_size if merged_path.is_file() else None,
                 project_id=source_project or state.active_project_id,
                 generation=dict(body["generation"]) if isinstance(body.get("generation"), dict) else None,
+                run_id=run_id,
                 **{
                     k: v
                     for k, v in _clip_settings_from_body(body).items()
                     if k in ClipRecord.__dataclass_fields__
-                    and k not in ("project_id", "generation")
+                    and k not in ("project_id", "generation", "run_id")
                 },
             )
             state.clips[mid] = mclip
@@ -2540,8 +2543,14 @@ def create_app(
     async def cancel_run(run_id: str):
         if run_id not in state.runs:
             raise HTTPException(404, "Run not found")
+        run = state.runs[run_id]
         if not state.request_cancel_run(run_id):
-            raise HTTPException(409, f"Cannot cancel run in state {state.runs[run_id].status}")
+            raise HTTPException(409, f"Cannot cancel run in state {run.status}")
+        # Not yet on the GPU — mark cancelled now so library queue cards drop.
+        # The worker still no-ops via is_run_cancelled when the id is dequeued.
+        if state._active_run_id != run_id:
+            await _abort_run_cancelled(state, run_id)
+            return {"ok": True, "status": "cancelled"}
         return {"ok": True, "status": "cancelling"}
 
     @app.post("/api/generate")
@@ -2665,11 +2674,12 @@ def create_app(
                 created_at=datetime.now().isoformat(),
                 project_id=project_id,
                 generation=dict(generation_snap) if generation_snap else None,
+                run_id=run_id,
                 **{
                     k: v
                     for k, v in settings.items()
                     if k in ClipRecord.__dataclass_fields__
-                    and k not in ("project_id", "generation")
+                    and k not in ("project_id", "generation", "run_id")
                 },
             )
             state.clips[clip_id] = clip
