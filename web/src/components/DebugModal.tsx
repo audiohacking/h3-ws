@@ -401,7 +401,7 @@ export function DebugModal({ open, api, onClose }: Props) {
   if (!open) return null;
 
   return (
-    <div className="modal-overlay" role="presentation" onClick={onClose}>
+    <div className="modal-backdrop" role="presentation" onClick={onClose}>
       <div
         className="modal console-modal"
         role="dialog"

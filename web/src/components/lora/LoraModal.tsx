@@ -8,6 +8,7 @@ interface LoraModalProps {
   presets: LoraPreset[];
   selectedIds: string[];
   onToggle: (id: string, selected: boolean) => void;
+  onScaleChange?: (id: string, scale: number) => void;
   onRemove: (preset: LoraPreset) => void;
   onAddCustom?: (spec: string, label: string, scale: number) => Promise<void>;
   addingCustom?: boolean;
@@ -21,6 +22,7 @@ export function LoraModal({
   presets,
   selectedIds,
   onToggle,
+  onScaleChange,
   onRemove,
   onAddCustom,
   addingCustom,
@@ -64,21 +66,28 @@ export function LoraModal({
       (p) =>
         p.label.toLowerCase().includes(q) ||
         p.spec.toLowerCase().includes(q) ||
-        p.guidance?.toLowerCase().includes(q),
+        p.guidance?.toLowerCase().includes(q) ||
+        p.category?.toLowerCase().includes(q) ||
+        p.card_url?.toLowerCase().includes(q),
     );
   }, [presets, search]);
 
-  // Group: selected → on disk → custom URL → built-in download recipes
+  // Have-first: selected → available (on disk / cached) → custom → download missing
   const groupedPresets = useMemo(() => {
     const selected = filteredPresets.filter((p) => selectedIds.includes(p.id));
-    const local = filteredPresets.filter(
-      (p) => p.local && !p.custom && !selectedIds.includes(p.id),
+    const available = filteredPresets.filter(
+      (p) =>
+        !selectedIds.includes(p.id) &&
+        !p.custom &&
+        (p.local || p.cached),
     );
     const custom = filteredPresets.filter((p) => p.custom && !selectedIds.includes(p.id));
-    const builtin = filteredPresets.filter(
-      (p) => !p.custom && !p.local && !selectedIds.includes(p.id),
+    const missing = filteredPresets.filter(
+      (p) => !p.custom && !p.local && !p.cached && !selectedIds.includes(p.id),
     );
-    return { selected, local, custom, builtin };
+    const turbo = missing.filter((p) => p.turbo);
+    const creative = missing.filter((p) => !p.turbo);
+    return { selected, available, custom, turbo, creative };
   }, [filteredPresets, selectedIds]);
 
   if (!open) return null;
@@ -122,6 +131,9 @@ export function LoraModal({
                     preset={preset}
                     selected
                     onToggle={(sel) => onToggle(preset.id, sel)}
+                    onScaleChange={
+                      onScaleChange ? (scale) => onScaleChange(preset.id, scale) : undefined
+                    }
                     onRemove={preset.custom ? () => onRemove(preset) : undefined}
                     disabled={disabled}
                   />
@@ -130,11 +142,13 @@ export function LoraModal({
             </section>
           )}
 
-          {groupedPresets.local.length > 0 && (
+          {groupedPresets.available.length > 0 && (
             <section className="lora-modal__section">
-              <h3 className="lora-modal__section-title">On disk ({groupedPresets.local.length})</h3>
+              <h3 className="lora-modal__section-title">
+                On disk ({groupedPresets.available.length})
+              </h3>
               <div className="lora-modal__grid">
-                {groupedPresets.local.map((preset) => (
+                {groupedPresets.available.map((preset) => (
                   <LoraCard
                     key={preset.id}
                     preset={preset}
@@ -165,11 +179,39 @@ export function LoraModal({
             </section>
           )}
 
-          {groupedPresets.builtin.length > 0 && (
+          {groupedPresets.turbo.length > 0 && (
             <section className="lora-modal__section">
-              <h3 className="lora-modal__section-title">Download recipes</h3>
+              <h3 className="lora-modal__section-title">
+                Download · Turbo ({groupedPresets.turbo.length})
+              </h3>
+              <p className="lora-modal__section-note">
+                Distill adapters not yet on disk. Open the HF card for schedule notes.
+              </p>
               <div className="lora-modal__grid">
-                {groupedPresets.builtin.map((preset) => (
+                {groupedPresets.turbo.map((preset) => (
+                  <LoraCard
+                    key={preset.id}
+                    preset={preset}
+                    selected={false}
+                    onToggle={(sel) => onToggle(preset.id, sel)}
+                    disabled={disabled}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {groupedPresets.creative.length > 0 && (
+            <section className="lora-modal__section">
+              <h3 className="lora-modal__section-title">
+                Download · Creative ({groupedPresets.creative.length})
+              </h3>
+              <p className="lora-modal__section-note">
+                Style, motion, and immersion LoRAs to fetch. Most need a trigger word —
+                use HF card on each row for prompting instructions.
+              </p>
+              <div className="lora-modal__grid">
+                {groupedPresets.creative.map((preset) => (
                   <LoraCard
                     key={preset.id}
                     preset={preset}

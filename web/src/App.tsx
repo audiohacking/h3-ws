@@ -22,6 +22,14 @@ const H3_DEFAULT_STEPS = 20;
 const H3_DEFAULT_LAYERS = 50;
 const H3_DEFAULT_REUSE = 1;
 
+/** Composer base strip — distill / aggressive stay API-only. */
+const BASE_QUALITY_IDS = new Set(["fast", "balanced", "close"]);
+
+function coerceBaseQuality(id: string | undefined | null): string {
+  const raw = (id || "fast").trim().toLowerCase();
+  return BASE_QUALITY_IDS.has(raw) ? raw : "balanced";
+}
+
 function fieldsFromPreset(preset: QualityPreset | undefined) {
   const steps = preset?.steps ?? H3_DEFAULT_STEPS;
   return {
@@ -384,18 +392,18 @@ export default function App() {
     loraPresetIds.length > 0;
   const qualityOptions: PillOption[] = useMemo(
     () =>
-      (config?.quality_presets ?? []).map((p) => ({
-        id: p.id,
-        label: p.label,
-        shortLabel: ({
-          four_step: "4-step",
-          aggressive: "aggr",
-          fast: "fast",
-          balanced: "bal",
-          close: "close",
-        } as Record<string, string>)[p.id],
-        description: p.guidance ?? undefined,
-      })),
+      (config?.quality_presets ?? [])
+        .filter((p) => p.ui !== false && BASE_QUALITY_IDS.has(p.id))
+        .map((p) => ({
+          id: p.id,
+          label: p.label,
+          shortLabel: ({
+            fast: "fast",
+            balanced: "bal",
+            close: "close",
+          } as Record<string, string>)[p.id],
+          description: p.guidance ?? undefined,
+        })),
     [config?.quality_presets],
   );
 
@@ -405,8 +413,9 @@ export default function App() {
     fetchConfig()
       .then((cfg) => {
         setConfig(cfg);
-        setQuality(cfg.defaults.quality ?? "fast");
-        const preset = cfg.quality_presets.find((p) => p.id === (cfg.defaults.quality ?? "fast"));
+        const qid = coerceBaseQuality(cfg.defaults.quality ?? "fast");
+        setQuality(qid);
+        const preset = cfg.quality_presets.find((p) => p.id === qid);
         const fields = fieldsFromPreset(preset);
         setNumSteps(fields.steps);
         setLayers(fields.layers);
@@ -508,7 +517,7 @@ export default function App() {
       setLayers(snap.layers);
       setReuse(snap.reuse);
       setSeed(snap.seed);
-      setQuality(snap.quality);
+      setQuality(coerceBaseQuality(snap.quality));
       setLoraPresetIds(snap.loraPresetIds ?? []);
       setTurboEnabled(Boolean(snap.turboEnabled));
       if (snap.turboTier) setTurboTier(snap.turboTier as TurboTier);
@@ -730,12 +739,15 @@ export default function App() {
       setTurboEnabled(false);
       setLoraActivity(null);
 
-      const preset = config?.quality_presets.find((p) => p.id === quality);
+      const qid = coerceBaseQuality(quality);
+      if (qid !== quality) setQuality(qid);
+      const preset = config?.quality_presets.find((p) => p.id === qid);
       if (preset) {
         const fields = fieldsFromPreset(preset);
         setNumSteps(fields.steps);
         setLayers(fields.layers);
         setReuse(fields.reuse);
+        setTokenReduction(fields.tokenReduction);
       }
     }
   }
@@ -797,7 +809,7 @@ export default function App() {
     setMode(scene.mode);
     setRouting(scene.routing ?? (scene.mode === "ref2va" ? "ref2va" : scene.mode === "t2va" ? "auto" : "fl2va"));
     setSelectedCastIds(scene.selectedCastIds ?? []);
-    setQuality(scene.quality);
+    setQuality(coerceBaseQuality(scene.quality));
     setResolutionId(scene.resolutionId);
     setDurationId(scene.durationId);
     setNumSteps(scene.numSteps);
@@ -875,7 +887,7 @@ export default function App() {
   function loadPreset(preset: GenerationPreset) {
     setMode(preset.mode);
     setRouting(preset.mode === "ref2va" ? "ref2va" : preset.mode === "t2va" ? "auto" : "fl2va");
-    setQuality(preset.quality);
+    setQuality(coerceBaseQuality(preset.quality));
     setResolutionId(preset.resolutionId);
     setDurationId(preset.durationId);
     setNumSteps(preset.numSteps);
@@ -1054,6 +1066,15 @@ export default function App() {
         setLoraActivity(String(e));
       }
     }
+  }
+
+  function setLoraScale(id: string, scale: number) {
+    if (busy) return;
+    const next = Math.min(2, Math.max(0, Number(scale)));
+    if (!Number.isFinite(next)) return;
+    setLoraPresets((prev) =>
+      prev.map((p) => (p.id === id ? { ...p, scale: next } : p)),
+    );
   }
 
   async function addCustomLora(spec: string, label: string, scale: number) {
@@ -1851,9 +1872,10 @@ export default function App() {
               quality={quality}
               qualityOptions={qualityOptions}
               onQuality={(id) => {
-                const preset = config.quality_presets.find((p) => p.id === id);
+                const qid = coerceBaseQuality(id);
+                const preset = config.quality_presets.find((p) => p.id === qid);
                 const fields = fieldsFromPreset(preset);
-                setQuality(id);
+                setQuality(qid);
                 setNumSteps(fields.steps);
                 setLayers(fields.layers);
                 setReuse(fields.reuse);
@@ -1866,6 +1888,7 @@ export default function App() {
               turboOptions={loraPresets}
               turboLoraId={turboLoraId}
               onTurboLoraId={(id) => void handleTurboLoraSelect(id)}
+              onTurboScale={setLoraScale}
               loraBusy={loraBusy}
               onTurbo={(enabled) => void handleTurboToggle(enabled)}
               onTurboTier={handleTurboTierChange}
@@ -2079,6 +2102,7 @@ export default function App() {
           presets={loraPresets}
           selectedIds={loraPresetIds}
           onToggle={(id, checked) => void toggleLoraPreset(id, checked)}
+          onScaleChange={setLoraScale}
           onRemove={(preset) => void removeLoraPreset(preset)}
           onAddCustom={addCustomLora}
           addingCustom={addingCustomLora}

@@ -56,6 +56,13 @@ QUALITY_PRESETS: dict[str, dict[str, Any]] = {
         "core_reuse": None,
         "token_reduction": False,
         "render": None,
+        # Distill / Turbo only — bare base H3 cannot do useful work at 4 steps.
+        "ui": False,
+        "guidance": (
+            "API/compat only — not shown in the composer. Bare MiniMax-H3 needs "
+            "~20 steps (Close = 50). Use Turbo with DMAD (4) or TaoMate (3) "
+            "instead of this preset on the base model."
+        ),
     },
     "aggressive": {
         "id": "aggressive",
@@ -66,6 +73,8 @@ QUALITY_PRESETS: dict[str, dict[str, Any]] = {
         "core_reuse": None,
         "token_reduction": False,
         "render": (320, 320),  # only applied when output is 512×512
+        "ui": False,
+        "guidance": "API/compat only — not shown in the composer base strip.",
     },
     "fast": {
         "id": "fast",
@@ -76,6 +85,11 @@ QUALITY_PRESETS: dict[str, dict[str, Any]] = {
         "core_reuse": None,
         "token_reduction": True,
         "render": (384, 384),  # only applied when output is 512×512
+        "ui": True,
+        "guidance": (
+            "Base-model fast path: 20 steps, 45 layers, reuse 2, token reduction. "
+            "Not for distill LoRAs — turn Turbo on for 3/4/8-step recipes."
+        ),
     },
     "balanced": {
         "id": "balanced",
@@ -86,6 +100,10 @@ QUALITY_PRESETS: dict[str, dict[str, Any]] = {
         "core_reuse": None,
         "token_reduction": False,
         "render": None,
+        "ui": True,
+        "guidance": (
+            "Stock h3 defaults for the bare base model: 20 steps, 50 layers, reuse 1."
+        ),
     },
     "close": {
         "id": "close",
@@ -96,10 +114,11 @@ QUALITY_PRESETS: dict[str, dict[str, Any]] = {
         "core_reuse": None,
         "token_reduction": False,
         "render": None,
+        "ui": True,
         "guidance": (
-            "50 complete 50-block denoiser forwards — much more expensive than "
-            "the default 20×50, but the right oracle when a fast mode changes "
-            "subject, anatomy, motion, or composition."
+            "Best base-model quality: 50 complete 50-block denoiser forwards. "
+            "Much more expensive than 20×50 — use when fast/balanced drift subject, "
+            "anatomy, motion, or composition."
         ),
     },
 }
@@ -113,6 +132,7 @@ QUALITY_PRESET_LIST = [
         "reuse": p["reuse"],
         "token_reduction": p["token_reduction"],
         "guidance": p.get("guidance"),
+        "ui": bool(p.get("ui", True)),
     }
     for p in QUALITY_PRESETS.values()
 ]

@@ -1828,6 +1828,10 @@ def create_app(
         tao_spec = str(tao["spec"]) if tao else ""
         tao_path = lora_cached_path(tao_spec) if tao_spec else None
         tao_ok = tao_path is not None and tao_path.is_file()
+        dmad = next((p for p in BUILTIN_LORAS if p.get("id") == "dmad_h3_4step"), None)
+        dmad_spec = str(dmad["spec"]) if dmad else ""
+        dmad_path = lora_cached_path(dmad_spec) if dmad_spec else None
+        dmad_ok = dmad_path is not None and dmad_path.is_file()
         return [
             {
                 "id": "fl2va",
@@ -1868,6 +1872,18 @@ def create_app(
                 "note": (
                     "Preferred turbo/distill LoRA (~2.4 GB). Enables the 3-step turbo "
                     "path in the composer."
+                ),
+                "essential": False,
+            },
+            {
+                "id": "dmad",
+                "label": "DMAD H3 4-step turbo",
+                "present": dmad_ok,
+                "path": str(dmad_path) if dmad_path else dmad_spec,
+                "size_gib": round(_file_gib(dmad_path), 2) if dmad_path else 1.4,
+                "note": (
+                    "ZhengmingYu/DMAD 4-step FL2VA/T2VA student (~1.4 GB). Converted "
+                    "to native qkv_proj for h3.c; pair with the Four-step quality preset."
                 ),
                 "essential": False,
             },
@@ -2012,11 +2028,12 @@ def create_app(
         "ref2va": 61.7 * 1024**3,   # ~62 GB (transformer only)
         "taeh3": 22 * 1024**2,      # ~22 MB
         "taomate": 2.4 * 1024**3,   # ~2.4 GB
+        "dmad": 1.4 * 1024**3,      # ~1.4 GB
     }
 
     _COMPONENT_DIR = {"fl2va": "FL2VA", "ref2va": "Ref2VA"}
-    _LIGHT_COMPONENTS = frozenset({"taeh3", "taomate"})
-    _ALL_DOWNLOAD_COMPONENTS = frozenset({"fl2va", "ref2va", "taeh3", "taomate"})
+    _LIGHT_COMPONENTS = frozenset({"taeh3", "taomate", "dmad"})
+    _ALL_DOWNLOAD_COMPONENTS = frozenset({"fl2va", "ref2va", "taeh3", "taomate", "dmad"})
 
     def _component_progress(model_dir: Path, component: str) -> tuple[int, int]:
         """Sum bytes of .incomplete partials + already-relocated final files.
@@ -2042,6 +2059,16 @@ def create_app(
             if not tao:
                 return 0, 0
             hit = lora_cached_path(str(tao["spec"]))
+            if hit is not None and hit.is_file():
+                return hit.stat().st_size, 0
+            return 0, 0
+        if component == "dmad":
+            from h3_lora import BUILTIN_LORAS, lora_cached_path
+
+            dmad = next((p for p in BUILTIN_LORAS if p.get("id") == "dmad_h3_4step"), None)
+            if not dmad:
+                return 0, 0
+            hit = lora_cached_path(str(dmad["spec"]))
             if hit is not None and hit.is_file():
                 return hit.stat().st_size, 0
             return 0, 0
@@ -2084,6 +2111,17 @@ def create_app(
                 if not tao:
                     raise RuntimeError("TaoMate builtin recipe missing")
                 await asyncio.to_thread(ensure_lora, str(tao["spec"]))
+                _download_state["error"] = None
+            elif component == "dmad":
+                from h3_lora import BUILTIN_LORAS, ensure_lora
+
+                dmad = next(
+                    (p for p in BUILTIN_LORAS if p.get("id") == "dmad_h3_4step"),
+                    None,
+                )
+                if not dmad:
+                    raise RuntimeError("DMAD builtin recipe missing")
+                await asyncio.to_thread(ensure_lora, str(dmad["spec"]))
                 _download_state["error"] = None
             else:
                 cmd = _download_model_cmd("--local-dir", str(state.engine.model_dir))
@@ -2159,7 +2197,7 @@ def create_app(
         component = component.strip().lower()
         if component not in _ALL_DOWNLOAD_COMPONENTS:
             raise HTTPException(
-                400, "component must be one of: fl2va, ref2va, taeh3, taomate"
+                400, "component must be one of: fl2va, ref2va, taeh3, taomate, dmad"
             )
 
         st = _download_state
@@ -2246,7 +2284,7 @@ def create_app(
         component = str(body.get("component") or "").strip().lower()
         if component not in _ALL_DOWNLOAD_COMPONENTS:
             raise HTTPException(
-                400, "component must be one of: fl2va, ref2va, taeh3, taomate"
+                400, "component must be one of: fl2va, ref2va, taeh3, taomate, dmad"
             )
 
         async def _run() -> dict[str, Any]:

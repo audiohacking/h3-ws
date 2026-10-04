@@ -13,6 +13,10 @@ export interface LoraPreset {
   reuse?: number;
   guidance?: string | null;
   path?: string;
+  /** Hugging Face model card — prompting / strength notes for this adapter. */
+  card_url?: string | null;
+  /** turbo | style | motion | immersion | utility */
+  category?: string | null;
 }
 
 export interface QualityPreset {
@@ -23,6 +27,8 @@ export interface QualityPreset {
   reuse?: number;
   token_reduction?: boolean;
   guidance?: string | null;
+  /** When false, omit from the composer quality strip (API/compat only). */
+  ui?: boolean;
 }
 
 export interface PresetOption {

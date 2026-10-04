@@ -226,8 +226,14 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
           ? "~62 GB"
           : component.id === "taomate"
             ? "~2.4 GB"
-            : "~22 MB";
-    const needsConfirm = component.id === "fl2va" || component.id === "ref2va" || component.id === "taomate";
+            : component.id === "dmad"
+              ? "~1.4 GB"
+              : "~22 MB";
+    const needsConfirm =
+      component.id === "fl2va" ||
+      component.id === "ref2va" ||
+      component.id === "taomate" ||
+      component.id === "dmad";
     if (
       !component.present &&
       needsConfirm &&

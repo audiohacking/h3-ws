@@ -55,8 +55,12 @@ export const TURBO_CONFIG = {
   /** Display label for the turbo LoRA */
   LABEL: "Tutu 8-NFE Turbo",
 
-  /** Preferred on-disk filename needles (first match wins). Continuity default: TaoMate. */
-  PREFERRED: ["taomate", "tutu", "minimax_h3", "minimax-h3", "h3_turbo", "h3-turbo", "fasth3"] as const,
+  /**
+   * Preferred on-disk filename needles (first match wins).
+   * Continuity default remains TaoMate (3-step, Ref2VA-friendly).
+   * DMAD is next for FL2VA/T2VA 4-step (Diffusers→native on download).
+   */
+  PREFERRED: ["taomate", "dmad", "tutu", "minimax_h3", "minimax-h3", "h3_turbo", "h3-turbo", "fasth3"] as const,
 
   /** Recommended layers for turbo mode */
   LAYERS: 50,
@@ -79,7 +83,8 @@ export const TURBO_CONFIG = {
 
   /** Guidance text */
   GUIDANCE:
-    "Uses a turbo/distill LoRA from your models/loras folder (TaoMate, Tutu, LightX2V, …). " +
+    "Uses a turbo/distill LoRA from your models/loras folder (TaoMate, DMAD, Tutu, LightX2V, …). " +
+    "DMAD is the 4-step FL2VA/T2VA paper student; TaoMate is the fastest 3-step default. " +
     "Pick another in the chevron menu before you generate — settings lock while a run is in progress.",
 } as const;
 

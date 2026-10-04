@@ -22,6 +22,7 @@ type Props = {
   turboOptions: LoraPreset[];
   turboLoraId: string | null;
   onTurboLoraId: (id: string) => void;
+  onTurboScale?: (id: string, scale: number) => void;
   loraBusy?: boolean;
   onTurbo: (enabled: boolean) => void;
   onTurboTier: (tier: TurboTier) => void;
@@ -92,6 +93,7 @@ export function SamplerRow({
   turboOptions,
   turboLoraId,
   onTurboLoraId,
+  onTurboScale,
   loraBusy,
   onTurbo,
   onTurboTier,
@@ -168,28 +170,31 @@ export function SamplerRow({
             options={turboOptions}
             selectedId={turboLoraId}
             onSelectId={onTurboLoraId}
+            onScaleChange={onTurboScale}
             disabled={disabled || loraBusy}
             loading={turboLoading}
           />
         </div>
       </div>
       <div className="config-card__row">
-        <div className="seg" role="radiogroup" aria-label="Quality">
-          {qualityOptions.map((opt) => (
-            <button
-              key={opt.id}
-              type="button"
-              role="radio"
-              aria-checked={quality === opt.id}
-              className={`seg__btn${quality === opt.id ? " is-on" : ""}`}
-              disabled={disabled || opt.disabled}
-              title={opt.description}
-              onClick={() => onQuality(opt.id)}
-            >
-              {opt.shortLabel ?? opt.label}
-            </button>
-          ))}
-        </div>
+        {!turboEnabled && (
+          <div className="seg" role="radiogroup" aria-label="Quality">
+            {qualityOptions.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                role="radio"
+                aria-checked={quality === opt.id}
+                className={`seg__btn${quality === opt.id ? " is-on" : ""}`}
+                disabled={disabled || opt.disabled}
+                title={opt.description}
+                onClick={() => onQuality(opt.id)}
+              >
+                {opt.shortLabel ?? opt.label}
+              </button>
+            ))}
+          </div>
+        )}
         {showClips && (
           <ParamStepper
             value={clipMultiplier}

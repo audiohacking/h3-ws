@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from h3_backend import GenerateRequest, LoraRef, build_h3_argv
 from h3_lora import (
     BUILTIN_LORAS,
+    DMAD_REPO,
     TUTU_REPO,
     ensure_lora,
     find_cached_lora,
@@ -49,6 +50,54 @@ class LoraCatalogTests(unittest.TestCase):
                     self.assertIn("taomate_h3_3step", ids)
                     self.assertIn("tutu_20to8_nfe_step100", ids)
                     self.assertLess(ids.index("taomate_h3_3step"), ids.index("tutu_20to8_nfe_step100"))
+
+    def test_builtin_includes_dmad_4step(self) -> None:
+        dmad = next(p for p in BUILTIN_LORAS if p["id"] == "dmad_h3_4step")
+        self.assertTrue(dmad.get("turbo"))
+        self.assertEqual(dmad["steps"], 4)
+        self.assertEqual(dmad["scale"], 1.0)
+        self.assertIn(DMAD_REPO, dmad["spec"])
+        self.assertIn("dmad_minimax_h3_4step_lora_critic.safetensors", dmad["spec"])
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"H3_LORA_DIR": tmp}, clear=False):
+                with mock.patch("h3_lora._lora_search_roots", return_value=[Path(tmp)]):
+                    catalog = lora_catalog(None)
+                    ids = [p["id"] for p in catalog]
+                    self.assertIn("dmad_h3_4step", ids)
+                    self.assertLess(ids.index("taomate_h3_3step"), ids.index("dmad_h3_4step"))
+
+    def test_creative_library_has_hf_cards(self) -> None:
+        creative = [p for p in BUILTIN_LORAS if not p.get("turbo")]
+        self.assertGreaterEqual(len(creative), 10)
+        for preset in creative:
+            self.assertTrue(preset.get("card_url"), preset["id"])
+            self.assertTrue(
+                str(preset["card_url"]).startswith("https://huggingface.co/"),
+                preset["id"],
+            )
+            self.assertIn(preset.get("category"), {"style", "motion", "immersion", "utility"})
+            self.assertNotIn("steps", preset)  # don't steal quality steps on select
+        must = {
+            "equi360_reviewed_v2",
+            "vr180_sbs_v2",
+            "realism_people",
+            "vh5tape_vhs",
+            "studio_1939",
+            "camera_motion_v1",
+            "wushu_action_v8",
+            "character_swap",
+        }
+        ids = {p["id"] for p in BUILTIN_LORAS}
+        self.assertTrue(must.issubset(ids), must - ids)
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(os.environ, {"H3_LORA_DIR": tmp}, clear=False):
+                with mock.patch("h3_lora._lora_search_roots", return_value=[Path(tmp)]):
+                    catalog = lora_catalog(None)
+                    cat_ids = {p["id"] for p in catalog}
+                    self.assertTrue(must.issubset(cat_ids), must - cat_ids)
+                    realism = next(p for p in catalog if p["id"] == "realism_people")
+                    self.assertIn("r34l1sm", realism["guidance"])
+                    self.assertIn("fal/MiniMax-H3-Realism-People-LoRA", realism["card_url"])
 
     def test_normalize_blob_to_resolve(self) -> None:
         spec = normalize_lora_spec(

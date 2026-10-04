@@ -28,6 +28,8 @@ interface TurboToggleProps {
   options: LoraPreset[];
   selectedId: string | null;
   onSelectId: (id: string) => void;
+  /** Change strength for the active turbo LoRA (defaults come from the recipe). */
+  onScaleChange?: (id: string, scale: number) => void;
   disabled?: boolean;
   loading?: boolean;
 }
@@ -46,6 +48,7 @@ export function TurboToggle({
   options,
   selectedId,
   onSelectId,
+  onScaleChange,
   disabled,
   loading,
 }: TurboToggleProps) {
@@ -164,6 +167,30 @@ export function TurboToggle({
             );
           })}
         </div>
+      )}
+
+      {enabled && !loading && selected && onScaleChange && (
+        <label
+          className="turbo-scale"
+          title="LoRA strength / intensity. Recipe default is a starting point — edit freely."
+        >
+          <span className="turbo-scale__label">strength</span>
+          <input
+            type="number"
+            className="turbo-scale__input"
+            min={0}
+            max={2}
+            step={0.05}
+            value={Number.isFinite(selected.scale) ? selected.scale : TURBO_CONFIG.SCALE}
+            disabled={locked}
+            onChange={(e) => {
+              if (locked) return;
+              const next = Number(e.target.value);
+              if (!Number.isFinite(next)) return;
+              onScaleChange(selected.id, Math.min(2, Math.max(0, next)));
+            }}
+          />
+        </label>
       )}
 
       {enabled && !loading && !fixedSteps && (

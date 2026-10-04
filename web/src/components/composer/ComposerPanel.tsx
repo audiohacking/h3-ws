@@ -90,6 +90,7 @@ export type ComposerPanelProps = {
   turboOptions: LoraPreset[];
   turboLoraId: string | null;
   onTurboLoraId: (id: string) => void;
+  onTurboScale?: (id: string, scale: number) => void;
   loraBusy?: boolean;
   onTurbo: (enabled: boolean) => void;
   onTurboTier: (tier: TurboTier) => void;
@@ -361,6 +362,7 @@ export function ComposerPanel(props: ComposerPanelProps) {
           turboOptions={props.turboOptions}
           turboLoraId={props.turboLoraId}
           onTurboLoraId={props.onTurboLoraId}
+          onTurboScale={props.onTurboScale}
           loraBusy={props.loraBusy}
           onTurbo={props.onTurbo}
           onTurboTier={props.onTurboTier}

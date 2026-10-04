@@ -50,16 +50,29 @@ export function LoraCard({
               {preset.guidance}
             </span>
           )}
-          {preset.steps && (
-            <span className="lora-card__meta">
-              {preset.steps} steps
-              {preset.layers ? `, ${preset.layers} layers` : ""}
-            </span>
-          )}
+          <span className="lora-card__meta">
+            {preset.steps ? `${preset.steps} steps · ` : ""}
+            ×{preset.scale}
+            {preset.layers ? ` · ${preset.layers} layers` : ""}
+            {preset.category && !preset.turbo ? ` · ${preset.category}` : ""}
+            {preset.turbo ? " · turbo" : ""}
+          </span>
         </div>
       </button>
 
       <div className="lora-card__actions">
+        {preset.card_url && (
+          <a
+            className="lora-card__card-link"
+            href={preset.card_url}
+            target="_blank"
+            rel="noreferrer"
+            title="Open Hugging Face model card (prompting & settings)"
+            onClick={(e) => e.stopPropagation()}
+          >
+            HF card
+          </a>
+        )}
         {selected && onScaleChange && (
           <label className="lora-card__scale">
             <span className="lora-card__scale-label">Scale</span>
