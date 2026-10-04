@@ -206,7 +206,8 @@ export function PictureEditor({
   );
 
   useEffect(() => {
-    const src = mediaSrc(path, previewUrl);
+    // Video framing needs the file; previewUrl may be a library poster JPEG.
+    const src = isVideo ? mediaSrc(path) : mediaSrc(path, previewUrl);
     if (isVideo) {
       const video = document.createElement("video");
       video.preload = "auto";

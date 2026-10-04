@@ -144,7 +144,8 @@ export function TrimEditor({
   }, []);
 
   useEffect(() => {
-    const src = mediaSrc(path, previewUrl);
+    // Always load the real media file — previewUrl may be a library poster JPEG.
+    const src = mediaSrc(path);
     const media = document.createElement(isVideo ? "video" : "audio") as HTMLVideoElement | HTMLAudioElement;
     media.preload = isVideo ? "auto" : "metadata";
     if (isVideo) (media as HTMLVideoElement).playsInline = true;

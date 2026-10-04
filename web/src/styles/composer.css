@@ -139,7 +139,28 @@
   opacity: 0.45;
 }
 
+.asset-capsule__thumb-btn {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: 7px;
+  line-height: 0;
+}
+
+.asset-capsule__thumb-btn:hover:not(:disabled) .asset-capsule__thumb {
+  box-shadow: 0 0 0 2px var(--color-accent);
+}
+
+.asset-capsule__thumb-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
 .asset-capsule__thumb {
+  display: block;
   width: 30px;
   height: 30px;
   border-radius: 7px;
@@ -168,7 +189,37 @@
   flex-shrink: 0;
 }
 
-/* Dim footnote — only facts that are set ("cropped · ↻ 90°", "0:02–0:07"). */
+/* Continuity segment door — always present ("whole", "0:02–0:07", "cropped"). */
+.asset-capsule__door {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--color-muted);
+  font: inherit;
+  font-size: 0.6875rem;
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--color-muted) 45%, transparent);
+  text-underline-offset: 2px;
+}
+
+.asset-capsule__door:hover:not(:disabled) {
+  color: var(--color-text);
+  text-decoration-color: var(--color-text);
+}
+
+.asset-capsule__door--on {
+  color: var(--color-accent);
+  text-decoration-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+}
+
+.asset-capsule__door:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* Dim footnote for secondary facts (e.g. crop on a trimmed video). */
 .asset-capsule__said {
   color: var(--color-muted);
   font-size: 0.6875rem;
