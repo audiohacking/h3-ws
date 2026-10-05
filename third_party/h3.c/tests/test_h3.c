@@ -327,6 +327,16 @@ static void test_rng_and_solver(void) {
     CHECK(h3_euler_velocity_step(euler, velocity, 2, 0.75f, 0.25f));
     CHECK(euler[0] == 2.0f && euler[1] == 1.0f);
     CHECK(!h3_euler_velocity_step(euler, velocity, 2, 0.25f, 0.25f));
+
+    CHECK(h3_denoise_start_step(20, 1.0f) == 0);
+    CHECK(h3_denoise_start_step(20, 0.0f) == 20);
+    CHECK(h3_denoise_start_step(20, 0.45f) == 11);
+    float clean[] = {1.0f, 1.0f};
+    float noise[] = {0.0f, 0.0f};
+    float mixed[2];
+    h3_mix_latent_noise(mixed, clean, noise, 2, 0.25f);
+    CHECK(close_enough(mixed[0], 0.75, 1e-6));
+    CHECK(close_enough(mixed[1], 0.75, 1e-6));
 }
 
 static void test_rgb_resize(void) {

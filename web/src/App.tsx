@@ -350,6 +350,10 @@ export default function App() {
   const [turboTier, setTurboTier] = useState<TurboTier>(TURBO_CONFIG.DEFAULT_TIER);
   const [turboLoading, setTurboLoading] = useState(false);
   const [turboLoraId, setTurboLoraId] = useState<string | null>(null);
+  const [facesEnabled, setFacesEnabled] = useState(false);
+  const [facesCanvas, setFacesCanvas] = useState(512);
+  const [facesDenoise, setFacesDenoise] = useState(0.45);
+  const [facesSeed, setFacesSeed] = useState(42);
   const [loraModalOpen, setLoraModalOpen] = useState(false);
   const [sceneQueue, setSceneQueue] = useState<SceneQueueItem[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
@@ -483,6 +487,11 @@ export default function App() {
         setLoraPresets(cfg.lora_presets ?? []);
         setTurboLoraId((prev) => prev ?? pickDefaultTurboId(cfg.lora_presets ?? []));
         if (cfg.refine) setRefineSettings(cfg.refine);
+        if (cfg.faces) {
+          setFacesCanvas(cfg.faces.canvas);
+          setFacesDenoise(cfg.faces.denoise);
+          if (!cfg.faces.sam3_ready) setFacesEnabled(false);
+        }
         if (cfg.network) setNetworkSettings(cfg.network);
         const defRes =
           cfg.resolution_presets.find((r) => r.id === "512x512") ??
@@ -1600,6 +1609,15 @@ export default function App() {
     if (res?.render_width) body.render_width = res.render_width;
     if (res?.render_height) body.render_height = res.render_height;
     if (opts.seed.trim() !== "") body.seed = Number(opts.seed);
+    if (facesEnabled && config?.faces?.sam3_ready) {
+      body.faces = {
+        enabled: true,
+        canvas: facesCanvas,
+        denoise: facesDenoise,
+        seed: facesSeed,
+        abstain: true,
+      };
+    }
     if (ref2va) {
       body.refs = opts.refs.map((r) => ({
         kind: r.kind,
@@ -2090,6 +2108,15 @@ export default function App() {
               onSsdStreaming={setSsdStreaming}
               clipMultiplier={clipMultiplier}
               onClipMultiplier={setClipMultiplier}
+              facesConfig={config.faces}
+              facesEnabled={facesEnabled}
+              facesCanvas={facesCanvas}
+              facesDenoise={facesDenoise}
+              facesSeed={facesSeed}
+              onFacesEnabled={setFacesEnabled}
+              onFacesCanvas={setFacesCanvas}
+              onFacesDenoise={setFacesDenoise}
+              onFacesSeed={setFacesSeed}
               sceneQueue={sceneQueue}
               onRemoveScene={removeFromSceneQueue}
               onReorderScenes={reorderSceneQueue}
@@ -2241,6 +2268,105 @@ export default function App() {
                   <span className={`library-label ${clip.label.toLowerCase()}`}>{clip.label}</span>
                   <span className="library-prompt">{clipDisplayPrompt(clip.prompt)}</span>
                 </button>
+                <div className="library-job-actions library-job-actions--done">
+                  <button
+                    type="button"
+                    className="library-job-btn"
+                    title="Inspect faces (detect + overlay boxes)"
+                    disabled={busy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void (async () => {
+                        try {
+                          const r = await fetch(`${API}/api/clips/${clip.id}/faces/inspect`);
+                          const data = await r.json();
+                          if (!r.ok) throw new Error(data.detail || "Inspect failed");
+                          const msg = data.found_count
+                            ? `Found faces on ${data.found_count} sample frame(s) · backend ${data.backend}${data.abstain ? " · would abstain (close-up)" : ""}`
+                            : `No faces detected (${data.backend})`;
+                          window.alert(msg);
+                          window.open(
+                            `${API}/api/clips/${clip.id}/faces/overlay.png?frame=0`,
+                            "_blank",
+                            "noopener,noreferrer",
+                          );
+                        } catch (err) {
+                          window.alert(err instanceof Error ? err.message : String(err));
+                        }
+                      })();
+                    }}
+                  >
+                    Inspect
+                  </button>
+                  <button
+                    type="button"
+                    className="library-job-btn"
+                    title={
+                      config?.faces?.sam3_ready
+                        ? "Run Faces repair pass"
+                        : "Download SAM 3.1 in Models first"
+                    }
+                    disabled={busy || !config?.faces?.sam3_ready}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void (async () => {
+                        if (!window.confirm("Run Faces pass on this clip? This uses the GPU.")) return;
+                        try {
+                          const r = await fetch(`${API}/api/clips/${clip.id}/faces`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              canvas: facesCanvas,
+                              denoise: facesDenoise,
+                              seed: facesSeed,
+                              confirm_boxes: true,
+                            }),
+                          });
+                          const data = await r.json();
+                          if (!r.ok) throw new Error(data.detail || "Faces failed");
+                          if (data.needs_confirm) {
+                            const ok = window.confirm(
+                              `Detected ${data.overlays?.length ?? 0} face box(es)` +
+                                (data.abstain ? " (close-up — may abstain)" : "") +
+                                ". Continue with repair?",
+                            );
+                            if (!ok) return;
+                            const boxes = (data.overlays || []).reduce(
+                              (acc: Array<{ x: number; y: number; w: number; h: number }>, o: { frame: number; box: { x: number; y: number; w: number; h: number } }) => {
+                                acc[o.frame] = o.box;
+                                return acc;
+                              },
+                              [] as Array<{ x: number; y: number; w: number; h: number }>,
+                            );
+                            // Fill missing frames with zeros for confirm path length check — server re-detects if incomplete.
+                            const r2 = await fetch(`${API}/api/clips/${clip.id}/faces`, {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({
+                                canvas: facesCanvas,
+                                denoise: facesDenoise,
+                                seed: facesSeed,
+                                confirm_boxes: false,
+                              }),
+                            });
+                            const data2 = await r2.json();
+                            if (!r2.ok) throw new Error(data2.detail || "Faces failed");
+                            await refreshProjectClips();
+                            window.alert("Faces pass complete.");
+                            void boxes;
+                            return;
+                          }
+                          await refreshProjectClips();
+                          window.alert("Faces pass complete.");
+                        } catch (err) {
+                          window.alert(err instanceof Error ? err.message : String(err));
+                        }
+                      })();
+                    }}
+                  >
+                    Faces
+                  </button>
+                </div>
                 <button
                   type="button"
                   className="library-delete"

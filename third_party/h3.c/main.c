@@ -50,6 +50,8 @@ static void usage(const char *program) {
         "      --use-slower-dynamic-fc1-k  Use runtime-bound FC1 K loop\n"
         "      --use-slower-grouped-quantizer  Force 256-thread FC2 quantizer\n"
         "      --seed N           Random seed (default: 42)\n"
+        "      --init-video PATH  RGB clip to VAE-encode as starting video latent\n"
+        "      --denoise-strength F  0..1 partial denoise (needs --init-video; default 1)\n"
         "      --first-frame PATH First-frame conditioning image\n"
         "      --last-frame PATH  Last-frame conditioning image\n"
         "      --ref-image PATH    Append an ordered Ref2VA image\n"
@@ -254,7 +256,7 @@ int main(int argc, char **argv) {
            OPT_USE_SLOWER_UNCACHED_INT8_SCALES,
            OPT_USE_SLOWER_DYNAMIC_FC1_K,
            OPT_USE_SLOWER_GROUPED_QUANTIZER,
-           OPT_SEED,
+           OPT_SEED, OPT_INIT_VIDEO, OPT_DENOISE_STRENGTH,
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_PREVIEW_LATENT, OPT_SHOW, OPT_ZOOM,
@@ -302,6 +304,8 @@ int main(int argc, char **argv) {
         {"use-slower-grouped-quantizer", no_argument, NULL,
          OPT_USE_SLOWER_GROUPED_QUANTIZER},
         {"seed", required_argument, NULL, OPT_SEED},
+        {"init-video", required_argument, NULL, OPT_INIT_VIDEO},
+        {"denoise-strength", required_argument, NULL, OPT_DENOISE_STRENGTH},
         {"first-frame", required_argument, NULL, OPT_FIRST},
         {"last-frame", required_argument, NULL, OPT_LAST},
         {"ref-image", required_argument, NULL, OPT_REF_IMAGE},
@@ -473,6 +477,22 @@ int main(int argc, char **argv) {
                 params.seed = parse_u64(optarg, "seed");
                 seed_given = 1;
                 break;
+            case OPT_INIT_VIDEO:
+                params.init_video = optarg;
+                break;
+            case OPT_DENOISE_STRENGTH: {
+                char *end = NULL;
+                errno = 0;
+                double value = strtod(optarg, &end);
+                if (errno || !end || *end || !isfinite(value) ||
+                    value < 0.0 || value > 1.0) {
+                    fprintf(stderr, "h3: invalid denoise-strength: %s\n",
+                            optarg);
+                    return 2;
+                }
+                params.denoise_strength = (float)value;
+                break;
+            }
             case OPT_FIRST: params.first_frame = optarg; break;
             case OPT_LAST: params.last_frame = optarg; break;
             case OPT_REF_IMAGE: {

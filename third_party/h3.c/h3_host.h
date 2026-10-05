@@ -139,4 +139,12 @@ int h3_res_step(float *output, const float *sample, const float *denoised,
 int h3_euler_velocity_step(float *sample, const float *velocity, size_t count,
                            float sigma, float sigma_next);
 
+/* Map denoise strength (0..1) onto a schedule start index. strength=1 → 0
+ * (full noise); strength=0 → steps (skip denoise). */
+int h3_denoise_start_step(int steps, float strength);
+
+/* Flow-matching mix: x = (1-sigma)*clean + sigma*noise. */
+void h3_mix_latent_noise(float *destination, const float *clean,
+                         const float *noise, size_t count, float sigma);
+
 #endif

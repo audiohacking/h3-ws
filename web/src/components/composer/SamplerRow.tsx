@@ -1,5 +1,6 @@
 import { TurboToggle } from "./TurboToggle";
-import type { LoraPreset, PillOption } from "../../types";
+import { FacesPill } from "./FacesPill";
+import type { FacesConfigPublic, LoraPreset, PillOption } from "../../types";
 import type { TurboTier } from "../../config";
 
 type Props = {
@@ -39,6 +40,15 @@ type Props = {
   /** Lanczos post-upscale — disabled until latent upscale lands. Kept optional for API stability. */
   upscale?: boolean;
   onUpscale?: (v: boolean) => void;
+  facesConfig?: FacesConfigPublic | null;
+  facesEnabled?: boolean;
+  facesCanvas?: number;
+  facesDenoise?: number;
+  facesSeed?: number;
+  onFacesEnabled?: (v: boolean) => void;
+  onFacesCanvas?: (v: number) => void;
+  onFacesDenoise?: (v: number) => void;
+  onFacesSeed?: (v: number) => void;
 };
 
 function ParamStepper({
@@ -107,6 +117,15 @@ export function SamplerRow({
   clipMultiplierMax,
   showClips,
   onClipMultiplier,
+  facesConfig,
+  facesEnabled = false,
+  facesCanvas = 512,
+  facesDenoise = 0.45,
+  facesSeed = 42,
+  onFacesEnabled,
+  onFacesCanvas,
+  onFacesDenoise,
+  onFacesSeed,
 }: Props) {
   const tokenOn = tokenReduction && !tokenReductionLocked;
   const ssdOn = ssdStreaming && !ssdLocked;
@@ -174,6 +193,20 @@ export function SamplerRow({
             disabled={disabled || loraBusy}
             loading={turboLoading}
           />
+          {onFacesEnabled && (
+            <FacesPill
+              disabled={disabled}
+              config={facesConfig}
+              enabled={facesEnabled}
+              canvas={facesCanvas}
+              denoise={facesDenoise}
+              seed={facesSeed}
+              onEnabled={onFacesEnabled}
+              onCanvas={onFacesCanvas ?? (() => {})}
+              onDenoise={onFacesDenoise ?? (() => {})}
+              onSeed={onFacesSeed ?? (() => {})}
+            />
+          )}
         </div>
       </div>
       <div className="config-card__row">

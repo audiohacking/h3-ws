@@ -131,13 +131,21 @@ typedef struct {
     /* When set, dump video latents after each Euler step into this directory
      * without loading the preview VAE. Format: step_NNNN.bin + latest.json. */
     const char *preview_latent_dir;
+    /* Optional RGB clip VAE-encoded as the starting video latent (img2vid /
+     * Faces pass). Requires denoise_strength < 1. Audio is encoded from the
+     * same file when present and held (not denoised); remux original audio
+     * outside h3 for a bit-identical soundtrack. */
+    const char *init_video;
+    /* 0..1 — fraction of the schedule to denoise. 1 = full noise (default);
+     * 0.45 is Continuity's Faces default. Ignored without init_video. */
+    float denoise_strength;
 } h3_params;
 
 #define H3_PARAMS_DEFAULT { \
     H3_DEFAULT_WIDTH, H3_DEFAULT_HEIGHT, H3_DEFAULT_FRAMES, H3_DEFAULT_STEPS, \
     UINT64_C(42), NULL, NULL, NULL, NULL, 0, H3_REFERENCE_IMAGE_MATCH, \
     1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
-    NULL, NULL, NULL, NULL \
+    NULL, NULL, NULL, NULL, NULL, 1.0f \
 }
 
 typedef struct {

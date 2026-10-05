@@ -645,3 +645,29 @@ int h3_euler_velocity_step(float *sample, const float *velocity, size_t count,
         sample[index] += delta * velocity[index];
     return 1;
 }
+
+int h3_denoise_start_step(int steps, float strength) {
+    if (steps < 1) return 0;
+    if (!(strength > 0.0f)) return steps;
+    if (strength >= 1.0f) return 0;
+    int start = (int)llround((1.0 - (double)strength) * (double)steps);
+    if (start < 0) start = 0;
+    if (start > steps) start = steps;
+    return start;
+}
+
+void h3_mix_latent_noise(float *destination, const float *clean,
+                         const float *noise, size_t count, float sigma) {
+    if (!destination || !clean || !noise || count == 0) return;
+    if (!(sigma > 0.0f)) {
+        memcpy(destination, clean, count * sizeof(*destination));
+        return;
+    }
+    if (sigma >= 1.0f) {
+        memcpy(destination, noise, count * sizeof(*destination));
+        return;
+    }
+    float keep = 1.0f - sigma;
+    for (size_t index = 0; index < count; index++)
+        destination[index] = keep * clean[index] + sigma * noise[index];
+}

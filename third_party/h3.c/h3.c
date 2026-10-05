@@ -649,6 +649,26 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
         h3_set_error(ctx, "reference audio requires an image or video reference");
         return 0;
     }
+    if (params->denoise_strength < 0.0f || params->denoise_strength > 1.0f) {
+        h3_set_error(ctx, "denoise strength must be between 0 and 1");
+        return 0;
+    }
+    if (params->init_video && params->init_video[0]) {
+        if (params->denoise_strength >= 1.0f) {
+            h3_set_error(ctx,
+                "init-video requires denoise-strength < 1 (1 is full noise)");
+            return 0;
+        }
+        if (params->reference_count || params->first_frame ||
+            params->last_frame) {
+            h3_set_error(ctx,
+                "init-video cannot be combined with references or frame anchors");
+            return 0;
+        }
+    } else if (params->denoise_strength < 1.0f) {
+        h3_set_error(ctx, "denoise-strength < 1 requires --init-video");
+        return 0;
+    }
     return 1;
 }
 
@@ -893,6 +913,36 @@ static int h3_deliver_denoise_preview(int completed_steps, int total_steps,
         return 1;
     }
     return 0;
+}
+
+/* Resample channel-major [C,T,H,W] latents along T (linear). Used when the
+ * causal VAE encoder's ceil(T/4) length differs from the DiT sample grid. */
+static int h3_resample_latent_time(const float *input, int in_t,
+                                   float *output, int out_t,
+                                   int channels, int height, int width) {
+    if (!input || !output || in_t < 1 || out_t < 1 || channels < 1 ||
+        height < 1 || width < 1) return 0;
+    size_t plane = (size_t)height * (size_t)width;
+    if (in_t == out_t) {
+        memcpy(output, input,
+               (size_t)channels * (size_t)in_t * plane * sizeof(*output));
+        return 1;
+    }
+    for (int c = 0; c < channels; c++) {
+        for (int t = 0; t < out_t; t++) {
+            double pos = out_t == 1 ? 0.0 :
+                (double)t * (double)(in_t - 1) / (double)(out_t - 1);
+            int low = (int)pos;
+            int high = low + 1 < in_t ? low + 1 : low;
+            float w = (float)(pos - (double)low);
+            const float *a = input + ((size_t)c * (size_t)in_t + (size_t)low) * plane;
+            const float *b = input + ((size_t)c * (size_t)in_t + (size_t)high) * plane;
+            float *dst = output + ((size_t)c * (size_t)out_t + (size_t)t) * plane;
+            for (size_t i = 0; i < plane; i++)
+                dst[i] = (1.0f - w) * a[i] + w * b[i];
+        }
+    }
+    return 1;
 }
 
 /* Qwen consumes reference video as time-major two-frame blocks, while the
@@ -1698,6 +1748,126 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     h3_rng_seed(&audio_rng, params->seed);
     h3_rng_fill_normal(&video_rng, video, video_count);
     h3_rng_fill_normal(&audio_rng, audio, audio_count);
+    int denoise_start = 0;
+    int hold_audio = 0;
+    if (params->init_video && params->init_video[0] &&
+        params->denoise_strength < 1.0f) {
+        float *init_pixels = NULL;
+        int init_frames = 0;
+        h3_progress_emit(&progress, "init video encode", 0, 1);
+        if (!h3_ffmpeg_read_video_f32(
+                params->init_video, render_width, render_height,
+                temporal.frame_count, &init_pixels, &init_frames,
+                detail, sizeof(detail))) {
+            free(init_pixels);
+            h3_set_error(ctx, "%s", detail);
+            goto cleanup;
+        }
+        if (init_frames != temporal.frame_count) {
+            free(init_pixels);
+            h3_set_error(ctx,
+                "init-video decoded to %d frames; generation wants %d",
+                init_frames, temporal.frame_count);
+            goto cleanup;
+        }
+        h3_video_latent init_latent;
+        memset(&init_latent, 0, sizeof(init_latent));
+        if (!h3_video_vae_encode(
+                vae_path, "h3_shaders.metal", init_pixels, init_frames,
+                render_height, render_width,
+                h3_video_encoder_progress_bridge, &progress,
+                &init_latent, detail, sizeof(detail))) {
+            free(init_pixels);
+            h3_video_latent_free(&init_latent);
+            h3_set_error(ctx, "%s", detail);
+            goto cleanup;
+        }
+        free(init_pixels);
+        if (init_latent.height != latent_h || init_latent.width != latent_w) {
+            h3_video_latent_free(&init_latent);
+            h3_set_error(ctx, "init-video VAE latent spatial size mismatch");
+            goto cleanup;
+        }
+        float *clean = malloc(video_count * sizeof(*clean));
+        float *noise = malloc(video_count * sizeof(*noise));
+        if (!clean || !noise) {
+            free(clean);
+            free(noise);
+            h3_video_latent_free(&init_latent);
+            h3_set_error(ctx, "out of memory mixing init-video latent");
+            goto cleanup;
+        }
+        memcpy(noise, video, video_count * sizeof(*noise));
+        if (!h3_resample_latent_time(
+                init_latent.values, init_latent.time, clean, temporal.video_t,
+                24, latent_h, latent_w)) {
+            free(clean);
+            free(noise);
+            h3_video_latent_free(&init_latent);
+            h3_set_error(ctx, "cannot resample init-video latent to DiT grid");
+            goto cleanup;
+        }
+        h3_video_latent_free(&init_latent);
+        denoise_start = h3_denoise_start_step(
+            sigmas.steps, params->denoise_strength);
+        float sigma = denoise_start >= sigmas.steps ? 0.0f :
+                      sigmas.video[denoise_start];
+        h3_mix_latent_noise(video, clean, noise, video_count, sigma);
+        free(clean);
+        free(noise);
+        hold_audio = 1;
+        /* Encode soundtrack when present; hold it through denoise. Silent
+         * init clips keep the seeded audio noise frozen instead. */
+        float *pcm = NULL;
+        int samples = 0;
+        int max_samples = (int)llround(
+            (double)temporal.frame_count * 32000.0 / (double)H3_FPS);
+        if (max_samples < 1) max_samples = 1;
+        if (h3_ffmpeg_read_audio_f32(
+                params->init_video, max_samples, 1, &pcm, &samples,
+                detail, sizeof(detail)) && pcm && samples > 0) {
+            h3_audio_latent al;
+            memset(&al, 0, sizeof(al));
+            if (h3_audio_vae_encode(
+                    audio_vae_path, "h3_shaders.metal", pcm, samples,
+                    h3_audio_encoder_progress_bridge, &progress, &al,
+                    detail, sizeof(detail)) &&
+                al.channels == 32 && al.stereo == 2 && al.length > 0) {
+                size_t want = audio_count;
+                size_t have = (size_t)al.channels * 2 * (size_t)al.length;
+                if (have == want) {
+                    memcpy(audio, al.values, want * sizeof(*audio));
+                } else {
+                    /* Match DiT audio_t by truncating or repeating the end. */
+                    int src_t = al.length;
+                    int dst_t = temporal.audio_t;
+                    for (int c = 0; c < 32; c++)
+                        for (int s = 0; s < 2; s++)
+                            for (int t = 0; t < dst_t; t++) {
+                                int src = src_t == 1 ? 0 :
+                                    (int)llround((double)t * (src_t - 1) /
+                                                 (double)(dst_t - 1));
+                                if (src >= src_t) src = src_t - 1;
+                                size_t si = ((size_t)c * 2 + (size_t)s) *
+                                            (size_t)src_t + (size_t)src;
+                                size_t di = ((size_t)c * 2 + (size_t)s) *
+                                            (size_t)dst_t + (size_t)t;
+                                audio[di] = al.values[si];
+                            }
+                }
+                h3_audio_latent_free(&al);
+            } else {
+                h3_audio_latent_free(&al);
+            }
+        }
+        free(pcm);
+        fprintf(stderr,
+                "h3: init-video strength=%.3f start_step=%d/%d hold_audio=%d\n",
+                params->denoise_strength, denoise_start, sigmas.steps,
+                hold_audio);
+        h3_progress_emit(&progress, "init video encode", 1, 1);
+        if (progress.cancelled) goto cleanup;
+    }
     {
         h3_dit_preview preview_cb = NULL;
         void *preview_opaque = NULL;
@@ -1710,6 +1880,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         }
         if (!h3_dit_denoise_euler_preview(
                 dit, video, audio, params->denoise_reuse,
+                denoise_start, hold_audio,
                 h3_dit_progress_bridge, &progress,
                 preview_cb, preview_opaque,
                 detail, sizeof(detail))) {
