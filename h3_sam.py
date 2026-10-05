@@ -144,6 +144,9 @@ def download_sam3(model_dir: Path | None = None) -> Path:
 
     dest.mkdir(parents=True, exist_ok=True)
     try:
+        from h3_ssl import ensure_ssl_certs
+
+        ensure_ssl_certs()
         snapshot_download(
             repo_id=SAM31_REPO,
             local_dir=str(dest),

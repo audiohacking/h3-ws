@@ -806,6 +806,9 @@ def resolve_lora_path(spec: str) -> Path:
         from huggingface_hub import hf_hub_download
     except ImportError as exc:
         raise RuntimeError("huggingface_hub is required to download LoRAs") from exc
+    from h3_ssl import ensure_ssl_certs
+
+    ensure_ssl_certs()
     log.info("Downloading LoRA %s (%s) …", repo, filename)
     local_path = hf_hub_download(
         repo_id=repo,

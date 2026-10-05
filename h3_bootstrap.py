@@ -20,6 +20,7 @@ _IMPORT_CHECKS = (
     "PIL",
     "numpy",
     "huggingface_hub",
+    "certifi",
     "fastapi",
     "starlette",
     "uvicorn",
@@ -89,25 +90,34 @@ def _forced() -> bool:
 def ensure_python_requirements() -> None:
     """Install ``requirements.txt`` when imports are missing or it changed."""
     global _installed_this_process
-    if _installed_this_process:
-        return
-    # Frozen apps ship their own site-packages — never pip-install at runtime.
-    if is_frozen():
+    try:
+        if _installed_this_process:
+            return
+        # Frozen apps ship their own site-packages — never pip-install at runtime.
+        if is_frozen():
+            _installed_this_process = True
+            return
+        req = requirements_file()
+        if not req.is_file():
+            raise SystemExit(f"requirements.txt not found at {req}")
+        if not _forced() and _imports_ok() and _stamp_matches(req):
+            _installed_this_process = True
+            return
+        print(f"Installing Python packages from {req}…", flush=True)
+        subprocess.check_call(_install_argv(req))
+        importlib.invalidate_caches()
+        missing = [name for name in _IMPORT_CHECKS if not _can_import(name)]
+        if missing:
+            raise SystemExit(
+                "Still missing after installing requirements.txt: " + ", ".join(missing)
+            )
+        _write_stamp(req)
         _installed_this_process = True
-        return
-    req = requirements_file()
-    if not req.is_file():
-        raise SystemExit(f"requirements.txt not found at {req}")
-    if not _forced() and _imports_ok() and _stamp_matches(req):
-        _installed_this_process = True
-        return
-    print(f"Installing Python packages from {req}…", flush=True)
-    subprocess.check_call(_install_argv(req))
-    importlib.invalidate_caches()
-    missing = [name for name in _IMPORT_CHECKS if not _can_import(name)]
-    if missing:
-        raise SystemExit(
-            "Still missing after installing requirements.txt: " + ", ".join(missing)
-        )
-    _write_stamp(req)
-    _installed_this_process = True
+    finally:
+        # Always pin TLS to certifi when present (macOS / frozen CA holes).
+        try:
+            from h3_ssl import ensure_ssl_certs
+
+            ensure_ssl_certs()
+        except Exception:
+            pass

@@ -80,7 +80,10 @@ def check_for_update(*, timeout_s: float = 4.0) -> dict[str, Any]:
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        from h3_ssl import ensure_ssl_certs, ssl_context
+
+        ensure_ssl_certs()
+        with urllib.request.urlopen(req, timeout=timeout_s, context=ssl_context()) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         out["ok"] = False

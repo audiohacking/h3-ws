@@ -144,8 +144,13 @@ def download_taeh3(
     log.info("Downloading TAEH3 preview decoder → %s", path)
     tmp = path.with_suffix(".download")
     try:
+        from h3_ssl import ensure_ssl_certs, ssl_context
+
+        ensure_ssl_certs()
         # Chunked write so Models SSE can watch .download grow.
-        with urllib.request.urlopen(TAEH3_URL, timeout=120) as resp, open(tmp, "wb") as out:
+        with urllib.request.urlopen(
+            TAEH3_URL, timeout=120, context=ssl_context()
+        ) as resp, open(tmp, "wb") as out:
             while True:
                 chunk = resp.read(256 * 1024)
                 if not chunk:

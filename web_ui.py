@@ -2270,6 +2270,9 @@ def create_app(
         """Run download in the background; update _download_state on finish."""
         model_dir = state.engine.model_dir
         try:
+            from h3_ssl import ensure_ssl_certs
+
+            ensure_ssl_certs()
             if component == "taeh3":
                 from h3_preview import download_taeh3
 
@@ -2314,10 +2317,13 @@ def create_app(
                 # Always pull the tiny preview decoder alongside FL2VA.
                 if component == "fl2va":
                     cmd.append("--with-taeh3")
+                # Inherit certifi CA env so the download_model subprocess verifies TLS.
+                env = os.environ.copy()
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    env=env,
                 )
                 output, _ = await proc.communicate()
                 text = output.decode("utf-8", "replace")

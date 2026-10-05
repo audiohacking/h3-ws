@@ -30,6 +30,13 @@ if hasattr(sys.modules.get(__name__, None), "_h3_desktop_executed"):
 sys.modules[__name__]._h3_desktop_executed = True  # type: ignore[attr-defined]
 
 try:
+    from h3_ssl import ensure_ssl_certs
+
+    ensure_ssl_certs()
+except Exception:
+    pass
+
+try:
     import fcntl
 
     _FCNTL = True

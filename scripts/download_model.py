@@ -26,6 +26,9 @@ if str(ROOT) not in sys.path:
 
 from h3_paths import default_model_dir  # noqa: E402
 from h3_preview import DEFAULT_TAEH3, default_taeh3_path, taeh3_available  # noqa: E402
+from h3_ssl import ensure_ssl_certs  # noqa: E402
+
+ensure_ssl_certs()
 
 TAEH3_URL = (
     "https://github.com/madebyollin/taehv/raw/main/safetensors/taeh3.safetensors"
