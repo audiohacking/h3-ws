@@ -1664,7 +1664,7 @@ def create_app(
             try:
                 from h3_preview import ensure_taeh3
 
-                ensure_taeh3()
+                ensure_taeh3(model_dir=state.engine.model_dir)
             except Exception:
                 log.exception("background taeh3 ensure failed")
 
@@ -1728,11 +1728,7 @@ def create_app(
             "denoise_min": MIN_FACE_DENOISE,
             "denoise_max": MAX_FACE_DENOISE,
             "abstain_px": ABSTAIN_FACE_PX,
-            "note": (
-                "Re-draw small heads at crop canvas with low denoise, then paste. "
-                "Requires SAM 3.1 weights (Models) for best detection; Haar fallback "
-                "works for Inspect. Repair needs h3 --init-video."
-            ),
+            "note": "Re-draw small heads at crop canvas, then paste back.",
         }
 
     @app.get("/api/health")
@@ -1927,7 +1923,7 @@ def create_app(
     def _component_status(model_dir: Path) -> list[dict[str, Any]]:
         """Return present/missing status for FL2VA, Ref2VA, TAEH3, and TaoMate."""
         from h3_lora import BUILTIN_LORAS, lora_cached_path
-        from h3_preview import default_taeh3_path, taeh3_available
+        from h3_preview import preferred_taeh3_path, taeh3_available
 
         def _dir_gib(path: Path) -> float:
             total = 0
@@ -1949,8 +1945,16 @@ def create_app(
         r2 = ref2va_dir(model_dir)
         fl_ok, _ = model_layout_ok(model_dir)
         r2_ok, _ = model_layout_ok(model_dir, need_ref2va=True)
-        tae = default_taeh3_path()
+        tae = preferred_taeh3_path(model_dir)
         tae_ok = taeh3_available(tae)
+        if not tae_ok:
+            # Fall back to any discovered copy (writable_root / HF-adjacent).
+            from h3_preview import default_taeh3_path
+
+            discovered = default_taeh3_path()
+            if taeh3_available(discovered):
+                tae = discovered
+                tae_ok = True
         tao = next((p for p in BUILTIN_LORAS if p.get("id") == "taomate_h3_3step"), None)
         tao_spec = str(tao["spec"]) if tao else ""
         tao_path = lora_cached_path(tao_spec) if tao_spec else None
@@ -2151,6 +2155,7 @@ def create_app(
         "component": None,
         "error": None,
         "task": None,
+        "terminal_pending": False,
     }
 
     # Approximate expected sizes in bytes (matching scripts/download_model.py).
@@ -2160,13 +2165,34 @@ def create_app(
         "taeh3": 22 * 1024**2,      # ~22 MB
         "taomate": 2.4 * 1024**3,   # ~2.4 GB
         "dmad": 1.4 * 1024**3,      # ~1.4 GB
+        "sam3": 3.5 * 1024**3,      # ~3.5 GB multiplex / HF snapshot
     }
+    _DOWNLOAD_COMPONENT_HELP = "fl2va, ref2va, taeh3, taomate, dmad, sam3"
 
     _COMPONENT_DIR = {"fl2va": "FL2VA", "ref2va": "Ref2VA"}
     _LIGHT_COMPONENTS = frozenset({"taeh3", "taomate", "dmad", "sam3"})
     _ALL_DOWNLOAD_COMPONENTS = frozenset(
         {"fl2va", "ref2va", "taeh3", "taomate", "dmad", "sam3"}
     )
+
+    def _sum_hf_local_progress(root: Path) -> tuple[int, int]:
+        """Sum complete + .incomplete bytes under a huggingface_hub local_dir cache."""
+        if not root.is_dir():
+            return 0, 0
+        incomplete = 0
+        complete = 0
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if p.suffix == ".incomplete" or p.name.endswith(".download"):
+                incomplete += size
+            elif ".cache" not in p.parts:
+                complete += size
+        return complete, incomplete
 
     def _component_progress(model_dir: Path, component: str) -> tuple[int, int]:
         """Sum bytes of .incomplete partials + already-relocated final files.
@@ -2178,47 +2204,47 @@ def create_app(
         repo and must not drive the progress bar.
         """
         if component == "taeh3":
-            from h3_preview import default_taeh3_path
+            from h3_preview import preferred_taeh3_path
 
-            path = default_taeh3_path()
+            path = preferred_taeh3_path(model_dir)
             tmp = path.with_suffix(".download")
             complete = path.stat().st_size if path.is_file() else 0
             incomplete = tmp.stat().st_size if tmp.is_file() else 0
             return complete, incomplete
-        if component == "taomate":
-            from h3_lora import BUILTIN_LORAS, lora_cached_path
+        if component in ("taomate", "dmad"):
+            from h3_lora import BUILTIN_LORAS, lora_cached_path, lora_download_dir
 
-            tao = next((p for p in BUILTIN_LORAS if p.get("id") == "taomate_h3_3step"), None)
-            if not tao:
+            lid = "taomate_h3_3step" if component == "taomate" else "dmad_h3_4step"
+            recipe = next((p for p in BUILTIN_LORAS if p.get("id") == lid), None)
+            if not recipe:
                 return 0, 0
-            hit = lora_cached_path(str(tao["spec"]))
+            hit = lora_cached_path(str(recipe["spec"]))
             if hit is not None and hit.is_file():
                 return hit.stat().st_size, 0
-            return 0, 0
-        if component == "dmad":
-            from h3_lora import BUILTIN_LORAS, lora_cached_path
-
-            dmad = next((p for p in BUILTIN_LORAS if p.get("id") == "dmad_h3_4step"), None)
-            if not dmad:
-                return 0, 0
-            hit = lora_cached_path(str(dmad["spec"]))
-            if hit is not None and hit.is_file():
-                return hit.stat().st_size, 0
-            return 0, 0
+            # Partials land under models/loras/<repo>/.cache while hf_hub_download runs.
+            dest = lora_download_dir(str(recipe["spec"]))
+            return _sum_hf_local_progress(dest) if dest is not None else (0, 0)
         if component == "sam3":
-            from h3_sam import sam3_root, sam3_ready
+            from h3_sam import find_comfy_sam3_multiplex, sam3_ready, sam3_root
 
             root = sam3_root(model_dir)
             if sam3_ready(model_dir):
                 total = 0
                 for p in root.rglob("*"):
-                    if p.is_file():
+                    if p.is_file() and ".cache" not in p.parts:
                         try:
                             total += p.stat().st_size
                         except OSError:
                             pass
+                if total <= 0:
+                    comfy = find_comfy_sam3_multiplex()
+                    if comfy is not None:
+                        try:
+                            total = comfy.stat().st_size
+                        except OSError:
+                            total = 0
                 return total, 0
-            return 0, 0
+            return _sum_hf_local_progress(root)
         comp_dir = _COMPONENT_DIR.get(component)
         if not comp_dir:
             return 0, 0
@@ -2242,11 +2268,12 @@ def create_app(
 
     async def _run_download(component: str) -> None:
         """Run download in the background; update _download_state on finish."""
+        model_dir = state.engine.model_dir
         try:
             if component == "taeh3":
                 from h3_preview import download_taeh3
 
-                await asyncio.to_thread(download_taeh3)
+                await asyncio.to_thread(download_taeh3, model_dir=model_dir)
                 _download_state["error"] = None
             elif component == "taomate":
                 from h3_lora import BUILTIN_LORAS, ensure_lora
@@ -2271,12 +2298,17 @@ def create_app(
                 await asyncio.to_thread(ensure_lora, str(dmad["spec"]))
                 _download_state["error"] = None
             elif component == "sam3":
-                from h3_sam import download_sam3
+                from h3_sam import SamDownloadError, download_sam3
 
-                await asyncio.to_thread(download_sam3, state.engine.model_dir)
-                _download_state["error"] = None
+                try:
+                    await asyncio.to_thread(download_sam3, model_dir)
+                    _download_state["error"] = None
+                except SamDownloadError as exc:
+                    # Keep the actionable license/token text for the Models panel.
+                    _download_state["error"] = str(exc)
+                    log.warning("SAM 3.1 download blocked: %s", exc)
             else:
-                cmd = _download_model_cmd("--local-dir", str(state.engine.model_dir))
+                cmd = _download_model_cmd("--local-dir", str(model_dir))
                 if component == "ref2va":
                     cmd.append("--with-ref2va")
                 # Always pull the tiny preview decoder alongside FL2VA.
@@ -2298,7 +2330,7 @@ def create_app(
                         try:
                             from h3_preview import ensure_taeh3
 
-                            await asyncio.to_thread(ensure_taeh3)
+                            await asyncio.to_thread(ensure_taeh3, model_dir=model_dir)
                         except Exception:
                             pass
         except Exception as exc:
@@ -2306,7 +2338,9 @@ def create_app(
         finally:
             _download_state["active"] = False
             _download_state["task"] = None
-            _download_state["component"] = None
+            # Leave component/error so a reconnecting SSE client can emit the
+            # terminal event without spawning a duplicate download.
+            _download_state["terminal_pending"] = True
 
     @app.get("/api/models/download/status")
     async def api_models_download_status():
@@ -2349,7 +2383,7 @@ def create_app(
         component = component.strip().lower()
         if component not in _ALL_DOWNLOAD_COMPONENTS:
             raise HTTPException(
-                400, "component must be one of: fl2va, ref2va, taeh3, taomate, dmad"
+                400, f"component must be one of: {_DOWNLOAD_COMPONENT_HELP}"
             )
 
         st = _download_state
@@ -2359,11 +2393,23 @@ def create_app(
         if running and st.get("component") != component:
             raise HTTPException(409, f"another component ({st['component']}) is downloading")
 
+        # Finished download whose terminal SSE event was never delivered (client
+        # dropped mid-stream). Re-emit success without starting a duplicate fetch.
+        # Failed attempts always restart so Retry works.
+        pending_terminal = (
+            not running
+            and st.get("component") == component
+            and not st.get("active")
+            and st.get("terminal_pending")
+            and not st.get("error")
+        )
+
         # Spawn the download only if none is running; otherwise re-attach.
-        if not running:
+        if not running and not pending_terminal:
             st["active"] = True
             st["component"] = component
             st["error"] = None
+            st["terminal_pending"] = False
             st["task"] = asyncio.create_task(_run_download(component))
 
         expected = EXPECTED_BYTES.get(component, 0)
@@ -2371,6 +2417,7 @@ def create_app(
         last_time = time.time()
 
         async def event_generator():
+            nonlocal last_total, last_time
             try:
                 while True:
                     cur_task = st.get("task")
@@ -2410,10 +2457,11 @@ def create_app(
                 raise
 
             # Terminal event — the task has finished.
-            if st["error"]:
+            err = st.get("error")
+            if err:
                 yield {
                     "event": "error",
-                    "data": json.dumps({"error": st["error"]}),
+                    "data": json.dumps({"error": err}),
                 }
             else:
                 yield {
@@ -2423,6 +2471,11 @@ def create_app(
                         "components": _component_status(state.engine.model_dir),
                     }),
                 }
+            # Clear latch so a later manual re-download can start cleanly.
+            if st.get("component") == component:
+                st["component"] = None
+                st["error"] = None
+                st["terminal_pending"] = False
 
         return EventSourceResponse(event_generator())
 
@@ -2436,7 +2489,7 @@ def create_app(
         component = str(body.get("component") or "").strip().lower()
         if component not in _ALL_DOWNLOAD_COMPONENTS:
             raise HTTPException(
-                400, "component must be one of: fl2va, ref2va, taeh3, taomate, dmad"
+                400, f"component must be one of: {_DOWNLOAD_COMPONENT_HELP}"
             )
 
         async def _run() -> dict[str, Any]:

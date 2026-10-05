@@ -571,10 +571,11 @@ def lora_cache_dir() -> Path:
     model = str(cfg.get("model_dir") or "").strip()
     if model:
         mp = Path(model).expanduser()
-        if mp.name == "MiniMax-H3" and mp.parent.name == "models":
-            candidate = mp.parent / "loras"
-            if candidate.is_dir():
-                return candidate.resolve()
+        # Write next to the user's MiniMax tree even when loras/ does not exist yet.
+        if mp.name == "MiniMax-H3":
+            return (mp.parent / "loras").resolve()
+        if mp.name == "models" or (mp / "MiniMax-H3").is_dir():
+            return (mp / "loras").resolve()
     return writable_root() / "models" / "loras"
 
 
@@ -822,6 +823,15 @@ def resolve_lora_path(spec: str) -> Path:
     if not _is_usable(path):
         raise RuntimeError(f"downloaded LoRA is empty: {path}")
     return ensure_native_h3_lora(path if _is_usable(path) else dest)
+
+
+def lora_download_dir(spec: str) -> Path | None:
+    """Directory under the user's models/loras (or HF local_dir) for a LoRA spec."""
+    parsed = _parse_hf_resolve(normalize_lora_spec(spec))
+    if not parsed:
+        return None
+    repo, _rev, _filename = parsed
+    return lora_cache_dir() / repo.replace("/", "__")
 
 
 def lora_cached_path(spec: str) -> Path | None:

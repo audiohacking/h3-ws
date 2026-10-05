@@ -51,7 +51,36 @@ _decoder_device: str | None = None
 _decoder_path: Path | None = None
 
 
+def preferred_taeh3_path(model_dir: Path | str | None = None) -> Path:
+    """Where new TAEH3 weights should be written (next to the user's models tree)."""
+    env = os.environ.get("H3_TAEH3", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    cfg = load_desktop_config()
+    configured = str(cfg.get("taeh3_path") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    md: Path | None = None
+    if model_dir is not None and str(model_dir).strip():
+        md = Path(model_dir).expanduser()
+    else:
+        configured_md = str(cfg.get("model_dir") or "").strip()
+        if configured_md:
+            md = Path(configured_md).expanduser()
+    if md is not None:
+        # …/models/MiniMax-H3 → …/models/vae_approx/; else …/models/vae_approx/.
+        models_root = md.parent if md.name == "MiniMax-H3" else md
+        return (models_root / "vae_approx" / "taeh3.safetensors").resolve()
+
+    repo = str(cfg.get("repo_root") or "").strip()
+    if repo:
+        return (Path(repo).expanduser() / "models" / "vae_approx" / "taeh3.safetensors").resolve()
+    return (writable_root() / "models" / "vae_approx" / "taeh3.safetensors").resolve()
+
+
 def default_taeh3_path() -> Path:
+    """Existing TAEH3 if found; otherwise the preferred write location."""
     env = os.environ.get("H3_TAEH3", "").strip()
     if env:
         return Path(env).expanduser().resolve()
@@ -65,9 +94,7 @@ def default_taeh3_path() -> Path:
         candidates.append(Path(repo).expanduser() / "models" / "vae_approx" / "taeh3.safetensors")
     model = str(cfg.get("model_dir") or "").strip()
     if model:
-        mp = Path(model).expanduser()
-        if mp.name == "MiniMax-H3" and mp.parent.name == "models":
-            candidates.append(mp.parent / "vae_approx" / "taeh3.safetensors")
+        candidates.append(preferred_taeh3_path(model))
     candidates.append(writable_root() / "models" / "vae_approx" / "taeh3.safetensors")
     candidates.append(resource_root() / "models" / "vae_approx" / "taeh3.safetensors")
     for path in candidates:
@@ -77,7 +104,7 @@ def default_taeh3_path() -> Path:
             continue
         if resolved.is_file() and resolved.stat().st_size > TAEH3_MIN_BYTES:
             return resolved
-    return (writable_root() / "models" / "vae_approx" / "taeh3.safetensors").resolve()
+    return preferred_taeh3_path()
 
 
 # Back-compat alias for scripts/download_model.py status lines
@@ -90,11 +117,26 @@ def taeh3_available(path: Path | None = None) -> bool:
     return p.is_file() and p.stat().st_size > TAEH3_MIN_BYTES
 
 
-def download_taeh3(dest: Path | None = None, *, force: bool = False) -> Path:
+def download_taeh3(
+    dest: Path | None = None,
+    *,
+    force: bool = False,
+    model_dir: Path | str | None = None,
+) -> Path:
     """Fetch madebyollin's ~22 MB TAEH3 preview decoder into models/vae_approx/."""
     import urllib.request
 
-    path = Path(dest) if dest is not None else default_taeh3_path()
+    path = Path(dest) if dest is not None else preferred_taeh3_path(model_dir)
+    # Reuse an existing weight elsewhere if present and dest empty.
+    if not force and not taeh3_available(path):
+        existing = default_taeh3_path()
+        if taeh3_available(existing) and existing != path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.symlink(existing, path)
+            except OSError:
+                shutil.copy2(existing, path)
+            return path
     path.parent.mkdir(parents=True, exist_ok=True)
     if taeh3_available(path) and not force:
         log.info("taeh3 already present: %s (%s bytes)", path, path.stat().st_size)
@@ -102,7 +144,13 @@ def download_taeh3(dest: Path | None = None, *, force: bool = False) -> Path:
     log.info("Downloading TAEH3 preview decoder → %s", path)
     tmp = path.with_suffix(".download")
     try:
-        urllib.request.urlretrieve(TAEH3_URL, tmp)
+        # Chunked write so Models SSE can watch .download grow.
+        with urllib.request.urlopen(TAEH3_URL, timeout=120) as resp, open(tmp, "wb") as out:
+            while True:
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
         tmp.replace(path)
     except Exception:
         if tmp.is_file():
@@ -114,10 +162,10 @@ def download_taeh3(dest: Path | None = None, *, force: bool = False) -> Path:
     return path
 
 
-def ensure_taeh3(*, force: bool = False) -> Path | None:
+def ensure_taeh3(*, force: bool = False, model_dir: Path | str | None = None) -> Path | None:
     """Ensure taeh3.safetensors exists; return path or None on failure."""
     try:
-        return download_taeh3(force=force)
+        return download_taeh3(force=force, model_dir=model_dir)
     except Exception as exc:  # noqa: BLE001 — startup must not die on preview assets
         log.warning("Could not ensure taeh3 preview weights: %s", exc)
         return None

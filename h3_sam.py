@@ -1,17 +1,14 @@
 """SAM 3.1 face detector for the H3 Faces pass (Apple Silicon).
 
-Preferred backend: MLX SAM 3.1 weights under ``models/sam3.1/`` (HF download via
-Models). Until those weights + an MLX runtime are available, falls back to
-OpenCV Haar so Library "Inspect faces" and geometry plumbing stay testable.
-
-Continuity uses Comfy's SAM3 with prompt ``"face"`` and threshold 0.35; we keep
-the same prompt/threshold contract.
+Looks for weights already on disk (models/sam3.1, HF hub cache, Continuity/Comfy
+multiplex) before any download. Haar fallback keeps Inspect usable without MLX.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
@@ -23,31 +20,144 @@ DETECT_PROMPT = "face"
 DETECT_THRESHOLD = 0.35
 DETECT_EDGE = 1008
 
-# Public MLX BF16 pack (SAM License). Continuity recommends sam3.1 multiplex;
-# on Mac we prefer the mlx-community conversion.
 SAM31_REPO = "mlx-community/sam3.1-bf16"
 SAM31_DIRNAME = "sam3.1"
+SAM31_LICENSE_URL = "https://huggingface.co/facebook/sam3"
+_MIN_WEIGHT_BYTES = 100 * 1024 * 1024
+
+
+class SamDownloadError(RuntimeError):
+    """User-facing SAM download / license failure."""
 
 
 def sam3_root(model_dir: Path | None = None) -> Path:
     if model_dir is None:
         model_dir = Path(os.environ.get("H3_MODEL_DIR", "models/MiniMax-H3"))
-    # Sibling of MiniMax-H3: models/sam3.1
-    root = model_dir.parent if model_dir.name.upper().startswith("MINIMAX") else model_dir
-    if (root / SAM31_DIRNAME).is_dir() or model_dir.name == "MiniMax-H3":
+    if model_dir.name.upper().startswith("MINIMAX") or model_dir.name == "MiniMax-H3":
         return (model_dir.parent / SAM31_DIRNAME).resolve()
     return (Path("models") / SAM31_DIRNAME).resolve()
 
 
-def sam3_ready(model_dir: Path | None = None) -> bool:
-    root = sam3_root(model_dir)
+def _weight_files(root: Path) -> list[Path]:
     if not root.is_dir():
-        return False
-    # Any weight-ish file counts as "on disk".
-    for pattern in ("*.safetensors", "*.npz", "config.json"):
-        if any(root.rglob(pattern)):
-            return True
-    return False
+        return []
+    hits: list[Path] = []
+    for pattern in ("*.safetensors", "*.npz", "*.pt", "*.bin"):
+        for path in root.rglob(pattern):
+            if ".cache" in path.parts:
+                continue
+            try:
+                if path.is_file() and path.stat().st_size >= _MIN_WEIGHT_BYTES:
+                    hits.append(path)
+            except OSError:
+                continue
+    return hits
+
+
+def find_comfy_sam3_multiplex() -> Path | None:
+    home = Path.home()
+    for path in (
+        home / "Documents" / "ComfyUI" / "models" / "checkpoints" / "sam3.1_multiplex.safetensors",
+        home / "Documents" / "ComfyUI" / "models" / "checkpoints" / "sam3.1_multiplex_fp16.safetensors",
+        home / "ComfyUI" / "models" / "checkpoints" / "sam3.1_multiplex.safetensors",
+        home / "ComfyUI-Shared" / "models" / "checkpoints" / "sam3.1_multiplex.safetensors",
+    ):
+        try:
+            if path.is_file() and path.stat().st_size >= _MIN_WEIGHT_BYTES:
+                return path.resolve()
+        except OSError:
+            continue
+    return None
+
+
+def find_hf_cached_sam3() -> Path | None:
+    from h3_paths import hf_hub_cache, hf_snapshot
+
+    snap = hf_snapshot("models--" + SAM31_REPO.replace("/", "--"), hub=hf_hub_cache())
+    if snap is None:
+        return None
+    return snap if _weight_files(snap) else None
+
+
+def _link_or_copy(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists() or dest.is_symlink():
+        return
+    try:
+        os.symlink(src, dest)
+    except OSError:
+        if src.is_dir():
+            shutil.copytree(src, dest, dirs_exist_ok=True)
+        else:
+            shutil.copy2(src, dest)
+
+
+def adopt_local_sam3(model_dir: Path | None = None) -> Path | None:
+    """Point models/sam3.1 at an existing local weight (HF cache or Comfy)."""
+    dest = sam3_root(model_dir)
+    if _weight_files(dest):
+        return dest
+
+    snap = find_hf_cached_sam3()
+    if snap is not None:
+        dest.mkdir(parents=True, exist_ok=True)
+        for src in snap.iterdir():
+            if src.name.startswith("."):
+                continue
+            _link_or_copy(src, dest / src.name)
+        if _weight_files(dest):
+            return dest
+
+    comfy = find_comfy_sam3_multiplex()
+    if comfy is not None:
+        _link_or_copy(comfy, dest / comfy.name)
+        if _weight_files(dest):
+            return dest
+    return None
+
+
+def sam3_ready(model_dir: Path | None = None) -> bool:
+    if _weight_files(sam3_root(model_dir)):
+        return True
+    # Already on disk elsewhere — adopt once, then report ready.
+    return adopt_local_sam3(model_dir) is not None
+
+
+def download_sam3(model_dir: Path | None = None) -> Path:
+    """Ensure weights under models/sam3.1/. Prefer local copies; HF only if needed."""
+    dest = sam3_root(model_dir)
+    adopted = adopt_local_sam3(model_dir)
+    if adopted is not None:
+        return adopted
+
+    try:
+        from huggingface_hub import get_token, snapshot_download
+    except ImportError as exc:
+        raise SamDownloadError("huggingface_hub is required to download SAM 3.1.") from exc
+
+    token = get_token()
+    if not token:
+        raise SamDownloadError(
+            f"HF login required for {SAM31_REPO}. "
+            f"Run huggingface-cli login and accept the license at {SAM31_LICENSE_URL}."
+        )
+
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        snapshot_download(
+            repo_id=SAM31_REPO,
+            local_dir=str(dest),
+            token=token,
+        )
+    except Exception as exc:
+        raise SamDownloadError(
+            f"SAM download failed: {exc}. "
+            f"Accept the license at {SAM31_LICENSE_URL} and retry."
+        ) from exc
+
+    if not _weight_files(dest):
+        raise SamDownloadError(f"Download finished but no weights under {dest}.")
+    return dest
 
 
 def sam3_status(model_dir: Path | None = None) -> dict[str, Any]:
@@ -56,42 +166,37 @@ def sam3_status(model_dir: Path | None = None) -> dict[str, Any]:
     size = 0
     if root.is_dir():
         for p in root.rglob("*"):
-            if p.is_file():
+            if p.is_file() and ".cache" not in p.parts:
                 try:
                     size += p.stat().st_size
                 except OSError:
                     pass
+    if size < _MIN_WEIGHT_BYTES:
+        comfy = find_comfy_sam3_multiplex()
+        if comfy is not None:
+            try:
+                size = comfy.stat().st_size
+            except OSError:
+                pass
+
     return {
         "id": "sam3",
-        "label": "SAM 3.1 face detector",
+        "label": "SAM 3.1",
         "present": ready,
-        "path": str(root),
+        "path": str(root if _weight_files(root) else (find_comfy_sam3_multiplex() or root)),
         "size_gib": round(size / (1024 ** 3), 2),
-        "note": (
-            "Open-vocabulary face detector for the Faces pass (~1–2 GB MLX BF16). "
-            "Accept the SAM License on Hugging Face before download. "
-            "Until present, Inspect faces can use a Haar fallback for geometry tests."
-        ),
+        "note": "Face detector for the Faces pass.",
         "essential": False,
         "repo": SAM31_REPO,
         "backend": _active_backend_name(model_dir),
     }
 
 
-def download_sam3(model_dir: Path | None = None) -> Path:
-    """Snapshot-download SAM 3.1 MLX weights into models/sam3.1/."""
-    from huggingface_hub import snapshot_download
-
-    dest = sam3_root(model_dir)
-    dest.mkdir(parents=True, exist_ok=True)
-    log.info("Downloading %s → %s", SAM31_REPO, dest)
-    snapshot_download(repo_id=SAM31_REPO, local_dir=str(dest))
-    return dest
-
-
 def _active_backend_name(model_dir: Path | None = None) -> str:
     if sam3_ready(model_dir) and _try_import_mlx_sam():
         return "sam3.1-mlx"
+    if sam3_ready(model_dir):
+        return "sam3-weights"
     return "haar-fallback"
 
 
@@ -100,7 +205,6 @@ def _try_import_mlx_sam() -> bool:
         import mlx  # noqa: F401
     except Exception:
         return False
-    # Prefer mlx_cv; mlx_vlm SAM path is optional and currently fragile in some envs.
     try:
         import mlx_cv  # noqa: F401
         return True
@@ -132,7 +236,6 @@ def _detect_haar(rgb) -> list[Box]:
 
 
 def _detect_mlx(rgb, threshold: float = DETECT_THRESHOLD) -> list[Box]:
-    """Best-effort SAM 3.1 MLX detect. Raises if runtime is unavailable."""
     import numpy as np
     from PIL import Image
 
@@ -141,11 +244,15 @@ def _detect_mlx(rgb, threshold: float = DETECT_THRESHOLD) -> list[Box]:
         arr = (np.clip(arr, 0, 1) * 255).astype(np.uint8) if arr.max() <= 1.5 else arr.astype(np.uint8)
     image = Image.fromarray(arr, mode="RGB")
 
-    # Try mlx_cv first (App Automaton / mlx-cv SAM3Processor).
     try:
         from mlx_cv.models.sam3 import SAM3Processor  # type: ignore
 
-        model = SAM3Processor.from_pretrained("sam3.1")
+        local = sam3_root()
+        model = (
+            SAM3Processor.from_pretrained(str(local))
+            if _weight_files(local)
+            else SAM3Processor.from_pretrained("sam3.1")
+        )
         prediction = model.predict(image, DETECT_PROMPT)
         boxes: list[Box] = []
         raw_boxes = getattr(prediction, "boxes", None) or prediction.get("boxes")  # type: ignore[union-attr]
@@ -163,10 +270,7 @@ def _detect_mlx(rgb, threshold: float = DETECT_THRESHOLD) -> list[Box]:
     except Exception as exc:
         log.debug("mlx_cv SAM3 unavailable: %s", exc)
 
-    raise RuntimeError(
-        "SAM 3.1 MLX runtime is not available. Install mlx-cv (or a working "
-        "mlx_vlm SAM build) and download the sam3 component from Models."
-    )
+    raise RuntimeError("SAM 3.1 MLX runtime unavailable")
 
 
 def detect_faces_in_frame(
@@ -176,7 +280,6 @@ def detect_faces_in_frame(
     threshold: float = DETECT_THRESHOLD,
     allow_fallback: bool = True,
 ) -> list[Box]:
-    """Return ``(x, y, w, h)`` face boxes for one RGB frame."""
     if sam3_ready(model_dir) and _try_import_mlx_sam():
         try:
             return _detect_mlx(rgb, threshold=threshold)
@@ -199,14 +302,6 @@ def track_faces_in_clip(
     max_faces: int = 1,
     prefer_video_track: bool = True,
 ) -> tuple[list[Box], list[bool]]:
-    """Detect on ``detect_frames`` indices and track with Continuity ``pick``.
-
-    Returns per-frame boxes (placeholders when undetected) and a found mask.
-
-    When SAM 3.1 MLX video multiplex is available, ``prefer_video_track`` uses
-    that path; otherwise falls back to every-``interval`` image detect (Phase 0).
-    ``max_faces`` > 1 keeps the largest N detections per sample (multi-face).
-    """
     count = len(frames)
     if count <= 0:
         raise ValueError("no frames")
@@ -219,7 +314,7 @@ def track_faces_in_clip(
                 max_faces=max_faces,
             )
         except Exception as exc:
-            log.debug("SAM 3.1 video track unavailable (%s); image interval", exc)
+            log.debug("SAM video track unavailable (%s)", exc)
 
     indices = detect_frames(count, interval=interval)
     boxes: list[Box] = [(0.0, 0.0, 0.0, 0.0)] * count
@@ -233,11 +328,7 @@ def track_faces_in_clip(
             allow_fallback=allow_fallback,
         )
         if max_faces > 1 and candidates:
-            candidates = sorted(candidates, key=lambda b: b[2] * b[3], reverse=True)[
-                : max_faces
-            ]
-            # Multi-face v1: still track the largest only for geometry continuity.
-            candidates = candidates[:1]
+            candidates = sorted(candidates, key=lambda b: b[2] * b[3], reverse=True)[:1]
         chosen = pick(candidates, previous)
         if chosen is not None:
             boxes[index] = chosen
@@ -253,7 +344,4 @@ def _track_mlx_video(
     threshold: float,
     max_faces: int,
 ) -> tuple[list[Box], list[bool]]:
-    """Best-effort SAM 3.1 multiplex video track. Raises if unsupported."""
-    # mlx_cv / mlx_vlm video multiplex APIs are still settling; keep the hook
-    # and fall back by raising so callers use the image interval path.
     raise RuntimeError("SAM 3.1 MLX video multiplex not wired in this build")
