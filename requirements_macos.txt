@@ -10,5 +10,10 @@ pywebview>=5.0
 torch>=2.1
 safetensors>=0.4
 
+# Faces detector — Continuity SAM 3.1 open-vocab "face" boxes on Apple Silicon
+mlx>=0.22
+mlx-vlm>=0.4.3
+Pillow>=10.0
+
 # Packaging (build hosts / CI only — also listed here for one-file install)
 pyinstaller>=6.0

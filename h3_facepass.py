@@ -48,7 +48,9 @@ class FacesSettings:
     canvas: int = DEFAULT_FACE_CANVAS
     denoise: float = DEFAULT_FACE_DENOISE
     seed: int = 42
-    abstain: bool = True
+    # Continuity never hard-skips close-ups — strengths() softens denoise.
+    # Keep abstain as an opt-in product gate (default off).
+    abstain: bool = False
     abstain_px: float = ABSTAIN_FACE_PX
     confirm_boxes: bool = False
     max_faces: int = 1  # v1: single track; multi-face later
@@ -161,38 +163,78 @@ def write_rgb_mp4(frames: np.ndarray, dest: str | Path, fps: int = 24) -> Path:
 
 
 def remux_audio(video_no_audio: str | Path, audio_source: str | Path, dest: str | Path) -> Path:
-    """Copy video from ``video_no_audio`` and audio stream(s) from ``audio_source``."""
+    """Copy video from ``video_no_audio`` and audio stream(s) from ``audio_source``.
+
+    When the source has no audio (or remux fails), fall back to copying the
+    silent refined video so the Faces pass still lands a playable file.
+    """
     import av
 
     dest = Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    vin = av.open(str(video_no_audio))
+    video_no_audio = Path(video_no_audio)
+    audio_source = Path(audio_source)
+
     ain = av.open(str(audio_source))
     try:
-        out = av.open(str(dest), mode="w")
-        try:
-            v_in = vin.streams.video[0]
-            v_out = out.add_stream(template=v_in)
-            a_out = None
-            a_in = next((s for s in ain.streams if s.type == "audio"), None)
-            if a_in is not None:
-                a_out = out.add_stream(template=a_in)
-            for packet in vin.demux(v_in):
-                if packet.dts is None:
-                    continue
-                packet.stream = v_out
-                out.mux(packet)
-            if a_out is not None and a_in is not None:
-                for packet in ain.demux(a_in):
-                    if packet.dts is None:
-                        continue
-                    packet.stream = a_out
-                    out.mux(packet)
-        finally:
-            out.close()
+        has_audio = any(s.type == "audio" for s in ain.streams)
     finally:
-        vin.close()
         ain.close()
+    if not has_audio:
+        shutil.copy2(video_no_audio, dest)
+        return dest
+
+    try:
+        vin = av.open(str(video_no_audio))
+        ain = av.open(str(audio_source))
+        try:
+            out = av.open(str(dest), mode="w")
+            try:
+                v_in = vin.streams.video[0]
+                a_in = next(s for s in ain.streams if s.type == "audio")
+                # Prefer stream copy; fall back to re-encode if template API differs.
+                try:
+                    v_out = out.add_stream(template=v_in)
+                    a_out = out.add_stream(template=a_in)
+                    copy_packets = True
+                except TypeError:
+                    rate = v_in.average_rate or 24
+                    v_out = out.add_stream("libx264", rate=rate)
+                    v_out.width = v_in.width
+                    v_out.height = v_in.height
+                    v_out.pix_fmt = "yuv420p"
+                    a_out = out.add_stream("aac")
+                    copy_packets = False
+                if copy_packets:
+                    for packet in vin.demux(v_in):
+                        if packet.dts is None:
+                            continue
+                        packet.stream = v_out
+                        out.mux(packet)
+                    for packet in ain.demux(a_in):
+                        if packet.dts is None:
+                            continue
+                        packet.stream = a_out
+                        out.mux(packet)
+                else:
+                    for frame in vin.decode(v_in):
+                        for packet in v_out.encode(frame):
+                            out.mux(packet)
+                    for packet in v_out.encode(None):
+                        out.mux(packet)
+                    for frame in ain.decode(a_in):
+                        for packet in a_out.encode(frame):
+                            out.mux(packet)
+                    for packet in a_out.encode(None):
+                        out.mux(packet)
+            finally:
+                out.close()
+        finally:
+            vin.close()
+            ain.close()
+    except Exception as exc:
+        log.warning("audio remux failed (%s); keeping silent refined video", exc)
+        shutil.copy2(video_no_audio, dest)
     return dest
 
 
@@ -302,8 +344,11 @@ def inspect_faces(
     from h3_sam import _active_backend_name
 
     frames, width, height = decode_clip_rgb(video_path)
+    # Inspect may Haar-preview when SAM is missing; Faces repair never does.
     boxes, found = track_faces_in_clip(
-        list(frames), model_dir=model_dir, allow_fallback=allow_fallback
+        list(frames),
+        model_dir=model_dir,
+        allow_fallback=allow_fallback and not sam3_ready(model_dir),
     )
     canvas = snap_face_canvas(canvas)
     crops, face_rects = crop_boxes(boxes, found, canvas, canvas)
@@ -351,51 +396,98 @@ def run_faces_pass(
     model_dir: Path | None = None,
     on_progress: ProgressFn | None = None,
     confirmed_boxes: Sequence[Box] | None = None,
+    refs: Sequence[Any] | None = None,
+    loras: Sequence[Any] | None = None,
+    quality: str = "fast",
+    steps: int | None = None,
+    layers: int | None = None,
+    reuse: int | None = None,
 ) -> Path:
-    """Full Faces repair. Requires h3 ``--init-video`` support in the binary."""
+    """Full Faces repair. Requires h3 ``--init-video`` support in the binary.
+
+    When ``refs`` are provided (the generation's Ref2VA list), each crop window
+    is re-drawn in Ref2VA mode so identity matches the same Picture N / Video N
+    / Audio N conditioning Continuity uses for the face pass.
+    """
     settings = settings or FacesSettings()
     canvas = snap_face_canvas(settings.canvas)
     ceiling = clamp_face_denoise(settings.denoise)
     seed = int(settings.seed)
     video_path = Path(video_path)
     output_path = Path(output_path)
+    refs_list = list(refs or [])
+    loras_list = list(loras or [])
+    face_mode = "ref2va" if refs_list else "t2va"
 
     def emit(phase: str, **extra: Any) -> None:
         if on_progress:
             on_progress(phase, extra)
 
-    emit("faces_detect", message="Detecting faces…")
+    emit("faces_detect", message="Detecting faces (SAM 3.1)…")
     frames, width, height = decode_clip_rgb(video_path)
     n = int(frames.shape[0])
-    boxes, found = track_faces_in_clip(list(frames), model_dir=model_dir, allow_fallback=True)
+    # Continuity: SAM is required — no Haar substitute for the repair pass.
+    if not sam3_ready(model_dir):
+        raise FaceError(
+            "SAM 3.1 is required for Faces. Open Models and download "
+            "SAM 3.1 (mlx-community/sam3.1-bf16), then retry."
+        )
+    try:
+        boxes, found = track_faces_in_clip(
+            list(frames), model_dir=model_dir, allow_fallback=False
+        )
+    except Exception as exc:
+        raise FaceError(f"SAM face detect failed: {exc}") from exc
     if confirmed_boxes is not None and len(confirmed_boxes) == n:
         boxes = list(confirmed_boxes)
         found = [b[2] > 0 and b[3] > 0 for b in boxes]
 
     if not any(found):
-        raise FaceError("no face was found in this clip")
+        # Continuity: leave the pass as it is (log, no invented repair).
+        log.info("Faces: no face found — left as it is")
+        emit(
+            "faces_skip",
+            message="No face found (SAM 3.1) — left as it is",
+        )
+        if Path(video_path).resolve() != Path(output_path).resolve():
+            shutil.copy2(video_path, output_path)
+        return output_path
 
     crops, face_rects = crop_boxes(boxes, found, canvas, canvas)
     heights = face_heights(crops)
     if settings.abstain and should_abstain(heights, settings.abstain_px):
-        emit(
-            "faces_abstain",
-            message=f"Face already ≥ {settings.abstain_px:.0f}px — skipping repair",
-            min_height=min(heights),
+        # Optional product gate — Continuity never abstains; strengths already
+        # soften denoise on large faces. Default abstain is off.
+        log.info(
+            "Faces: face already ≥ %.0f px — left as it is (abstain)",
+            settings.abstain_px,
         )
-        shutil.copy2(video_path, output_path)
+        emit(
+            "faces_skip",
+            message=(
+                f"Face already ≥ {settings.abstain_px:.0f}px — left as it is"
+            ),
+        )
+        if Path(video_path).resolve() != Path(output_path).resolve():
+            shutil.copy2(video_path, output_path)
         return output_path
 
     curve = strengths(heights)
     confidence = paste_weights(found)
     spans = windows(n)
     blend = window_weights(spans)
+    ref_note = f", {len(refs_list)} ref(s)" if refs_list else ", no refs (t2va)"
     emit(
         "faces_plan",
-        message=f"{len(spans)} window(s), canvas {canvas}, denoise ≤ {ceiling:.2f}",
+        message=(
+            f"{len(spans)} window(s), canvas {canvas}, denoise ≤ {ceiling:.2f}, "
+            f"{face_mode}{ref_note}"
+        ),
         windows=len(spans),
         canvas=canvas,
         denoise=ceiling,
+        mode=face_mode,
+        refs=len(refs_list),
     )
 
     result = frames.copy()
@@ -406,7 +498,7 @@ def run_faces_pass(
             strength = window_denoise(ceiling, curve[start:end])
             emit(
                 "faces_window",
-                message=f"Window {wi + 1}/{len(spans)} · denoise {strength:.2f}",
+                message=f"Faces window {wi + 1}/{len(spans)} · denoise {strength:.2f} · {face_mode}",
                 index=wi,
                 total=len(spans),
                 start=start,
@@ -426,12 +518,18 @@ def run_faces_pass(
                 width=canvas,
                 height=canvas,
                 num_frames=end - start,
-                quality="fast",
+                quality=str(quality or "fast"),
+                steps=steps,
+                layers=layers,
+                reuse=reuse,
                 seed=seed,
-                mode="t2va",
+                mode=face_mode,
+                refs=refs_list,
+                loras=loras_list,
                 init_video=init_mp4,
                 denoise_strength=strength,
                 profile=False,
+                ssd_streaming=False,
             )
             engine.generate(req)
 

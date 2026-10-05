@@ -659,10 +659,12 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
                 "init-video requires denoise-strength < 1 (1 is full noise)");
             return 0;
         }
-        if (params->reference_count || params->first_frame ||
-            params->last_frame) {
+        /* Faces (Continuity MiniMaxH3FacePass): init-video is the face crop
+         * while Ref2VA references keep identity. Frame anchors stay exclusive
+         * — first/last are a different conditioning path. */
+        if (params->first_frame || params->last_frame) {
             h3_set_error(ctx,
-                "init-video cannot be combined with references or frame anchors");
+                "init-video cannot be combined with frame anchors");
             return 0;
         }
     } else if (params->denoise_strength < 1.0f) {

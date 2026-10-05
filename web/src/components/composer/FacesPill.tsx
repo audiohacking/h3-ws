@@ -28,12 +28,13 @@ export function FacesPill({
 }: FacesPillProps) {
   const [open, setOpen] = useState(false);
   const samReady = Boolean(config?.sam3_ready);
+  // Continuity: SAM is essential — Faces stays off until MLX SAM 3.1 is ready.
   const canEnable = Boolean(config?.available) && samReady;
   const title = !config
     ? "Faces"
     : !samReady
-      ? "Download SAM 3.1 in Models to enable Faces"
-      : "Re-draw small heads at crop canvas (Continuity face pass)";
+      ? "Download SAM 3.1 in Models first (required face detector)"
+      : "Continuity face pass — SAM detect, refine with your Ref2VA refs";
 
   return (
     <div className={`faces-pill${enabled ? " is-on" : ""}${open ? " is-open" : ""}`}>
@@ -98,7 +99,7 @@ export function FacesPill({
           </label>
           <p className="faces-pill__hint">
             {config?.note ||
-              "Low-denoise repair of small faces. Same seed every window. Audio remuxed."}
+              "End-of-run face refine. Reuses your Ref2VA picture/video/audio refs. Audio remuxed."}
           </p>
         </div>
       )}

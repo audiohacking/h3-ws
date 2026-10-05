@@ -1458,17 +1458,19 @@ async def _execute_run(state: AppState, run_id: str) -> None:
             _purge_preview_stem(preview_stem)
             done_paths.append(dest)
             # Optional Faces post-pass (composer pill): repair small heads, remux audio.
+            # Continuity parity: re-draw at crop canvas with the SAME Ref2VA refs.
             faces_cfg = run.faces if isinstance(run.faces, dict) else None
             if faces_cfg and faces_cfg.get("enabled") and dest.is_file():
-                try:
-                    from h3_facepass import FacesSettings, run_faces_pass
-                    from h3_faces import (
-                        DEFAULT_FACE_CANVAS,
-                        DEFAULT_FACE_DENOISE,
-                        snap_face_canvas,
-                        clamp_face_denoise,
-                    )
+                from h3_facepass import FacesSettings, run_faces_pass
+                from h3_faces import (
+                    DEFAULT_FACE_CANVAS,
+                    DEFAULT_FACE_DENOISE,
+                    FaceError,
+                    snap_face_canvas,
+                    clamp_face_denoise,
+                )
 
+                try:
                     await state.emit(
                         run_id,
                         {
@@ -1496,15 +1498,38 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                             if faces_cfg.get("seed") is not None
                             else (clip.seed or 42)
                         ),
-                        abstain=bool(faces_cfg.get("abstain", True)),
+                        abstain=bool(faces_cfg.get("abstain", False)),
+                    )
+                    # Reuse the generation's ordered refs + LoRAs (identity + turbo).
+                    face_refs = parse_refs_payload(body.get("refs"), validate=False)
+                    face_loras = _loras_from_body(state, body)
+                    face_quality = str(body.get("quality") or clip.quality or "fast")
+                    face_steps = (
+                        int(body["num_steps"])
+                        if body.get("num_steps") is not None
+                        else clip.num_steps
+                    )
+                    face_layers = (
+                        int(body["layers"]) if body.get("layers") is not None else clip.layers
+                    )
+                    face_reuse = (
+                        int(body["reuse"]) if body.get("reuse") is not None else clip.reuse
                     )
 
                     def _faces_prog(phase: str, extra: dict[str, Any]) -> None:
-                        log.info(
-                            "faces %s clip=%s %s",
-                            phase,
-                            clip.id,
-                            extra.get("message") or "",
+                        msg = str(extra.get("message") or phase)
+                        log.info("faces %s clip=%s %s", phase, clip.id, msg)
+                        asyncio.run_coroutine_threadsafe(
+                            state.emit(
+                                run_id,
+                                {
+                                    "type": "progress",
+                                    "phase": phase,
+                                    "message": msg,
+                                    "clip_id": clip.id,
+                                },
+                            ),
+                            loop,
                         )
 
                     await asyncio.to_thread(
@@ -1516,6 +1541,12 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         settings=fsettings,
                         model_dir=state.engine.model_dir,
                         on_progress=_faces_prog,
+                        refs=face_refs,
+                        loras=face_loras,
+                        quality=face_quality,
+                        steps=face_steps,
+                        layers=face_layers,
+                        reuse=face_reuse,
                     )
                     if faces_path.is_file():
                         # Replace the clip file with the repaired version.
@@ -1535,6 +1566,17 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                                 "clip_id": clip.id,
                             },
                         )
+                except FaceError as exc:
+                    log.warning("Faces post-pass skipped for %s: %s", clip.id, exc)
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "faces_skip",
+                            "message": f"Faces skipped: {exc}",
+                            "clip_id": clip.id,
+                        },
+                    )
                 except Exception as exc:
                     log.exception("Faces post-pass failed for %s", clip.id)
                     await state.emit(
@@ -1542,7 +1584,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         {
                             "type": "progress",
                             "phase": "faces_error",
-                            "message": f"Faces skipped: {exc}",
+                            "message": f"Faces failed: {exc}",
                             "clip_id": clip.id,
                         },
                     )
@@ -1717,7 +1759,8 @@ def create_app(
 
         ready = sam3_ready(app_state.engine.model_dir)
         return {
-            "available": True,
+            # Continuity parity: Faces is only available when SAM 3.1 can detect.
+            "available": ready,
             "sam3_ready": ready,
             "backend": _active_backend_name(app_state.engine.model_dir),
             "enabled_default": False,
@@ -1728,7 +1771,10 @@ def create_app(
             "denoise_min": MIN_FACE_DENOISE,
             "denoise_max": MAX_FACE_DENOISE,
             "abstain_px": ABSTAIN_FACE_PX,
-            "note": "Re-draw small heads at crop canvas, then paste back.",
+            "note": (
+                "Continuity face pass: SAM detects → crop → low-denoise re-draw "
+                "with your Ref2VA refs → paste. Requires SAM 3.1 (Models)."
+            ),
         }
 
     @app.get("/api/health")
@@ -3150,6 +3196,34 @@ def create_app(
         )
         prompt = str(body.get("prompt") or clip.prompt or "a person speaking, detailed face")
 
+        # Prefer refs from the request, else the clip's generation snapshot.
+        gen = clip.generation if isinstance(clip.generation, dict) else {}
+        refs_raw = body.get("refs") if body.get("refs") is not None else gen.get("refs")
+        try:
+            face_refs = parse_refs_payload(refs_raw, validate=False)
+            face_refs = _resolve_refs(state, face_refs)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        # Reconstruct LoRAs from clip settings when the client did not send any.
+        lora_body = {
+            "loras": body.get("loras")
+            if body.get("loras") is not None
+            else (clip.loras or gen.get("loras") or []),
+        }
+        face_loras = _loras_from_body(state, lora_body)
+        face_quality = str(
+            body.get("quality") or gen.get("quality") or clip.quality or "fast"
+        )
+        face_steps = (
+            int(body["num_steps"])
+            if body.get("num_steps") is not None
+            else clip.num_steps
+        )
+        face_layers = (
+            int(body["layers"]) if body.get("layers") is not None else clip.layers
+        )
+        face_reuse = int(body["reuse"]) if body.get("reuse") is not None else clip.reuse
+
         events: list[dict[str, Any]] = []
 
         def on_progress(phase: str, extra: dict[str, Any]) -> None:
@@ -3172,6 +3246,12 @@ def create_app(
                     model_dir=state.engine.model_dir,
                     on_progress=on_progress,
                     confirmed_boxes=confirmed_boxes,
+                    refs=face_refs,
+                    loras=face_loras,
+                    quality=face_quality,
+                    steps=face_steps,
+                    layers=face_layers,
+                    reuse=face_reuse,
                 )
             except FaceError as exc:
                 raise HTTPException(400, str(exc)) from exc

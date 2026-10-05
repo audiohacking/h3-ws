@@ -132,9 +132,10 @@ typedef struct {
      * without loading the preview VAE. Format: step_NNNN.bin + latest.json. */
     const char *preview_latent_dir;
     /* Optional RGB clip VAE-encoded as the starting video latent (img2vid /
-     * Faces pass). Requires denoise_strength < 1. Audio is encoded from the
-     * same file when present and held (not denoised); remux original audio
-     * outside h3 for a bit-identical soundtrack. */
+     * Faces pass). Requires denoise_strength < 1. May combine with Ref2VA
+     * references (Continuity face re-draw keeps identity refs). Not with
+     * first/last frame anchors. Audio from the same file is held when present;
+     * remux original audio outside h3 for a bit-identical soundtrack. */
     const char *init_video;
     /* 0..1 — fraction of the schedule to denoise. 1 = full noise (default);
      * 0.45 is Continuity's Faces default. Ignored without init_video. */

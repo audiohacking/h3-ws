@@ -2303,7 +2303,7 @@ export default function App() {
                     className="library-job-btn"
                     title={
                       config?.faces?.sam3_ready
-                        ? "Run Faces repair pass"
+                        ? "Run Faces repair (SAM detect + Ref2VA refs)"
                         : "Download SAM 3.1 in Models first"
                     }
                     disabled={busy || !config?.faces?.sam3_ready}

@@ -72,9 +72,11 @@ export function applyProgressEvent(
       ? msg.phase
       : mp?.stage ?? prev?.phase ?? "generating";
   const hasStepData = Boolean(mp?.stage || mp?.step != null || mp?.label);
+  const explicit =
+    typeof msg.message === "string" && msg.message.trim() ? msg.message.trim() : null;
   const message = hasStepData
     ? formatProgressMessage(mp, wall_elapsed)
-    : prev?.message ?? formatProgressMessage(mp, wall_elapsed);
+    : explicit ?? prev?.message ?? formatProgressMessage(mp, wall_elapsed);
   return {
     phase,
     message,
