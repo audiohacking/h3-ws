@@ -2211,7 +2211,7 @@ def create_app(
         "taeh3": 22 * 1024**2,      # ~22 MB
         "taomate": 2.4 * 1024**3,   # ~2.4 GB
         "dmad": 1.4 * 1024**3,      # ~1.4 GB
-        "sam3": 3.5 * 1024**3,      # ~3.5 GB multiplex / HF snapshot
+        "sam3": 3.3 * 1024**3,      # ~3.3 GB mlx-community/sam3.1-bf16
     }
     _DOWNLOAD_COMPONENT_HELP = "fl2va, ref2va, taeh3, taomate, dmad, sam3"
 

@@ -2459,7 +2459,10 @@ export default function App() {
       {/* Models panel */}
       {FEATURES.MODELS_PAGE && modelsOpen && (
         <div className="modal-backdrop" onClick={closeModels}>
-          <div className="modal modal--fullscreen" onClick={(e) => e.stopPropagation()}>
+          <div
+            className="modal modal--fullscreen models-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
             <ModelsManager
               api={API}
               onClose={closeModels}

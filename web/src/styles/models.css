@@ -1,10 +1,19 @@
-/* Models management page */
+/* Models management page — fills the fullscreen modal and scrolls.
+ * Parent `.modal` uses overflow:hidden + max-height; without flex/min-height
+ * + overflow-y here, cards below the fold are clipped with no scrollbar. */
 
 .models-page {
   display: flex;
   flex-direction: column;
   gap: 16px;
   padding: 20px 24px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -55,6 +64,13 @@
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  margin: -20px -24px 0;
+  padding: 20px 24px 12px;
+  background: var(--color-surface, var(--surface, #141416));
+  border-bottom: 1px solid var(--color-border, var(--border, rgba(128, 128, 128, 0.25)));
 }
 
 .models-page__title {
@@ -158,6 +174,8 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* Extra bottom pad so the last card (SAM / LoRAs) clears the fold. */
+  padding-bottom: 24px;
 }
 
 .model-card {

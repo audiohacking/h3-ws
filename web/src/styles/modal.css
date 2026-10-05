@@ -63,6 +63,16 @@
   max-height: calc(100vh - var(--space-7) * 2);
 }
 
+/* Models panel: stretch the manager so its own overflow-y can scroll. */
+.models-modal {
+  min-height: 0;
+}
+
+.models-modal > .models-page {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
  * Modal Header
  * ───────────────────────────────────────────────────────────────────────────── */
