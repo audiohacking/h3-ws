@@ -102,9 +102,12 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
                    h3_dit_progress progress, void *progress_opaque,
                    char *error, size_t error_size);
 
-/* Current serving sampler: independent video/audio shifted Euler grids. */
+/* Current serving sampler: independent video/audio shifted Euler grids.
+ * start_step skips early schedule entries (img2vid / Faces). hold_audio
+ * freezes the audio latent (Euler delta 0) while video continues. */
 int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
+                         int start_step, int hold_audio,
                          h3_dit_progress progress, void *progress_opaque,
                          char *error, size_t error_size);
 
@@ -114,6 +117,7 @@ int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,
 int h3_dit_denoise_euler_preview(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
+                         int start_step, int hold_audio,
                          h3_dit_progress progress, void *progress_opaque,
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size);

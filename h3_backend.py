@@ -765,6 +765,9 @@ class GenerateRequest:
     profile: bool = True
     # When set, h3.c dumps mid-denoise latents here for TAEH3 preview (no --show).
     preview_latent_dir: Path | None = None
+    # Faces / img2vid: VAE-encode this clip as the starting video latent.
+    init_video: Path | None = None
+    denoise_strength: float | None = None
 
 
 def uses_ref2va(req: GenerateRequest) -> bool:
@@ -867,6 +870,16 @@ def build_h3_argv(
         cmd.extend(["--last-frame", str(req.last_frame)])
     if req.preview_latent_dir:
         cmd.extend(["--preview-latent", str(req.preview_latent_dir)])
+    if req.init_video:
+        cmd.extend(["--init-video", str(req.init_video)])
+        strength = 1.0 if req.denoise_strength is None else float(req.denoise_strength)
+        if not 0.0 <= strength <= 1.0:
+            raise ValueError("denoise_strength must be between 0 and 1")
+        if strength >= 1.0:
+            raise ValueError("init_video requires denoise_strength < 1")
+        cmd.extend(["--denoise-strength", f"{strength:.4g}"])
+    elif req.denoise_strength is not None and float(req.denoise_strength) < 1.0:
+        raise ValueError("denoise_strength < 1 requires init_video")
     append_ref_flags(cmd, req.refs)
     return cmd
 
@@ -1045,8 +1058,13 @@ class H3Engine:
         outcome = "failed"
         heartbeat = Heartbeat(self)
         heartbeat.start()
+        # init-video / denoise-strength are one-shot CLI flags (no !session cmds yet).
+        force_oneshot = req.init_video is not None
         try:
-            result = self._generate_session(req, on_progress=on_progress)
+            if force_oneshot:
+                result = self._generate_oneshot(req, on_progress=on_progress)
+            else:
+                result = self._generate_session(req, on_progress=on_progress)
             outcome = "done"
             return result
         except GenerationCancelledError:

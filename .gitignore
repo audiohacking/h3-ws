@@ -37,6 +37,9 @@ models/
 web/node_modules/
 web/dist/
 
+# Local PyAV shim bin staging
+bin/
+
 # Runtime ffmpeg/ffprobe names for the PyAV shim
 scripts/.h3-av-bin/
 

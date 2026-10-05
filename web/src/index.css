@@ -2176,3 +2176,77 @@ body {
   font-size: 0.72rem;
   color: var(--muted);
 }
+
+/* Faces pill */
+.faces-pill {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: visible;
+  background: var(--bg);
+}
+.faces-pill.is-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.faces-pill__main,
+.faces-pill__gear {
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.faces-pill__gear {
+  padding-left: 2px;
+  opacity: 0.7;
+}
+.faces-pill__main:disabled,
+.faces-pill__gear:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.faces-pill__pop {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  min-width: 200px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel, var(--bg));
+  box-shadow: 0 8px 24px rgba(0,0,0,0.18);
+  display: grid;
+  gap: 8px;
+}
+.faces-pill__pop label {
+  display: grid;
+  gap: 2px;
+  font-size: 11px;
+  color: var(--muted, #64748b);
+}
+.faces-pill__pop input {
+  width: 100%;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+}
+.faces-pill__hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted, #64748b);
+}
+.library-job-actions--done {
+  bottom: 4px;
+  top: auto;
+}

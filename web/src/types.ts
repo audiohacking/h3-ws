@@ -79,6 +79,22 @@ export interface Config {
   taeh3_available?: boolean;
   refine?: RefineSettingsPublic;
   network?: NetworkSettingsPublic;
+  faces?: FacesConfigPublic;
+}
+
+export interface FacesConfigPublic {
+  available: boolean;
+  sam3_ready: boolean;
+  backend?: string;
+  enabled_default?: boolean;
+  canvas: number;
+  canvas_min: number;
+  canvas_max: number;
+  denoise: number;
+  denoise_min: number;
+  denoise_max: number;
+  abstain_px?: number;
+  note?: string;
 }
 
 export interface RefineSettingsPublic {

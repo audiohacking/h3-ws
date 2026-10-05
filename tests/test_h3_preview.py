@@ -9,7 +9,13 @@ from pathlib import Path
 
 import numpy as np
 
-from h3_preview import H3_LATENT_MAGIC, read_latent_bin, taeh3_available, taeh3_decode_ready
+from h3_preview import (
+    H3_LATENT_MAGIC,
+    preferred_taeh3_path,
+    read_latent_bin,
+    taeh3_available,
+    taeh3_decode_ready,
+)
 
 
 class TestLatentDump(unittest.TestCase):
@@ -37,6 +43,12 @@ class TestLatentDump(unittest.TestCase):
         # Weights alone are not enough to arm --preview-latent.
         if not taeh3_available():
             self.assertFalse(taeh3_decode_ready())
+
+    def test_preferred_taeh3_path_next_to_minimax(self) -> None:
+        dest = preferred_taeh3_path("/tmp/studio/models/MiniMax-H3")
+        self.assertEqual(dest.name, "taeh3.safetensors")
+        self.assertEqual(dest.parent.name, "vae_approx")
+        self.assertTrue(str(dest).endswith("models/vae_approx/taeh3.safetensors"))
 
 
 if __name__ == "__main__":

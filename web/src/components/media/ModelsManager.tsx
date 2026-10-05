@@ -228,19 +228,25 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
             ? "~2.4 GB"
             : component.id === "dmad"
               ? "~1.4 GB"
-              : "~22 MB";
+              : component.id === "sam3"
+                ? "~3.3 GB"
+                : "~22 MB";
     const needsConfirm =
       component.id === "fl2va" ||
       component.id === "ref2va" ||
       component.id === "taomate" ||
-      component.id === "dmad";
+      component.id === "dmad" ||
+      component.id === "sam3";
     if (
       !component.present &&
       needsConfirm &&
       !window.confirm(
         `Download ${component.label}?\n\n` +
           `Size: ${sizeHint}.\n` +
-          `Downloads resume automatically if interrupted.\n\nProceed?`,
+          (component.id === "sam3"
+            ? "May need Hugging Face login + SAM License.\n"
+            : "") +
+          `Downloads resume if interrupted.\n\nProceed?`,
       )
     ) {
       return;

@@ -476,7 +476,7 @@ static void run_qkv_denoise_ab(h3_dit *dit, float *video, float *audio,
         else
             setenv("H3_DISABLE_COOP_QKV", "1", 1);
         double start = seconds();
-        if (!h3_dit_denoise_euler(dit, video, audio, reuse_interval, NULL, NULL,
+        if (!h3_dit_denoise_euler(dit, video, audio, reuse_interval, 0, 0, NULL, NULL,
                                   error, sizeof(error))) die(error);
         double elapsed = seconds() - start;
         if (!have_reference) {
@@ -573,7 +573,7 @@ static void run_qkv_step_ab(h3_dit *dit, float *video, float *audio,
     qkv_step_ab_state state = {0};
     state.invert = getenv("H3_BENCH_QKV_INVERT") != NULL;
     setenv("H3_CPU_SAMPLER", "1", 1);
-    if (!h3_dit_denoise_euler(dit, video, audio, reuse_interval,
+    if (!h3_dit_denoise_euler(dit, video, audio, reuse_interval, 0, 0,
                               qkv_step_ab_progress, &state,
                               error, sizeof(error))) die(error);
     unsetenv("H3_CPU_SAMPLER");
@@ -1182,7 +1182,7 @@ static void run_sampler_ab(h3_dit *dit, float *video, float *audio,
             if (gpu_command_blocks) unsetenv("H3_DIT_COMMAND_BLOCKS");
         }
         double start = seconds();
-        if (!h3_dit_denoise_euler(dit, video, audio, 3, NULL, NULL,
+        if (!h3_dit_denoise_euler(dit, video, audio, 3, 0, 0, NULL, NULL,
                                   error, sizeof(error))) die(error);
         double elapsed = seconds() - start;
         if (!have_reference && !gpu_pattern[run]) {
@@ -1340,7 +1340,7 @@ static void run_token_reduction_denoise_ab(h3_dit *dit, float *video,
         if (candidate_pattern[run]) unsetenv("H3_DISABLE_TOKEN_REDUCTION");
         else setenv("H3_DISABLE_TOKEN_REDUCTION", "1", 1);
         double start = seconds();
-        if (!h3_dit_denoise_euler(dit, video, audio, reuse_interval, NULL, NULL,
+        if (!h3_dit_denoise_euler(dit, video, audio, reuse_interval, 0, 0, NULL, NULL,
                                   error, sizeof(error))) die(error);
         double elapsed = seconds() - start;
         if (!have_reference && !candidate_pattern[run]) {
