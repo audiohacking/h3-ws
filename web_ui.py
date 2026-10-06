@@ -1430,36 +1430,19 @@ async def _execute_run(state: AppState, run_id: str) -> None:
             clip.timings = getattr(state.engine, "last_timings", None)
             elapsed = round(time.time() - t0, 2)
             size = dest.stat().st_size if dest.is_file() else 0
-            clip.status = RunStatus.DONE.value
             clip.elapsed_s = elapsed
             clip.bytes = size
             clip.video_url = state.clip_url(clip.filename)
             clip.label = "CURRENT" if i == len(run.prompts) - 1 else f"CLIP {i + 1}"
             if i == 0:
                 clip.label = "ORIGINAL" if len(run.prompts) > 1 else "CURRENT"
-            thumb_url = ""
-            if dest.is_file() and media_available():
-                poster = await asyncio.to_thread(ensure_video_poster, dest)
-                if poster is not None:
-                    thumb_url = state.clip_thumb_url(clip.filename)
-            state.save_index()
-            await state.emit(
-                run_id,
-                {
-                    "type": "clip_done",
-                    "clip_id": clip.id,
-                    "video_url": clip.video_url,
-                    "thumb_url": thumb_url,
-                    "bytes": clip.bytes,
-                    "filename": clip.filename,
-                    "chain_id": clip.chain_id,
-                },
-            )
-            _purge_preview_stem(preview_stem)
-            done_paths.append(dest)
+
             # Optional Faces post-pass (composer pill): repair small heads, remux audio.
             # Continuity parity: re-draw at crop canvas with the SAME Ref2VA refs.
+            # Defer clip_done until after Faces so the UI keeps watchLive + progress
+            # overlay through the nested denoise (preview + step updates).
             faces_cfg = run.faces if isinstance(run.faces, dict) else None
+            faces_applied = False
             if faces_cfg and faces_cfg.get("enabled") and dest.is_file():
                 from h3_facepass import FacesSettings, run_faces_pass
                 from h3_faces import (
@@ -1470,6 +1453,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     clamp_face_denoise,
                 )
 
+                faces_watcher: LatentPreviewWatcher | None = None
+                faces_stem = state.output_dir / ".preview" / f"{run_id}_{clip.id}_faces"
                 try:
                     await state.emit(
                         run_id,
@@ -1532,19 +1517,68 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         int(body["reuse"]) if body.get("reuse") is not None else clip.reuse
                     )
 
+                    faces_preview_dir: Path | None = None
+                    if taeh3_decode_ready():
+                        faces_preview_dir = state.engine.ensure_preview_latent_dir()
+
+                        def _on_faces_preview(
+                            info: dict[str, Any],
+                            *,
+                            _rid=run_id,
+                            _stem=faces_stem.name,
+                        ) -> None:
+                            served = Path(str(info.get("path") or ""))
+                            ext = served.suffix if served.suffix else ".mp4"
+                            url = f"/api/preview/{_stem}{ext}?t={int(time.time() * 1000)}"
+                            asyncio.run_coroutine_threadsafe(
+                                state.emit(
+                                    _rid,
+                                    {
+                                        "type": "preview",
+                                        "url": url,
+                                        "mime": info.get("mime") or "image/webp",
+                                        "step": info.get("step"),
+                                        "total": info.get("total"),
+                                        "fps": info.get("fps"),
+                                    },
+                                ),
+                                loop,
+                            )
+
+                        faces_watcher = LatentPreviewWatcher(
+                            faces_preview_dir, faces_stem, on_preview=_on_faces_preview
+                        )
+                        faces_watcher.start()
+
                     def _faces_prog(phase: str, extra: dict[str, Any]) -> None:
                         msg = str(extra.get("message") or phase)
-                        log.info("faces %s clip=%s %s", phase, clip.id, msg)
+                        mp = extra.get("model_progress")
+                        payload: dict[str, Any] = {
+                            "type": "progress",
+                            "phase": phase,
+                            "message": msg,
+                            "clip_id": clip.id,
+                        }
+                        if isinstance(mp, dict):
+                            payload["model_progress"] = mp
+                            if mp.get("elapsed_s") is not None:
+                                payload["elapsed_s"] = mp.get("elapsed_s")
+                            stage = str(mp.get("stage") or "").strip()
+                            step, total = mp.get("step"), mp.get("total")
+                            bits = [msg]
+                            if step is not None and total is not None:
+                                label = stage.capitalize() if stage else "Step"
+                                bits.append(f"{label} {step}/{total}")
+                            eta = mp.get("eta_s")
+                            if eta is not None:
+                                eta_i = max(0, int(round(float(eta))))
+                                bits.append(f"{eta_i // 60:02d}:{eta_i % 60:02d} remaining")
+                            elif mp.get("avg_step_s") is not None:
+                                bits.append(f"{mp['avg_step_s']}s/it")
+                            payload["message"] = " · ".join(bits)
+                        log.info("faces %s clip=%s %s", phase, clip.id, payload["message"])
                         asyncio.run_coroutine_threadsafe(
-                            state.emit(
-                                run_id,
-                                {
-                                    "type": "progress",
-                                    "phase": phase,
-                                    "message": msg,
-                                    "clip_id": clip.id,
-                                },
-                            ),
+                            state.emit(run_id, payload),
                             loop,
                         )
 
@@ -1563,6 +1597,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         steps=face_steps,
                         layers=face_layers,
                         reuse=face_reuse,
+                        preview_latent_dir=faces_preview_dir,
                     )
                     if faces_path.is_file():
                         # Replace the clip file with the repaired version.
@@ -1572,7 +1607,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         except OSError:
                             pass
                         clip.label = (clip.label or "CURRENT") + "+Faces"
-                        state.save_index()
+                        clip.bytes = dest.stat().st_size if dest.is_file() else clip.bytes
+                        faces_applied = True
                         await state.emit(
                             run_id,
                             {
@@ -1604,6 +1640,37 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                             "clip_id": clip.id,
                         },
                     )
+                finally:
+                    if faces_watcher is not None:
+                        faces_watcher.stop(cleanup=False)
+                    state.engine.clear_preview_latent_dumps()
+                    _purge_preview_stem(faces_stem)
+
+            clip.status = RunStatus.DONE.value
+            clip.elapsed_s = round(time.time() - t0, 2)
+            clip.bytes = dest.stat().st_size if dest.is_file() else size
+            clip.video_url = state.clip_url(clip.filename)
+            thumb_url = ""
+            if dest.is_file() and media_available():
+                poster = await asyncio.to_thread(ensure_video_poster, dest)
+                if poster is not None:
+                    thumb_url = state.clip_thumb_url(clip.filename)
+            state.save_index()
+            await state.emit(
+                run_id,
+                {
+                    "type": "clip_done",
+                    "clip_id": clip.id,
+                    "video_url": clip.video_url,
+                    "thumb_url": thumb_url,
+                    "bytes": clip.bytes,
+                    "filename": clip.filename,
+                    "chain_id": clip.chain_id,
+                    "faces": faces_applied,
+                },
+            )
+            _purge_preview_stem(preview_stem)
+            done_paths.append(dest)
             # Post-hoc Lanczos "upscale" retired — creates a timeline twin without
             # real detail. Latent upscale (Continuity two-pass) is the future path.
             if run.autocontinue and i < len(run.prompts) - 1 and media_available():
@@ -1718,15 +1785,28 @@ def create_app(
                 pass
 
         # Preview weights are tiny (~22 MB) and required for live denoise previews.
-        def _boot_taeh3() -> None:
+        # Also adopt any on-disk MLX SAM pack so Faces upgrades need no click.
+        def _boot_light_models() -> None:
+            try:
+                from h3_ssl import ensure_ssl_certs
+
+                ensure_ssl_certs()
+            except Exception:
+                log.exception("background SSL bootstrap failed")
             try:
                 from h3_preview import ensure_taeh3
 
                 ensure_taeh3(model_dir=state.engine.model_dir)
             except Exception:
                 log.exception("background taeh3 ensure failed")
+            try:
+                from h3_sam import adopt_local_sam3
 
-        loop.run_in_executor(None, _boot_taeh3)
+                adopt_local_sam3(state.engine.model_dir)
+            except Exception:
+                log.exception("background SAM adopt failed")
+
+        loop.run_in_executor(None, _boot_light_models)
         yield
         state.engine.shutdown(wait=True)
 
@@ -1943,6 +2023,8 @@ def create_app(
         note = f"Native h3.c Metal. Model dir: {state.engine.model_dir}."
         if not info.get("ok"):
             note += f" Engine: {info.get('error') or 'not ready'}."
+        fl_ok, fl_note = model_layout_ok(state.engine.model_dir)
+        r2_ok, _ = model_layout_ok(state.engine.model_dir, need_ref2va=True)
         return {
             "server_connected": True,
             "embedded": state.embedded,
@@ -1952,6 +2034,9 @@ def create_app(
             "engine_error": None if info.get("ok") else info.get("error"),
             "h3_bin": str(state.engine.h3_bin),
             "model_dir": str(state.engine.model_dir),
+            "models_ready": bool(fl_ok),
+            "ref2va_ready": bool(r2_ok),
+            "models_note": None if fl_ok else (fl_note or "Download FL2VA from Models to generate."),
             "ram_gb": gb,
             "recommend_ssd_streaming": ssd,
             "metal4": bool(info.get("metal4")),
@@ -2313,6 +2398,19 @@ def create_app(
             from h3_ssl import ensure_ssl_certs
 
             ensure_ssl_certs()
+            expected = EXPECTED_BYTES.get(component, 0)
+            if expected > 0:
+                try:
+                    free = shutil.disk_usage(str(model_dir)).free
+                except OSError:
+                    free = shutil.disk_usage(str(Path.home())).free
+                # Leave ~2 GB headroom beyond the component estimate.
+                need = int(expected * 1.05) + 2 * 1024**3
+                if free < need:
+                    raise RuntimeError(
+                        f"Not enough free disk for {component}: "
+                        f"need ~{need / 1024**3:.0f} GB, have {free / 1024**3:.0f} GB free."
+                    )
             if component == "taeh3":
                 from h3_preview import download_taeh3
 

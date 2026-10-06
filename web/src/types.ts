@@ -52,6 +52,10 @@ export interface Config {
   engine_error?: string | null;
   h3_bin?: string;
   model_dir?: string;
+  /** True when FL2VA layout is complete enough to generate. */
+  models_ready?: boolean;
+  ref2va_ready?: boolean;
+  models_note?: string | null;
   ram_gb?: number | null;
   recommend_ssd_streaming?: boolean;
   metal4?: boolean;

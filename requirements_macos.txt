@@ -14,6 +14,8 @@ safetensors>=0.4
 mlx>=0.22
 mlx-vlm>=0.4.3
 Pillow>=10.0
+# Faces crop / composite + Inspect Haar fallback (cv2 data files must ship in .app)
+opencv-python-headless>=4.8
 
 # Packaging (build hosts / CI only — also listed here for one-file install)
 pyinstaller>=6.0

@@ -51,11 +51,29 @@ class SamDetectError(RuntimeError):
 
 
 def sam3_root(model_dir: Path | None = None) -> Path:
+    """Writable SAM 3.1 pack root (sibling of MiniMax-H3 under models/).
+
+    Never resolves to a CWD-relative ``models/sam3.1`` — frozen apps run with
+    an opaque working directory and must land weights under App Support.
+    """
     if model_dir is None:
-        model_dir = Path(os.environ.get("H3_MODEL_DIR", "models/MiniMax-H3"))
+        from h3_paths import default_model_dir
+
+        env = os.environ.get("H3_MODEL_DIR", "").strip()
+        model_dir = Path(env).expanduser() if env else default_model_dir()
+    else:
+        model_dir = Path(model_dir).expanduser()
+    # Standard layout: …/models/MiniMax-H3 → …/models/sam3.1
     if model_dir.name.upper().startswith("MINIMAX") or model_dir.name == "MiniMax-H3":
         return (model_dir.parent / SAM31_DIRNAME).resolve()
-    return (Path("models") / SAM31_DIRNAME).resolve()
+    if model_dir.name == "models":
+        return (model_dir / SAM31_DIRNAME).resolve()
+    # Custom model_dir: keep SAM next to it under a models/ sibling when possible.
+    if model_dir.parent.name == "models":
+        return (model_dir.parent / SAM31_DIRNAME).resolve()
+    from h3_paths import writable_root
+
+    return (writable_root() / "models" / SAM31_DIRNAME).resolve()
 
 
 def mlx_weight_path(model_dir: Path | None = None) -> Path | None:
@@ -300,9 +318,17 @@ def _get_predictor(model_dir: Path | None = None) -> Any:
             f"Open Models and download SAM 3.1 ({SAM31_REPO})."
         )
     if not _try_import_mlx_sam():
+        from h3_paths import is_frozen
+
+        if is_frozen():
+            raise SamDetectError(
+                "SAM 3.1 runtime is missing from this H3-WS build. "
+                "Update to the latest release from GitHub Releases, then retry Faces."
+            )
         raise SamDetectError(
             "mlx_vlm SAM 3.1 runtime unavailable. "
-            "Install mlx-vlm (>=0.4.3) into the H3-WS Python environment."
+            "Install mlx-vlm (>=0.4.3) into the H3-WS Python environment "
+            "(see requirements_macos.txt)."
         )
 
     key = str(root.resolve())

@@ -37,8 +37,11 @@ def test_faces_pass_uses_ref2va_refs(tmp_path: Path) -> None:
     captured: list[GenerateRequest] = []
 
     class FakeEngine:
-        def generate(self, req: GenerateRequest) -> dict:
+        def generate(self, req: GenerateRequest, *, on_progress=None) -> dict:
             captured.append(req)
+            if on_progress:
+                on_progress({"stage": "denoise", "step": 1, "total": 4, "pct": 25.0})
+                on_progress({"stage": "denoise", "step": 4, "total": 4, "pct": 100.0})
             # Echo init video as "refined" so composite has frames.
             from shutil import copy2
 
@@ -62,6 +65,11 @@ def test_faces_pass_uses_ref2va_refs(tmp_path: Path) -> None:
         count = len(frames)
         return [box] * count, [True] * count
 
+    events: list[tuple[str, dict]] = []
+
+    def _on_progress(phase: str, extra: dict) -> None:
+        events.append((phase, extra))
+
     fp.track_faces_in_clip = _fake_track  # type: ignore[assignment]
     try:
         run_faces_pass(
@@ -72,6 +80,8 @@ def test_faces_pass_uses_ref2va_refs(tmp_path: Path) -> None:
             settings=FacesSettings(canvas=384, denoise=0.45, seed=7, abstain=False),
             refs=refs,
             confirmed_boxes=boxes,
+            on_progress=_on_progress,
+            preview_latent_dir=tmp_path / "preview",
         )
     finally:
         fp.track_faces_in_clip = original  # type: ignore[assignment]
@@ -85,6 +95,14 @@ def test_faces_pass_uses_ref2va_refs(tmp_path: Path) -> None:
     assert req.init_video is not None
     assert req.denoise_strength is not None
     assert 0.0 < float(req.denoise_strength) < 1.0
+    assert req.preview_latent_dir == tmp_path / "preview"
+    window_events = [e for e in events if e[0] == "faces_window"]
+    assert window_events, "faces_window progress never emitted"
+    assert any(
+        isinstance(extra.get("model_progress"), dict)
+        and extra["model_progress"].get("step") == 4
+        for _, extra in window_events
+    ), "nested denoise progress was not forwarded"
 
 
 def test_faces_pass_abstain_leaves_as_is(tmp_path: Path) -> None:

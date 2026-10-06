@@ -40,6 +40,7 @@ def ensure_writable_tree() -> Path:
     root = writable_root()
     for rel in (
         "models/MiniMax-H3",
+        "models/sam3.1",
         "models/vae_approx",
         "models/loras",
         "web_outputs",

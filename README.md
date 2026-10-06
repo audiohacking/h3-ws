@@ -14,7 +14,7 @@ Local **MiniMax-H3** video+audio generation on Apple Silicon (Metal), driven by 
 1. Open [**Releases**](https://github.com/audiohacking/h3-ws/releases) and download the latest **H3-WS-macOS.dmg** (or `.app` zip if attached).
 2. Open the DMG and drag **H3-WS.app** into Applications.
 3. First launch: **right-click → Open → Open** (ad-hoc signed / not notarized — Gatekeeper may warn).
-4. **Weights:** on first launch, point at an existing `models/MiniMax-H3` or use the in-app **Models** panel
+4. **Weights:** on first launch, point at an existing `models/MiniMax-H3` or use the in-app **Models** panel (opens automatically when weights are missing). TAEH3 preview weights and SAM 3.1 (Faces) download themselves when needed.
 
 Logs: `~/Library/Logs/H3-WS/`.
 

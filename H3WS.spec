@@ -44,19 +44,27 @@ if (scripts_dir / "download_model.py").is_file():
 if (third_party / "taehv.py").is_file():
     datas.append((str(third_party / "taehv.py"), "third_party"))
 
-# VERSION stamp for About / diagnostics
+# VERSION stamp for About / diagnostics / update check
 version_file = spec_root / "VERSION"
+bundle_version = "0.0.11"
 if version_file.is_file():
     datas.append((str(version_file), "."))
+    try:
+        raw = version_file.read_text(encoding="utf-8").strip().lstrip("vV")
+        raw = raw.split("-", 1)[0].strip()
+        if raw:
+            bundle_version = raw
+    except OSError:
+        pass
 
-# Native extension libs
-for pkg in ("av", "tokenizers"):
+# Native extension libs + package data needed at runtime in the .app
+for pkg in ("av", "tokenizers", "mlx", "cv2"):
     try:
         binaries += collect_dynamic_libs(pkg)
     except Exception as exc:
         print(f"[H3WS.spec] collect_dynamic_libs({pkg}): {exc}")
 
-for pkg in ("av", "certifi", "huggingface_hub"):
+for pkg in ("av", "certifi", "huggingface_hub", "mlx", "mlx_vlm", "cv2", "transformers"):
     try:
         datas += collect_data_files(pkg)
     except Exception as exc:
@@ -106,12 +114,23 @@ hiddenimports = [
     "h3_console",
     "torch",
     "safetensors",
+    "cv2",
     "mlx",
+    "mlx.core",
     "mlx_vlm",
+    "mlx_vlm.utils",
+    "mlx_vlm.models.sam3.generate",
+    "mlx_vlm.models.sam3_1.processing_sam3_1",
     *collect_submodules("uvicorn"),
     *collect_submodules("fastapi"),
     *collect_submodules("starlette"),
 ]
+# Faces SAM needs the full mlx_vlm model tree; collect_submodules is best-effort.
+for pkg in ("mlx", "mlx_vlm", "mlx_lm"):
+    try:
+        hiddenimports += collect_submodules(pkg)
+    except Exception as exc:
+        print(f"[H3WS.spec] collect_submodules({pkg}): {exc}")
 
 a = Analysis(
     ["h3_desktop.py"],
@@ -177,8 +196,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "H3-WS",
         "CFBundleDisplayName": "H3-WS",
-        "CFBundleShortVersionString": "0.1.0",
-        "CFBundleVersion": "0.1.0",
+        "CFBundleShortVersionString": bundle_version,
+        "CFBundleVersion": bundle_version,
         "CFBundleExecutable": "H3-WS",
         "CFBundlePackageType": "APPL",
         "NSHighResolutionCapable": True,

@@ -90,3 +90,11 @@ def test_adopt_hf_mlx_snapshot(tmp_path: Path, monkeypatch):
 def test_sam3_root_sibling():
     root = sam3_root(Path("/tmp/models/MiniMax-H3"))
     assert root.name == "sam3.1"
+    assert root.parent.name == "models"
+
+
+def test_sam3_root_custom_uses_writable(tmp_path: Path, monkeypatch):
+    """Non-MiniMax model_dir must not fall back to CWD-relative models/sam3.1."""
+    monkeypatch.setattr("h3_paths.writable_root", lambda: tmp_path / "appsupport")
+    root = sam3_root(tmp_path / "elsewhere" / "weights")
+    assert root == (tmp_path / "appsupport" / "models" / "sam3.1").resolve()

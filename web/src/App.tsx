@@ -492,6 +492,11 @@ export default function App() {
           setFacesDenoise(cfg.faces.denoise);
         }
         if (cfg.network) setNetworkSettings(cfg.network);
+        // Fresh install / upgrade with empty weights — open Models immediately.
+        if (cfg.models_ready === false) {
+          setModelsOpen(true);
+          if (cfg.models_note) setError(cfg.models_note);
+        }
         const defRes =
           cfg.resolution_presets.find((r) => r.id === "512x512") ??
           cfg.resolution_presets.find(
@@ -1430,13 +1435,25 @@ export default function App() {
           const step = msg.step != null ? Number(msg.step) : null;
           const total = msg.total != null ? Number(msg.total) : null;
           if (step != null && total != null && total > 0) {
-            setProgress((prev) => ({
-              phase: prev?.phase ?? "generating",
-              message: `Preview ${step}/${total}`,
-              pct: Math.round((100 * step) / total),
-              step,
-              total,
-            }));
+            setProgress((prev) => {
+              const pct = Math.round((100 * step) / total);
+              // Keep Faces window label; only refresh step/pct from preview ticks.
+              if (prev?.phase?.startsWith("faces_")) {
+                return {
+                  ...prev,
+                  step,
+                  total,
+                  pct,
+                };
+              }
+              return {
+                phase: prev?.phase ?? "generating",
+                message: `Preview ${step}/${total}`,
+                pct,
+                step,
+                total,
+              };
+            });
           }
           return;
         }
@@ -2121,27 +2138,22 @@ export default function App() {
               facesSeed={facesSeed}
               onFacesEnabled={(v) => {
                 setFacesEnabled(v);
-                // Prefetch SAM when Faces is turned on (survives if EventSource closes).
+                // Prefetch SAM when Faces is turned on; keep the stream until
+                // complete so config.sam3_ready refreshes for the pill badge.
                 if (v && config?.faces && !config.faces.sam3_ready) {
                   const es = new EventSource(`${API}/api/models/download/stream?component=sam3`);
                   const stop = () => {
-                    es.close();
-                    void fetchConfig().then((cfg) => {
-                      setConfig(cfg);
-                    });
-                  };
-                  es.addEventListener("complete", stop);
-                  es.addEventListener("error", (ev) => {
-                    if (ev instanceof MessageEvent) stop();
-                  });
-                  // Detach UI listener; server download keeps running.
-                  window.setTimeout(() => {
                     try {
                       es.close();
                     } catch {
                       /* ignore */
                     }
-                  }, 1500);
+                    void fetchConfig().then((cfg) => setConfig(cfg));
+                  };
+                  es.addEventListener("complete", stop);
+                  es.addEventListener("error", (ev) => {
+                    if (ev instanceof MessageEvent) stop();
+                  });
                 }
               }}
               onFacesCanvas={setFacesCanvas}

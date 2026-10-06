@@ -402,6 +402,7 @@ def run_faces_pass(
     steps: int | None = None,
     layers: int | None = None,
     reuse: int | None = None,
+    preview_latent_dir: Path | None = None,
 ) -> Path:
     """Full Faces repair. Requires h3 ``--init-video`` support in the binary.
 
@@ -496,9 +497,12 @@ def run_faces_pass(
         for wi, span in enumerate(spans):
             start, end = span
             strength = window_denoise(ceiling, curve[start:end])
+            window_label = (
+                f"Faces window {wi + 1}/{len(spans)} · strength {strength:.2f} · {face_mode}"
+            )
             emit(
                 "faces_window",
-                message=f"Faces window {wi + 1}/{len(spans)} · denoise {strength:.2f} · {face_mode}",
+                message=window_label,
                 index=wi,
                 total=len(spans),
                 start=start,
@@ -530,8 +534,31 @@ def run_faces_pass(
                 denoise_strength=strength,
                 profile=False,
                 ssd_streaming=False,
+                preview_latent_dir=preview_latent_dir,
             )
-            engine.generate(req)
+
+            def _window_progress(
+                mp: dict[str, Any],
+                *,
+                _label: str = window_label,
+                _wi: int = wi,
+                _n: int = len(spans),
+                _strength: float = strength,
+                _start: int = start,
+                _end: int = end,
+            ) -> None:
+                emit(
+                    "faces_window",
+                    message=_label,
+                    index=_wi,
+                    total=_n,
+                    start=_start,
+                    end=_end,
+                    strength=_strength,
+                    model_progress=mp,
+                )
+
+            engine.generate(req, on_progress=_window_progress)
 
             refined, _, _ = decode_clip_rgb(refined_mp4)
             if refined.shape[0] != end - start:
