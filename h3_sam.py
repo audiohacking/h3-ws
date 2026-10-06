@@ -5,9 +5,9 @@ boxes (threshold 0.35, frames sampled every 4 + last), then ``faces.pick``
 keeps one track. We mirror that with Apple Silicon ``mlx_vlm`` Sam3Predictor
 against ``mlx-community/sam3.1-bf16``.
 
-**SAM is essential for Faces.** Haar is not a substitute for the repair pass —
-it misses the small/blurred heads this feature exists to fix. Inspect may still
-offer a Haar preview when SAM is unavailable, but the Faces pill stays off.
+SAM is required to *run* Faces, but it is not a core Models essential — it is
+fetched automatically the first time a Faces workflow needs it. Haar remains
+Inspect-preview-only.
 
 The ComfyUI ``sam3.1_multiplex.safetensors`` checkpoint is Continuity/Comfy's
 torch format — not the MLX pack. Linking it alone must not mark SAM ready.
@@ -256,8 +256,8 @@ def sam3_status(model_dir: Path | None = None) -> dict[str, Any]:
                     pass
 
     note = (
-        "Essential for Faces: open-vocabulary face boxes (Continuity SAM3). "
-        f"Download {SAM31_REPO} (~3.3 GB MLX)."
+        "Faces detector (open-vocab “face” boxes). Optional — auto-downloaded "
+        f"when Faces runs. {SAM31_REPO} (~3.3 GB MLX)."
     )
     if not ready and find_comfy_sam3_multiplex() is not None:
         note += (
@@ -267,12 +267,12 @@ def sam3_status(model_dir: Path | None = None) -> dict[str, Any]:
 
     return {
         "id": "sam3",
-        "label": "SAM 3.1 (Faces detector)",
+        "label": "SAM 3.1 (Faces)",
         "present": ready,
         "path": str(mlx or root),
         "size_gib": round(size / (1024 ** 3), 2),
         "note": note,
-        "essential": True,
+        "essential": False,
         "repo": SAM31_REPO,
         "backend": _active_backend_name(model_dir),
         "runtime": _try_import_mlx_sam(),

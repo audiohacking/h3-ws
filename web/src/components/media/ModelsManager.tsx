@@ -46,14 +46,18 @@ interface ModelsManagerProps {
   onPathApplied?: (status: ModelsStatus) => void;
 }
 
+const SIZE_HINT: Record<string, string> = {
+  fl2va: "~134 GB",
+  ref2va: "~62 GB",
+  taeh3: "~22 MB",
+  taomate: "~2.4 GB",
+  sam3: "~3.3 GB",
+};
+
 /**
- * Dedicated Models page. Shows what is already on disk and lets the user
- * OPTIONALLY download a missing component. Downloads are never automatic:
- * the user must click "Download". Supports resume via huggingface_hub.
- *
- * The download task lives server-side and survives client disconnects, so the
- * modal is never hard-locked: closing it just detaches the SSE stream, and
- * progress re-attaches on reopen/reload.
+ * Compact Models dialog. Fixed chrome (path + actions); only the component
+ * list scrolls. Downloads are optional except where a workflow auto-fetches
+ * (TAEH3 on launch, SAM when Faces runs).
  */
 export function ModelsManager({ api, onClose, onDownloadStateChange, onPathApplied }: ModelsManagerProps) {
   const [status, setStatus] = useState<ModelsStatus | null>(null);
@@ -64,6 +68,7 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
   const [pathDraft, setPathDraft] = useState("");
   const [pathBusy, setPathBusy] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -122,7 +127,6 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
     }
   }
 
-  /** Open (or re-attach to) an SSE stream for the given component. */
   function openProgressStream(component: string) {
     eventSourceRef.current?.close();
     setBusyId(component);
@@ -164,10 +168,6 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
     });
 
     es.addEventListener("error", (e) => {
-      // ONLY the server-sent "error" event (a MessageEvent carrying JSON) is a
-      // terminal failure. Transport-level errors arrive as ErrorEvent here but
-      // have no `data`, so we leave those to EventSource to retry — we must NOT
-      // close the stream on the first network blip, or progress dies mid-download.
       if (e instanceof MessageEvent && e.data) {
         try {
           const data = JSON.parse(e.data);
@@ -182,11 +182,9 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
       }
     });
 
-    // No es.onerror handler — EventSource auto-reconnects on transient drops.
     onDownloadStateChange?.(true);
   }
 
-  // On mount: load status, then re-attach to any in-flight server download.
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -203,15 +201,13 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
           openProgressStream(data.component);
         }
       } catch {
-        // ignore — modal stays usable on transient status failures
+        // ignore
       }
     })();
     return () => {
       cancelled = true;
       eventSourceRef.current?.close();
       eventSourceRef.current = null;
-      // The download lives server-side; releasing this flag lets App re-open the
-      // modal at any time (the flag must never stick "true" on unmount).
       onDownloadStateChange?.(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -219,33 +215,15 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
 
   function startDownload(component: ModelComponent) {
     if (busyId !== null) return;
-    const sizeHint =
-      component.id === "fl2va"
-        ? "~134 GB"
-        : component.id === "ref2va"
-          ? "~62 GB"
-          : component.id === "taomate"
-            ? "~2.4 GB"
-            : component.id === "dmad"
-              ? "~1.4 GB"
-              : component.id === "sam3"
-                ? "~3.3 GB"
-                : "~22 MB";
-    const needsConfirm =
-      component.id === "fl2va" ||
-      component.id === "ref2va" ||
-      component.id === "taomate" ||
-      component.id === "dmad" ||
-      component.id === "sam3";
+    const sizeHint = SIZE_HINT[component.id] || "~? GB";
+    const needsConfirm = component.id === "fl2va" || component.id === "ref2va" || component.id === "taomate" || component.id === "sam3";
     if (
       !component.present &&
       needsConfirm &&
       !window.confirm(
         `Download ${component.label}?\n\n` +
           `Size: ${sizeHint}.\n` +
-          (component.id === "sam3"
-            ? "May need Hugging Face login + SAM License.\n"
-            : "") +
+          (component.id === "sam3" ? "May need Hugging Face login + SAM license.\n" : "") +
           `Downloads resume if interrupted.\n\nProceed?`,
       )
     ) {
@@ -256,28 +234,25 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
     openProgressStream(component.id);
   }
 
-  /** Close is always enabled; a running download continues in the background. */
   function handleClose() {
     if (busyId !== null) {
-      if (!window.confirm(
-        "Download is still running. It will continue in the background.\n\nClose this panel?"
-      )) {
+      if (
+        !window.confirm(
+          "Download is still running. It will continue in the background.\n\nClose this panel?",
+        )
+      ) {
         return;
       }
     }
     onClose?.();
   }
 
+  const components = status?.components ?? [];
+
   return (
     <div className="models-page">
       <div className="models-page__head">
-        <div>
-          <h2 className="models-page__title">Models</h2>
-          <p className="models-page__hint">
-            Point at an existing MiniMax-H3 folder (or h3-ws clone root) to reuse weights —
-            LoRAs under models/loras are picked up automatically.
-          </p>
-        </div>
+        <h2 className="models-page__title">Models</h2>
         <div className="models-page__actions">
           <button type="button" className="btn-ghost" onClick={() => void refresh()} disabled={loading}>
             Refresh
@@ -289,13 +264,6 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
           )}
         </div>
       </div>
-
-      {status && (status.lora_dir || status.lora_count != null) && (
-        <p className="models-page__hint models-page__lora-hint">
-          LoRA folder: <code>{status.lora_dir || "—"}</code>
-          {status.lora_count != null ? ` · ${status.lora_count} on disk` : ""}
-        </p>
-      )}
 
       <div className="models-page__path">
         <label className="models-page__path-label" htmlFor="models-path-input">
@@ -333,7 +301,7 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
         </div>
         {status?.candidates && status.candidates.length > 0 && (
           <div className="models-page__candidates">
-            <span className="models-page__candidates-label">Detected:</span>
+            <span className="models-page__candidates-label">Nearby:</span>
             {status.candidates.map((c) => (
               <button
                 key={c}
@@ -350,37 +318,82 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
         )}
       </div>
 
-      {error && <div className="error-banner">{error}</div>}
+      {(status?.lora_dir || status?.lora_count != null) && (
+        <p className="models-page__meta">
+          <span>
+            LoRAs: <code>{status.lora_dir || "—"}</code>
+            {status.lora_count != null ? ` · ${status.lora_count}` : ""}
+          </span>
+          {busyId ? <span>Download continues if you close</span> : null}
+        </p>
+      )}
 
-      {loading && !status && <p className="models-page__hint">Checking local model layout…</p>}
+      {error && <div className="error-banner">{error}</div>}
+      {loading && !status && <p className="models-page__hint">Checking local layout…</p>}
 
       {status && (
-        <div className="models-page__list">
-          {status.components.map((c) => (
-            <div key={c.id} className={`model-card ${c.present ? "model-card--present" : "model-card--missing"}`}>
-              <div className="model-card__body">
-                <div className="model-card__row">
-                  <span className="model-card__label">
-                    {c.label}
-                    {c.essential ? <span className="model-card__essential"> essential</span> : null}
-                  </span>
-                  <span className={`model-card__badge ${c.present ? "model-card__badge--ok" : "model-card__badge--missing"}`}>
-                    {c.present ? "Present" : "Missing"}
-                  </span>
-                </div>
-                {c.size_gib > 0 && (
-                  <p className="model-card__size">
-                    {c.size_gib >= 1
-                      ? `${c.size_gib.toFixed(1)} GB on disk`
-                      : `${Math.max(1, Math.round(c.size_gib * 1024))} MB on disk`}
+        <div
+          className="models-page__scroll"
+          ref={listRef}
+          onWheel={(e) => e.stopPropagation()}
+        >
+          <div className="models-page__list">
+            {components.map((c) => (
+              <div
+                key={c.id}
+                className={`model-card ${c.present ? "model-card--present" : "model-card--missing"}${
+                  c.essential ? " model-card--required" : ""
+                }`}
+              >
+                <div className="model-card__body">
+                  <div className="model-card__row">
+                    <span className="model-card__label" title={c.path}>
+                      {c.label}
+                    </span>
+                    <span
+                      className={`model-card__tag ${
+                        c.essential ? "model-card__tag--required" : "model-card__tag--optional"
+                      }`}
+                    >
+                      {c.essential ? "required" : "optional"}
+                    </span>
+                    <span
+                      className={`model-card__badge ${
+                        c.present ? "model-card__badge--ok" : "model-card__badge--missing"
+                      }`}
+                    >
+                      {c.present ? "Ready" : "Missing"}
+                    </span>
+                  </div>
+                  <p className="model-card__note" title={c.note}>
+                    {c.note}
+                    {c.size_gib > 0
+                      ? ` · ${
+                          c.size_gib >= 1
+                            ? `${c.size_gib.toFixed(1)} GB`
+                            : `${Math.max(1, Math.round(c.size_gib * 1024))} MB`
+                        } on disk`
+                      : !c.present && SIZE_HINT[c.id]
+                        ? ` · ${SIZE_HINT[c.id]}`
+                        : ""}
                   </p>
-                )}
-                <p className="model-card__note">{c.note}</p>
-                <p className="model-card__path">{c.path}</p>
-
-                {/* Download progress bar */}
+                </div>
+                <div className="model-card__actions">
+                  {c.present ? (
+                    <span className="model-card__ok">✓</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      onClick={() => startDownload(c)}
+                      disabled={busyId !== null}
+                    >
+                      {busyId === c.id ? "…" : "Download"}
+                    </button>
+                  )}
+                </div>
                 {busyId === c.id && progress && (
-                  <div className="download-progress">
+                  <div className="model-card__progress download-progress">
                     <div className="download-progress__bar-container">
                       <div
                         className="download-progress__bar"
@@ -390,12 +403,13 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
                     <div className="download-progress__text">
                       <span>
                         {progress.downloaded_gb > 0 && progress.speed.startsWith("resuming") ? (
-                          <span className="download-progress__percent">Resuming {progress.downloaded_gb.toFixed(1)} GB…</span>
+                          <span className="download-progress__percent">
+                            Resuming {progress.downloaded_gb.toFixed(1)} GB…
+                          </span>
                         ) : progress.expected_gb > 0 && progress.expected_gb < 0.1 ? (
                           <>
                             <span className="download-progress__percent">{progress.percent}%</span>
-                            {" · "}
-                            ~{(progress.expected_gb * 1024).toFixed(0)} MB
+                            {" · "}~{(progress.expected_gb * 1024).toFixed(0)} MB
                           </>
                         ) : (
                           <>
@@ -410,33 +424,13 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
                   </div>
                 )}
               </div>
-              <div className="model-card__actions">
-                {c.present ? (
-                  <span className="model-card__ok">Ready</span>
-                ) : (
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    onClick={() => startDownload(c)}
-                    disabled={busyId !== null}
-                  >
-                    {busyId === c.id ? "Downloading…" : "Download"}
-                  </button>
-                )}
-              </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       )}
 
       {!loading && !status && !error && (
         <p className="models-page__hint">No model status available.</p>
-      )}
-
-      {busyId && (
-        <p className="models-page__hint" style={{ marginTop: 8 }}>
-          💡 Downloads resume automatically if interrupted. You can close this window.
-        </p>
       )}
     </div>
   );

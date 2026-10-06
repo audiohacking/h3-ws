@@ -27,14 +27,13 @@ export function FacesPill({
   onSeed,
 }: FacesPillProps) {
   const [open, setOpen] = useState(false);
+  const canEnable = Boolean(config?.available);
   const samReady = Boolean(config?.sam3_ready);
-  // Continuity: SAM is essential — Faces stays off until MLX SAM 3.1 is ready.
-  const canEnable = Boolean(config?.available) && samReady;
   const title = !config
     ? "Faces"
     : !samReady
-      ? "Download SAM 3.1 in Models first (required face detector)"
-      : "Continuity face pass — SAM detect, refine with your Ref2VA refs";
+      ? "Faces — SAM 3.1 downloads automatically when you generate"
+      : "Face refine — SAM detect, re-draw with your Ref2VA refs";
 
   return (
     <div className={`faces-pill${enabled ? " is-on" : ""}${open ? " is-open" : ""}`}>
@@ -50,6 +49,7 @@ export function FacesPill({
         }}
       >
         Faces
+        {!samReady && enabled ? <span className="faces-pill__badge">SAM</span> : null}
       </button>
       <button
         type="button"
@@ -99,7 +99,7 @@ export function FacesPill({
           </label>
           <p className="faces-pill__hint">
             {config?.note ||
-              "End-of-run face refine. Reuses your Ref2VA picture/video/audio refs. Audio remuxed."}
+              "End-of-run face refine. SAM downloads on first Faces run if needed."}
           </p>
         </div>
       )}

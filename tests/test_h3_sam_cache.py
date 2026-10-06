@@ -42,7 +42,7 @@ def test_comfy_multiplex_alone_is_not_ready(tmp_path: Path, monkeypatch):
     assert not sam3_ready(models / "MiniMax-H3")
     st = sam3_status(models / "MiniMax-H3")
     assert st["present"] is False
-    assert st["essential"] is True
+    assert st["essential"] is False
 
 
 def test_sam3_ready_with_mlx_pack(tmp_path: Path, monkeypatch):

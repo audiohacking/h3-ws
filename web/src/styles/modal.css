@@ -18,6 +18,13 @@
   justify-content: center;
   padding: var(--space-7);
   animation: modal-fade-in 0.2s ease;
+  /* Keep wheel / touch from scrolling the page behind the dialog. */
+  overscroll-behavior: none;
+  touch-action: none;
+}
+
+body.modal-open {
+  overflow: hidden;
 }
 
 @keyframes modal-fade-in {
@@ -63,14 +70,20 @@
   max-height: calc(100vh - var(--space-7) * 2);
 }
 
-/* Models panel: stretch the manager so its own overflow-y can scroll. */
+/* Models: sized dialog (not page-filling), list scrolls inside. */
 .models-modal {
+  width: min(560px, calc(100vw - var(--space-7) * 2));
+  max-width: min(560px, calc(100vw - var(--space-7) * 2));
+  height: min(640px, calc(100vh - var(--space-7) * 2));
+  max-height: min(640px, calc(100vh - var(--space-7) * 2));
   min-height: 0;
+  touch-action: auto;
 }
 
 .models-modal > .models-page {
   flex: 1 1 auto;
   min-height: 0;
+  height: 100%;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────

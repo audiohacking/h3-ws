@@ -2201,6 +2201,21 @@ body {
   padding: 4px 8px;
   cursor: pointer;
 }
+.faces-pill__main {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.faces-pill__badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.2);
+  color: #f59e0b;
+}
 .faces-pill__gear {
   padding-left: 2px;
   opacity: 0.7;

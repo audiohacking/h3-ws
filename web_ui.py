@@ -1480,6 +1480,22 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                             "clip_id": clip.id,
                         },
                     )
+                    from h3_sam import SamDownloadError, download_sam3, sam3_ready
+
+                    if not sam3_ready(state.engine.model_dir):
+                        await state.emit(
+                            run_id,
+                            {
+                                "type": "progress",
+                                "phase": "faces_detect",
+                                "message": "Downloading SAM 3.1 for Faces…",
+                                "clip_id": clip.id,
+                            },
+                        )
+                        try:
+                            await asyncio.to_thread(download_sam3, state.engine.model_dir)
+                        except SamDownloadError as exc:
+                            raise FaceError(str(exc)) from exc
                     faces_name = f"{Path(clip.filename).stem}_faces.mp4"
                     faces_path = state.output_dir / faces_name
                     fsettings = FacesSettings(
@@ -1759,8 +1775,8 @@ def create_app(
 
         ready = sam3_ready(app_state.engine.model_dir)
         return {
-            # Continuity parity: Faces is only available when SAM 3.1 can detect.
-            "available": ready,
+            # Faces is always selectable; SAM is fetched when the pass runs.
+            "available": True,
             "sam3_ready": ready,
             "backend": _active_backend_name(app_state.engine.model_dir),
             "enabled_default": False,
@@ -1772,8 +1788,8 @@ def create_app(
             "denoise_max": MAX_FACE_DENOISE,
             "abstain_px": ABSTAIN_FACE_PX,
             "note": (
-                "Continuity face pass: SAM detects → crop → low-denoise re-draw "
-                "with your Ref2VA refs → paste. Requires SAM 3.1 (Models)."
+                "End-of-run face refine. SAM 3.1 downloads automatically the first "
+                "time Faces runs (~3.3 GB MLX)."
             ),
         }
 
@@ -2005,10 +2021,6 @@ def create_app(
         tao_spec = str(tao["spec"]) if tao else ""
         tao_path = lora_cached_path(tao_spec) if tao_spec else None
         tao_ok = tao_path is not None and tao_path.is_file()
-        dmad = next((p for p in BUILTIN_LORAS if p.get("id") == "dmad_h3_4step"), None)
-        dmad_spec = str(dmad["spec"]) if dmad else ""
-        dmad_path = lora_cached_path(dmad_spec) if dmad_spec else None
-        dmad_ok = dmad_path is not None and dmad_path.is_file()
         from h3_sam import sam3_status
 
         components = [
@@ -2018,7 +2030,7 @@ def create_app(
                 "present": fl_ok,
                 "path": str(fl),
                 "size_gib": round(_dir_gib(fl), 1),
-                "note": "Required for t2va / first / last frame generation.",
+                "note": "Required for text-to-video and first/last-frame modes.",
                 "essential": True,
             },
             {
@@ -2027,8 +2039,8 @@ def create_app(
                 "present": r2_ok,
                 "path": str(r2),
                 "size_gib": round(_dir_gib(r2), 1),
-                "note": "Required for reference (image/video) modes.",
-                "essential": False,
+                "note": "Required for reference modes (image / video / audio).",
+                "essential": True,
             },
             {
                 "id": "taeh3",
@@ -2036,34 +2048,16 @@ def create_app(
                 "present": tae_ok,
                 "path": str(tae),
                 "size_gib": round(_file_gib(tae), 3),
-                "note": (
-                    "Tiny (~22 MB) live-preview decoder. Auto-fetched on first launch; "
-                    "required for mid-run preview frames."
-                ),
+                "note": "Tiny live-preview decoder (~22 MB). Auto-fetched on launch.",
                 "essential": True,
             },
             {
                 "id": "taomate",
-                "label": "TaoMate H3 3-step turbo",
+                "label": "TaoMate turbo",
                 "present": tao_ok,
                 "path": str(tao_path) if tao_path else tao_spec,
                 "size_gib": round(_file_gib(tao_path), 2) if tao_path else 2.4,
-                "note": (
-                    "Preferred turbo/distill LoRA (~2.4 GB). Enables the 3-step turbo "
-                    "path in the composer."
-                ),
-                "essential": False,
-            },
-            {
-                "id": "dmad",
-                "label": "DMAD H3 4-step turbo",
-                "present": dmad_ok,
-                "path": str(dmad_path) if dmad_path else dmad_spec,
-                "size_gib": round(_file_gib(dmad_path), 2) if dmad_path else 1.4,
-                "note": (
-                    "ZhengmingYu/DMAD 4-step FL2VA/T2VA student (~1.4 GB). Converted "
-                    "to native qkv_proj for h3.c; pair with the Four-step quality preset."
-                ),
+                "note": "3-step turbo LoRA (~2.4 GB). Optional — enables Turbo quality.",
                 "essential": False,
             },
             sam3_status(model_dir),
@@ -2210,15 +2204,15 @@ def create_app(
         "ref2va": 61.7 * 1024**3,   # ~62 GB (transformer only)
         "taeh3": 22 * 1024**2,      # ~22 MB
         "taomate": 2.4 * 1024**3,   # ~2.4 GB
-        "dmad": 1.4 * 1024**3,      # ~1.4 GB
+        "dmad": 1.4 * 1024**3,      # API-compat only (not listed in Models UI)
         "sam3": 3.3 * 1024**3,      # ~3.3 GB mlx-community/sam3.1-bf16
     }
-    _DOWNLOAD_COMPONENT_HELP = "fl2va, ref2va, taeh3, taomate, dmad, sam3"
+    _DOWNLOAD_COMPONENT_HELP = "fl2va, ref2va, taeh3, taomate, sam3"
 
     _COMPONENT_DIR = {"fl2va": "FL2VA", "ref2va": "Ref2VA"}
-    _LIGHT_COMPONENTS = frozenset({"taeh3", "taomate", "dmad", "sam3"})
+    _LIGHT_COMPONENTS = frozenset({"taeh3", "taomate", "sam3"})
     _ALL_DOWNLOAD_COMPONENTS = frozenset(
-        {"fl2va", "ref2va", "taeh3", "taomate", "dmad", "sam3"}
+        {"fl2va", "ref2va", "taeh3", "taomate", "sam3", "dmad"}
     )
 
     def _sum_hf_local_progress(root: Path) -> tuple[int, int]:
@@ -3236,6 +3230,14 @@ def create_app(
                 raise HTTPException(409, "engine is busy")
             state._active_run_id = f"faces:{clip_id}"
             try:
+                from h3_sam import SamDownloadError, download_sam3, sam3_ready
+
+                if not sam3_ready(state.engine.model_dir):
+                    console_h3("faces downloading SAM 3.1…")
+                    try:
+                        await asyncio.to_thread(download_sam3, state.engine.model_dir)
+                    except SamDownloadError as exc:
+                        raise HTTPException(400, str(exc)) from exc
                 await asyncio.to_thread(
                     run_faces_pass,
                     path,

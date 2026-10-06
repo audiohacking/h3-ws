@@ -490,7 +490,6 @@ export default function App() {
         if (cfg.faces) {
           setFacesCanvas(cfg.faces.canvas);
           setFacesDenoise(cfg.faces.denoise);
-          if (!cfg.faces.sam3_ready) setFacesEnabled(false);
         }
         if (cfg.network) setNetworkSettings(cfg.network);
         const defRes =
@@ -1066,6 +1065,13 @@ export default function App() {
     setModelsOpen(true);
   }
 
+  // Lock page scroll while the Models dialog is open (list scrolls inside).
+  useEffect(() => {
+    if (!modelsOpen) return;
+    document.body.classList.add("modal-open");
+    return () => document.body.classList.remove("modal-open");
+  }, [modelsOpen]);
+
   // Backdrop click / close request: if a download is running, surface a
   // confirmation (the server task survives), otherwise close.
   function closeModels() {
@@ -1609,13 +1615,13 @@ export default function App() {
     if (res?.render_width) body.render_width = res.render_width;
     if (res?.render_height) body.render_height = res.render_height;
     if (opts.seed.trim() !== "") body.seed = Number(opts.seed);
-    if (facesEnabled && config?.faces?.sam3_ready) {
+    if (facesEnabled) {
       body.faces = {
         enabled: true,
         canvas: facesCanvas,
         denoise: facesDenoise,
         seed: facesSeed,
-        abstain: true,
+        abstain: false,
       };
     }
     if (ref2va) {
@@ -2113,7 +2119,31 @@ export default function App() {
               facesCanvas={facesCanvas}
               facesDenoise={facesDenoise}
               facesSeed={facesSeed}
-              onFacesEnabled={setFacesEnabled}
+              onFacesEnabled={(v) => {
+                setFacesEnabled(v);
+                // Prefetch SAM when Faces is turned on (survives if EventSource closes).
+                if (v && config?.faces && !config.faces.sam3_ready) {
+                  const es = new EventSource(`${API}/api/models/download/stream?component=sam3`);
+                  const stop = () => {
+                    es.close();
+                    void fetchConfig().then((cfg) => {
+                      setConfig(cfg);
+                    });
+                  };
+                  es.addEventListener("complete", stop);
+                  es.addEventListener("error", (ev) => {
+                    if (ev instanceof MessageEvent) stop();
+                  });
+                  // Detach UI listener; server download keeps running.
+                  window.setTimeout(() => {
+                    try {
+                      es.close();
+                    } catch {
+                      /* ignore */
+                    }
+                  }, 1500);
+                }
+              }}
               onFacesCanvas={setFacesCanvas}
               onFacesDenoise={setFacesDenoise}
               onFacesSeed={setFacesSeed}
@@ -2304,9 +2334,9 @@ export default function App() {
                     title={
                       config?.faces?.sam3_ready
                         ? "Run Faces repair (SAM detect + Ref2VA refs)"
-                        : "Download SAM 3.1 in Models first"
+                        : "Run Faces — SAM 3.1 downloads automatically if needed"
                     }
-                    disabled={busy || !config?.faces?.sam3_ready}
+                    disabled={busy}
                     onClick={(e) => {
                       e.stopPropagation();
                       void (async () => {
