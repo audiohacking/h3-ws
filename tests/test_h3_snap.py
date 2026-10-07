@@ -246,10 +246,12 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--render-width") + 1], "384")
 
     def test_int8_row_fc2_not_combined_with_ssd(self) -> None:
-        from h3_backend import metal4_gpu, resolve_int8_row_fc2
+        from h3_backend import apple_silicon_class, metal4_gpu, resolve_int8_row_fc2
 
         self.assertTrue(metal4_gpu("Apple M5 Max"))
         self.assertFalse(metal4_gpu("Apple M3 Max"))
+        self.assertEqual(apple_silicon_class("Apple M5 Ultra"), "m5")
+        self.assertEqual(apple_silicon_class("Apple M3 Ultra"), "m3")
         req = GenerateRequest(prompt="x", output_path=Path("/tmp/out.mp4"), ssd_streaming=True)
         self.assertFalse(resolve_int8_row_fc2(req, metal4=True))
         req = GenerateRequest(
@@ -263,6 +265,83 @@ class QualityTests(unittest.TestCase):
         argv = build_h3_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
         self.assertNotIn("--use-int8-row-fc2", argv)
         self.assertIn("--ssd-streaming", argv)
+
+    def test_m5_generate_forces_bf16_close_path(self) -> None:
+        from h3_backend import apply_platform_generate_defaults
+
+        req = GenerateRequest(
+            prompt="scene with a face",
+            output_path=Path("/tmp/out.mp4"),
+            width=512,
+            height=512,
+            quality="fast",
+            int8_row_fc2=False,
+        )
+        apply_platform_generate_defaults(req, chip_class="m5")
+        self.assertFalse(req.int8_row_fc2)
+        self.assertTrue(req.use_slower_bf16_mlp)
+        self.assertTrue(req.use_slower_bf16_qkv)
+        self.assertTrue(req.use_slower_bf16_attention_output)
+        # Main gen keeps quality-preset render (fast@512 → 384).
+        self.assertIsNone(req.render_width)
+        argv = build_h3_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
+        self.assertNotIn("--use-int8-row-fc2", argv)
+        self.assertIn("--use-slower-bf16-mlp", argv)
+        self.assertIn("--token-reduction", argv)
+
+    def test_m5_init_video_also_forces_native_canvas(self) -> None:
+        from h3_backend import apply_platform_generate_defaults
+
+        req = GenerateRequest(
+            prompt="face",
+            output_path=Path("/tmp/out.mp4"),
+            width=512,
+            height=512,
+            quality="fast",
+            init_video=Path("/tmp/init.mp4"),
+            denoise_strength=0.45,
+        )
+        apply_platform_generate_defaults(req, chip_class="m5")
+        self.assertFalse(req.token_reduction)
+        self.assertEqual(req.render_width, 512)
+        argv = build_h3_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
+        self.assertIn("--use-slower-bf16-mlp", argv)
+        self.assertNotIn("--token-reduction", argv)
+
+    def test_m3_generate_unchanged(self) -> None:
+        from h3_backend import apply_platform_generate_defaults
+
+        req = GenerateRequest(
+            prompt="face",
+            output_path=Path("/tmp/out.mp4"),
+            width=512,
+            height=512,
+            quality="fast",
+            int8_row_fc2=False,
+        )
+        apply_platform_generate_defaults(req, chip_class="m3")
+        self.assertFalse(req.use_slower_bf16_mlp)
+        self.assertIsNone(req.token_reduction)
+        argv = build_h3_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
+        self.assertIn("--token-reduction", argv)
+        self.assertEqual(argv[argv.index("--render-width") + 1], "384")
+        self.assertNotIn("--use-slower-bf16-mlp", argv)
+
+    def test_m5_explicit_int8_opt_in_skips_bf16(self) -> None:
+        from h3_backend import apply_platform_generate_defaults
+
+        req = GenerateRequest(
+            prompt="x",
+            output_path=Path("/tmp/out.mp4"),
+            int8_row_fc2=True,
+        )
+        apply_platform_generate_defaults(
+            req, chip_class="m5", explicit_int8_row_fc2=True
+        )
+        self.assertTrue(req.int8_row_fc2)
+        self.assertFalse(req.use_slower_bf16_mlp)
+        argv = build_h3_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
+        self.assertIn("--use-int8-row-fc2", argv)
 
     def test_256_preview_disables_token_reduction(self) -> None:
         req = GenerateRequest(

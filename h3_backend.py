@@ -433,12 +433,82 @@ def metal4_gpu(brand: str | None = None) -> bool:
     return bool(re.search(r"\bM(?:5|6|7)\b", text))
 
 
+def apple_silicon_class(brand: str | None = None) -> str:
+    """Product chip class for path selection: ``m5`` | ``m3`` | ``other``.
+
+    ``m5`` covers M5/M6/M7 (TensorOps + default int8 DiT). ``m3`` is the
+    portable BF16 / MPSGraph path that already matches Continuity quality.
+    """
+    text = brand if brand is not None else apple_chip_brand()
+    if re.search(r"\bM(?:5|6|7)\b", text):
+        return "m5"
+    if re.search(r"\bM(?:3|4)\b", text):
+        return "m3"
+    return "other"
+
+
 def resolve_int8_row_fc2(req: "GenerateRequest", *, metal4: bool) -> bool:
+    """Resolve ``--use-int8-row-fc2``. Default off — M5 product path is BF16.
+
+    ``metal4`` is kept for call-site compatibility; row-FC2 is opt-in via
+    ``req.int8_row_fc2 is True`` (speed experiments), not auto-on for M5.
+    """
+    del metal4  # product default no longer follows chip brand
     if req.ssd_streaming:
         return False
     if req.int8_row_fc2 is not None:
         return bool(req.int8_row_fc2)
-    return bool(metal4)
+    return False
+
+
+def apply_platform_generate_defaults(
+    req: "GenerateRequest",
+    *,
+    chip_class: str | None = None,
+    explicit_int8_row_fc2: bool | None = None,
+) -> "GenerateRequest":
+    """Apply chip-optimal h3.c settings. **M3 / non-M5: no-op.**
+
+    M5's default int8 DiT (MLP/QKV/attn + row-FC2) deforms faces in normal
+    Ref2VA/FL2VA output — not only the Faces post-pass. Product default on M5
+    is therefore the close-reference BF16 stack (same math class as M3 Ultra).
+    Pass ``explicit_int8_row_fc2=True`` to keep the fast int8 path for A/B.
+    """
+    klass = chip_class if chip_class is not None else apple_silicon_class()
+    if klass != "m5":
+        return req
+    if explicit_int8_row_fc2 is True:
+        # Caller opted into the M5 speed path — do not force BF16.
+        return req
+
+    req.int8_row_fc2 = False
+    req.use_slower_bf16_mlp = True
+    req.use_slower_bf16_qkv = True
+    req.use_slower_bf16_attention_output = True
+    # init-video / Faces crops: also kill fast@512 → 384 + token-reduction.
+    if req.init_video is not None:
+        req.token_reduction = False
+        if req.render_width is None and req.render_height is None:
+            req.render_width = int(req.width)
+            req.render_height = int(req.height)
+        log.info(
+            "M5 init-video: close-reference BF16 "
+            "(native %sx%s, no token-reduction)",
+            req.width,
+            req.height,
+        )
+    else:
+        log.info("M5 generate: close-reference BF16 (no int8-row-fc2)")
+    return req
+
+
+def m5_close_path_env(req: "GenerateRequest", env: dict[str, str]) -> dict[str, str]:
+    """CPU Euler sampler on M5 when using the BF16 close path (Ultra parity)."""
+    if not req.use_slower_bf16_mlp or apple_silicon_class() != "m5":
+        return env
+    out = dict(env)
+    out.setdefault("H3_CPU_SAMPLER", "1")
+    return out
 
 
 def fl2va_dir(model_dir: Path) -> Path:
@@ -757,6 +827,11 @@ class GenerateRequest:
     seed: int | None = None
     ssd_streaming: bool = False
     int8_row_fc2: bool | None = None
+    # Close-reference BF16 DiT (M5 Faces / diagnostics). Mutually exclusive
+    # with --use-int8-row-fc2 in h3.c.
+    use_slower_bf16_mlp: bool = False
+    use_slower_bf16_qkv: bool = False
+    use_slower_bf16_attention_output: bool = False
     first_frame: Path | None = None
     last_frame: Path | None = None
     refs: list[RefItem] = field(default_factory=list)
@@ -860,6 +935,12 @@ def build_h3_argv(
         cmd.append("--ssd-streaming")
     elif req.int8_row_fc2:
         cmd.append("--use-int8-row-fc2")
+    if req.use_slower_bf16_mlp:
+        cmd.append("--use-slower-bf16-mlp")
+    if req.use_slower_bf16_qkv:
+        cmd.append("--use-slower-bf16-qkv")
+    if req.use_slower_bf16_attention_output:
+        cmd.append("--use-slower-bf16-attention-output")
     for lora in req.loras:
         cmd.extend(["--lora", f"{lora.path}:{lora.scale:.4g}"])
     if req.profile:
@@ -989,6 +1070,8 @@ class H3Engine:
             "ram_gb": ram_gb(),
             "recommend_ssd_streaming": recommend_ssd_streaming(),
             "metal4": self.metal4,
+            "chip_class": apple_silicon_class(),
+            "chip_brand": apple_chip_brand(),
             "warm_session": bool(self._session and getattr(self._session, "alive", False)),
         }
 
@@ -1045,7 +1128,13 @@ class H3Engine:
 
         req.output_path = Path(req.output_path)
         req.output_path.parent.mkdir(parents=True, exist_ok=True)
+        explicit_int8 = req.int8_row_fc2
         req.int8_row_fc2 = resolve_int8_row_fc2(req, metal4=self.metal4)
+        # M5 → BF16 close path for all gens (faces deform on default int8).
+        # M3 Ultra unchanged.
+        apply_platform_generate_defaults(
+            req, explicit_int8_row_fc2=explicit_int8
+        )
 
         # Normalize preview dumps onto the engine-owned warm dir so interactive
         # argv stays stable across jobs (web_ui must watch this same path).
@@ -1234,7 +1323,7 @@ class H3Engine:
                 h3_bin=self.h3_bin, model_dir=self.model_dir, req=req
             )
             log.info("h3 session argv: %s", " ".join(argv[:8]) + " …")
-            env = h3_media_env()
+            env = m5_close_path_env(req, h3_media_env())
             log.info("h3 muxer: %s", env.get("H3_FFMPEG") or env.get("H3_AV"))
             if req.loras:
                 log.info(
@@ -1303,7 +1392,7 @@ class H3Engine:
         if on_progress:
             on_progress(self._progress)
 
-        env = h3_media_env()
+        env = m5_close_path_env(req, h3_media_env())
         log.info("h3 muxer: %s", env.get("H3_FFMPEG") or env.get("H3_AV"))
         try:
             try:

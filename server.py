@@ -39,6 +39,8 @@ from h3_backend import (  # noqa: E402
     GenerateRequest,
     GenerationCancelledError,
     H3Engine,
+    apple_chip_brand,
+    apple_silicon_class,
     parse_refs_payload,
     ram_gb,
 )
@@ -485,8 +487,14 @@ def main() -> None:
     print(f"  Canvas   : {width}×{height}  frames={frames}  quality={args.quality}")
     if gb is not None:
         print(f"  RAM      : ~{gb:.0f} GB unified" + ("  (SSD streaming on — slower denoise)" if ssd else ""))
-    if engine.metal4:
-        print("  GPU      : Metal 4 — --use-int8-row-fc2 on")
+    chip = apple_silicon_class()
+    brand = apple_chip_brand() or "Apple Silicon"
+    if chip == "m5":
+        print(f"  GPU      : {brand} — BF16 close path (int8 opt-in; avoids M5 face melt)")
+    elif engine.metal4:
+        print(f"  GPU      : {brand} — Metal 4 class, --use-int8-row-fc2 on")
+    else:
+        print(f"  GPU      : {brand}")
     mux = real_ffmpeg()
     print(f"  Muxer    : {mux or 'h3-av (PyAV shim)'}")
     print(f"  Endpoint : {ws_url}")

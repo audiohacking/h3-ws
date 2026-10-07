@@ -171,7 +171,17 @@ def session_boot_key(req: GenerateRequest) -> tuple[Any, ...]:
     preview_path = (
         str(Path(req.preview_latent_dir).resolve()) if req.preview_latent_dir else ""
     )
-    return (family, lora_fingerprint(req), preview, preview_path, sticky)
+    return (
+        family,
+        lora_fingerprint(req),
+        preview,
+        preview_path,
+        sticky,
+        bool(req.int8_row_fc2),
+        bool(req.use_slower_bf16_mlp),
+        bool(req.use_slower_bf16_qkv),
+        bool(req.use_slower_bf16_attention_output),
+    )
 
 
 def clear_directory_contents(path: Path | None) -> None:
@@ -318,6 +328,12 @@ def build_session_argv(
         cmd.append("--ssd-streaming")
     elif req.int8_row_fc2:
         cmd.append("--use-int8-row-fc2")
+    if req.use_slower_bf16_mlp:
+        cmd.append("--use-slower-bf16-mlp")
+    if req.use_slower_bf16_qkv:
+        cmd.append("--use-slower-bf16-qkv")
+    if req.use_slower_bf16_attention_output:
+        cmd.append("--use-slower-bf16-attention-output")
     for lora in req.loras:
         cmd.extend(["--lora", f"{lora.path}:{lora.scale:.4g}"])
     if req.profile:

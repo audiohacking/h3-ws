@@ -59,6 +59,9 @@ export interface Config {
   ram_gb?: number | null;
   recommend_ssd_streaming?: boolean;
   metal4?: boolean;
+  /** ``m5`` | ``m3`` | ``other`` — drives M5 Faces BF16 close path. */
+  chip_class?: string;
+  chip_brand?: string;
   quality_presets: QualityPreset[];
   lora_presets?: LoraPreset[];
   resolution_presets: PresetOption[];

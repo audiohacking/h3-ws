@@ -2040,6 +2040,8 @@ def create_app(
             "ram_gb": gb,
             "recommend_ssd_streaming": ssd,
             "metal4": bool(info.get("metal4")),
+            "chip_class": info.get("chip_class") or "other",
+            "chip_brand": info.get("chip_brand") or "",
             "quality_presets": QUALITY_PRESET_LIST,
             "lora_presets": lora_catalog(state.output_dir),
             "resolution_presets": RESOLUTION_PRESETS,
