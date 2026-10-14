@@ -113,6 +113,15 @@ export type ComposerPanelProps = {
   onFacesCanvas?: (v: number) => void;
   onFacesDenoise?: (v: number) => void;
   onFacesSeed?: (v: number) => void;
+  longtakeConfig?: import("../../types").LongTakeConfigPublic | null;
+  longtakeEnabled?: boolean;
+  longtakeDenoise?: number;
+  longtakeKeyframes?: string;
+  longtakeSeed?: number;
+  onLongtakeEnabled?: (v: boolean) => void;
+  onLongtakeDenoise?: (v: number) => void;
+  onLongtakeKeyframes?: (v: string) => void;
+  onLongtakeSeed?: (v: number) => void;
   clipMultiplier: number;
   onClipMultiplier: (n: number) => void;
   sceneQueue: SceneQueueItem[];
@@ -405,6 +414,15 @@ export function ComposerPanel(props: ComposerPanelProps) {
           onFacesCanvas={props.onFacesCanvas}
           onFacesDenoise={props.onFacesDenoise}
           onFacesSeed={props.onFacesSeed}
+          longtakeConfig={props.longtakeConfig}
+          longtakeEnabled={props.longtakeEnabled}
+          longtakeDenoise={props.longtakeDenoise}
+          longtakeKeyframes={props.longtakeKeyframes}
+          longtakeSeed={props.longtakeSeed}
+          onLongtakeEnabled={props.onLongtakeEnabled}
+          onLongtakeDenoise={props.onLongtakeDenoise}
+          onLongtakeKeyframes={props.onLongtakeKeyframes}
+          onLongtakeSeed={props.onLongtakeSeed}
         />
       </div>
       {props.loraActivity && <p className="lora-inline-hint">{props.loraActivity}</p>}

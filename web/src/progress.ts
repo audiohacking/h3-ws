@@ -75,9 +75,10 @@ export function applyProgressEvent(
   const explicit =
     typeof msg.message === "string" && msg.message.trim() ? msg.message.trim() : null;
   const isFaces = typeof phase === "string" && phase.startsWith("faces_");
-  // Faces progress is composed server-side (window label + nested denoise).
+  const isLongtake = typeof phase === "string" && phase.startsWith("longtake_");
+  // Faces / Long take progress is composed server-side (label + nested denoise).
   // Prefer that message even when model_progress is present for the bar.
-  const message = isFaces
+  const message = isFaces || isLongtake
     ? explicit ?? prev?.message ?? formatProgressMessage(mp, wall_elapsed)
     : hasStepData
       ? formatProgressMessage(mp, wall_elapsed)

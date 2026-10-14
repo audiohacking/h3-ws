@@ -354,6 +354,10 @@ export default function App() {
   const [facesCanvas, setFacesCanvas] = useState(512);
   const [facesDenoise, setFacesDenoise] = useState(0.45);
   const [facesSeed, setFacesSeed] = useState(42);
+  const [longtakeEnabled, setLongtakeEnabled] = useState(false);
+  const [longtakeDenoise, setLongtakeDenoise] = useState(0.55);
+  const [longtakeKeyframes, setLongtakeKeyframes] = useState("0:0, 22:0, 44:1");
+  const [longtakeSeed, setLongtakeSeed] = useState(42);
   const [loraModalOpen, setLoraModalOpen] = useState(false);
   const [sceneQueue, setSceneQueue] = useState<SceneQueueItem[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
@@ -490,6 +494,10 @@ export default function App() {
         if (cfg.faces) {
           setFacesCanvas(cfg.faces.canvas);
           setFacesDenoise(cfg.faces.denoise);
+        }
+        if (cfg.longtake) {
+          setLongtakeDenoise(cfg.longtake.denoise);
+          if (cfg.longtake.keyframes) setLongtakeKeyframes(cfg.longtake.keyframes);
         }
         if (cfg.network) setNetworkSettings(cfg.network);
         // Fresh install / upgrade with empty weights — open Models immediately.
@@ -1437,8 +1445,11 @@ export default function App() {
           if (step != null && total != null && total > 0) {
             setProgress((prev) => {
               const pct = Math.round((100 * step) / total);
-              // Keep Faces window label; only refresh step/pct from preview ticks.
-              if (prev?.phase?.startsWith("faces_")) {
+              // Keep Faces / Long take window label; only refresh step/pct from preview ticks.
+              if (
+                prev?.phase?.startsWith("faces_") ||
+                prev?.phase?.startsWith("longtake_")
+              ) {
                 return {
                   ...prev,
                   step,
@@ -1639,6 +1650,14 @@ export default function App() {
         denoise: facesDenoise,
         seed: facesSeed,
         abstain: false,
+      };
+    }
+    if (longtakeEnabled) {
+      body.longtake = {
+        enabled: true,
+        denoise: longtakeDenoise,
+        keyframes: longtakeKeyframes,
+        seed: longtakeSeed,
       };
     }
     if (ref2va) {
@@ -2159,6 +2178,15 @@ export default function App() {
               onFacesCanvas={setFacesCanvas}
               onFacesDenoise={setFacesDenoise}
               onFacesSeed={setFacesSeed}
+              longtakeConfig={config.longtake}
+              longtakeEnabled={longtakeEnabled}
+              longtakeDenoise={longtakeDenoise}
+              longtakeKeyframes={longtakeKeyframes}
+              longtakeSeed={longtakeSeed}
+              onLongtakeEnabled={setLongtakeEnabled}
+              onLongtakeDenoise={setLongtakeDenoise}
+              onLongtakeKeyframes={setLongtakeKeyframes}
+              onLongtakeSeed={setLongtakeSeed}
               sceneQueue={sceneQueue}
               onRemoveScene={removeFromSceneQueue}
               onReorderScenes={reorderSceneQueue}
@@ -2407,6 +2435,42 @@ export default function App() {
                     }}
                   >
                     Faces
+                  </button>
+                  <button
+                    type="button"
+                    className="library-job-btn"
+                    title="Refine long take (init-video denoise + temporal blend → *_longtake.mp4 twin)"
+                    disabled={busy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void (async () => {
+                        if (
+                          !window.confirm(
+                            "Run Long take refine on this clip? Writes a twin *_longtake.mp4 (baseline kept). Uses the GPU.",
+                          )
+                        )
+                          return;
+                        try {
+                          const r = await fetch(`${API}/api/clips/${clip.id}/longtake`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              denoise: longtakeDenoise,
+                              keyframes: longtakeKeyframes,
+                              seed: longtakeSeed,
+                            }),
+                          });
+                          const data = await r.json();
+                          if (!r.ok) throw new Error(data.detail || "Long take failed");
+                          await refreshProjectClips();
+                          window.alert("Long take refine complete.");
+                        } catch (err) {
+                          window.alert(err instanceof Error ? err.message : String(err));
+                        }
+                      })();
+                    }}
+                  >
+                    Long take
                   </button>
                 </div>
                 <button

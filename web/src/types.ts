@@ -87,6 +87,7 @@ export interface Config {
   refine?: RefineSettingsPublic;
   network?: NetworkSettingsPublic;
   faces?: FacesConfigPublic;
+  longtake?: LongTakeConfigPublic;
 }
 
 export interface FacesConfigPublic {
@@ -101,6 +102,17 @@ export interface FacesConfigPublic {
   denoise_min: number;
   denoise_max: number;
   abstain_px?: number;
+  note?: string;
+}
+
+export interface LongTakeConfigPublic {
+  available: boolean;
+  enabled_default?: boolean;
+  denoise: number;
+  denoise_min: number;
+  denoise_max: number;
+  keyframes: string;
+  interpolation?: string;
   note?: string;
 }
 

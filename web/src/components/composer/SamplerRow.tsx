@@ -1,6 +1,12 @@
 import { TurboToggle } from "./TurboToggle";
 import { FacesPill } from "./FacesPill";
-import type { FacesConfigPublic, LoraPreset, PillOption } from "../../types";
+import { LongTakePill } from "./LongTakePill";
+import type {
+  FacesConfigPublic,
+  LongTakeConfigPublic,
+  LoraPreset,
+  PillOption,
+} from "../../types";
 import type { TurboTier } from "../../config";
 
 type Props = {
@@ -49,6 +55,15 @@ type Props = {
   onFacesCanvas?: (v: number) => void;
   onFacesDenoise?: (v: number) => void;
   onFacesSeed?: (v: number) => void;
+  longtakeConfig?: LongTakeConfigPublic | null;
+  longtakeEnabled?: boolean;
+  longtakeDenoise?: number;
+  longtakeKeyframes?: string;
+  longtakeSeed?: number;
+  onLongtakeEnabled?: (v: boolean) => void;
+  onLongtakeDenoise?: (v: number) => void;
+  onLongtakeKeyframes?: (v: string) => void;
+  onLongtakeSeed?: (v: number) => void;
 };
 
 function ParamStepper({
@@ -126,6 +141,15 @@ export function SamplerRow({
   onFacesCanvas,
   onFacesDenoise,
   onFacesSeed,
+  longtakeConfig,
+  longtakeEnabled = false,
+  longtakeDenoise = 0.55,
+  longtakeKeyframes = "0:0, 22:0, 44:1",
+  longtakeSeed = 42,
+  onLongtakeEnabled,
+  onLongtakeDenoise,
+  onLongtakeKeyframes,
+  onLongtakeSeed,
 }: Props) {
   const tokenOn = tokenReduction && !tokenReductionLocked;
   const ssdOn = ssdStreaming && !ssdLocked;
@@ -205,6 +229,20 @@ export function SamplerRow({
               onCanvas={onFacesCanvas ?? (() => {})}
               onDenoise={onFacesDenoise ?? (() => {})}
               onSeed={onFacesSeed ?? (() => {})}
+            />
+          )}
+          {onLongtakeEnabled && (
+            <LongTakePill
+              disabled={disabled}
+              config={longtakeConfig}
+              enabled={longtakeEnabled}
+              denoise={longtakeDenoise}
+              keyframes={longtakeKeyframes}
+              seed={longtakeSeed}
+              onEnabled={onLongtakeEnabled}
+              onDenoise={onLongtakeDenoise ?? (() => {})}
+              onKeyframes={onLongtakeKeyframes ?? (() => {})}
+              onSeed={onLongtakeSeed ?? (() => {})}
             />
           )}
         </div>

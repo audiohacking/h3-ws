@@ -28,8 +28,10 @@ Inspiration: [ComfyUI-Continuity](https://github.com/roadmaus/ComfyUI-Continuity
 | **block_cache / Tea / Easy** | Skip | Comfy sampler step-skip plugins. Different from our warm VAE session + `H3_REF_CACHE_DIR` ref-latent disk cache. |
 | **Spectrum** | Skip | External forecast sampler ([ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)); fidelity tradeoffs; no h3.c path. |
 | **Motion fix** | Skip for now | Second pass (slow / re-draw / restore timing) needs latent motion profile + re-sample. |
+| **Long take refine** | **Phase 1 shipped** (opt-in) | Pixel path: `--init-video` denoise ~0.55 + RGB keyframe blend (`h3_longtake.py`). Twin `*_longtake.mp4` for A/B; default **off**. |
+| **Latent motion-context** | **Deferred** (Phase 2 epic) | True Comfy-style pin/save/load of video+audio latents + head trim in vendored h3.c. Do not block on Phase 1. |
 
-Do **not** ship Faces/Spectrum/Motion/Cache pills until the engine path exists. Faces is the planned follow-up.
+Faces is shipped. Spectrum / Tea / block_cache stay skipped. Latent motion-context is a separate h3.c fork epic after Phase 1 validation.
 
 ---
 

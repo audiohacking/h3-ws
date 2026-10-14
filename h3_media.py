@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -339,6 +340,53 @@ def _make_audio_resampler(*, sample_fmt: str, layout: str = "stereo", rate: int 
     return AudioResampler(format=sample_fmt, layout=layout, rate=rate)
 
 
+def _sane_video_fps(stream: Any, default: float = float(FPS)) -> float:
+    """Clamp container-reported fps into a range libx264 / h3.c can ingest.
+
+    Broken or missing ``average_rate`` (or a prior encode that collapsed all
+    frame PTS to 0) can report absurd rates like 6840. h3.c then applies
+    ``fps=24`` and keeps only one frame → "at least 5 decoded frames".
+    """
+    rate = getattr(stream, "average_rate", None) or getattr(stream, "base_rate", None)
+    try:
+        fps = float(rate) if rate is not None else float(default)
+    except (TypeError, ValueError, ZeroDivisionError):
+        fps = float(default)
+    if not math.isfinite(fps) or fps < 1.0 or fps > 120.0:
+        return float(default)
+    return fps
+
+
+def _video_time_base(fps: float) -> Fraction:
+    """``1/round(fps)`` stream/codec time base for fixed-fps encodes (PyAV Time docs)."""
+    return Fraction(1, max(1, int(round(float(fps)))))
+
+
+def _stamp_encode_video_pts(frame: Any, pts: int, fps: float) -> None:
+    """Set frame PTS in encode time_base per https://pyav.org/docs/stable/api/time.html
+
+    Decoded frames keep the *source* ``time_base``. Writing ``pts=0,1,2…``
+    without resetting ``time_base`` (or clearing pts while leaving the source
+    base) collapses the timeline so ffmpeg ``fps=24`` keeps ~1 frame.
+    For fixed-fps content, PTS is the frame index in ``1/fps``.
+    """
+    tb = _video_time_base(fps)
+    frame.pts = int(pts)
+    frame.time_base = tb
+
+
+def _add_h264_stream(out: Any, *, fps: float, width: int, height: int, preset: str = "veryfast", crf: str = "18") -> Any:
+    """libx264 stream with rate + time_base hint matching PyAV encoding guidance."""
+    rate = max(1, int(round(float(fps))))
+    stream = out.add_stream("libx264", rate=rate)
+    stream.width = int(width)
+    stream.height = int(height)
+    stream.pix_fmt = "yuv420p"
+    stream.options = {"preset": preset, "crf": crf}
+    stream.time_base = _video_time_base(rate)
+    return stream
+
+
 def _mux_audio_frame(out, stream, resampler, frame) -> None:
     """Resample one audio frame (or flush with ``frame=None``) and mux packets."""
     for converted in resampler.resample(frame):
@@ -489,25 +537,30 @@ def adapt_audio_for_h3(src: Path | str, dest: Path | str) -> Path:
             v_out = None
             a_out = None
             a_resampler = None
+            v_pts = 0
+            fps = float(FPS)
             v_in = next((s for s in inp.streams if s.type == "video"), None)
             if v_in is not None:
                 # Re-encode video (stream-copy + separate audio re-encode is
                 # fragile across containers); keep veryfast/CRF so refs stay light.
-                fps = float(v_in.average_rate) if v_in.average_rate else 24.0
-                v_out = out.add_stream("libx264", rate=max(1, int(round(fps))))
-                v_out.width = int(v_in.codec_context.width or 0)
-                v_out.height = int(v_in.codec_context.height or 0)
-                v_out.pix_fmt = "yuv420p"
-                v_out.options = {"preset": "veryfast", "crf": "18"}
+                fps = _sane_video_fps(v_in)
+                v_out = _add_h264_stream(
+                    out,
+                    fps=fps,
+                    width=int(v_in.codec_context.width or 0),
+                    height=int(v_in.codec_context.height or 0),
+                )
             if has_video:
                 a_out = out.add_stream("aac", rate=48000)
                 a_out.layout = "stereo"
+                a_out.time_base = Fraction(1, 48000)
                 a_resampler = _make_audio_resampler(
                     sample_fmt="fltp", layout="stereo", rate=48000
                 )
             else:
                 a_out = out.add_stream("pcm_s16le", rate=48000)
                 a_out.layout = "stereo"
+                a_out.time_base = Fraction(1, 48000)
                 a_resampler = _make_audio_resampler(
                     sample_fmt="s16", layout="stereo", rate=48000
                 )
@@ -515,7 +568,8 @@ def adapt_audio_for_h3(src: Path | str, dest: Path | str) -> Path:
             for frame in inp.decode():
                 if isinstance(frame, VideoFrame) and v_out is not None:
                     frame = frame.reformat(format="yuv420p")
-                    frame.pts = None
+                    _stamp_encode_video_pts(frame, v_pts, fps)
+                    v_pts += 1
                     for packet in v_out.encode(frame):
                         out.mux(packet)
                 elif isinstance(frame, AudioFrame) and a_out is not None and a_resampler is not None:
@@ -601,15 +655,17 @@ def frame_video(src: Path | str, dest: Path | str, crop: Any) -> Path:
         v_in = next((s for s in inp.streams if s.type == "video"), None)
         if v_in is None:
             raise ValueError(f"no video stream in {source}")
-        fps = float(v_in.average_rate) if v_in.average_rate else 24.0
+        fps = _sane_video_fps(v_in)
         out = av.open(str(target), mode="w")
         try:
             v_out = None
             a_out = None
             a_resampler = None
+            v_pts = 0
             if any(s.type == "audio" for s in inp.streams):
                 a_out = out.add_stream("aac", rate=48000)
                 a_out.layout = "stereo"
+                a_out.time_base = Fraction(1, 48000)
                 a_resampler = _make_audio_resampler(sample_fmt="fltp", layout="stereo", rate=48000)
             for frame in inp.decode():
                 if isinstance(frame, VideoFrame):
@@ -624,14 +680,11 @@ def frame_video(src: Path | str, dest: Path | str, crop: Any) -> Path:
                         arr = np.asarray(framed)
                         h, w = arr.shape[:2]
                     if v_out is None:
-                        v_out = out.add_stream("libx264", rate=max(1, int(round(fps))))
-                        v_out.width = w
-                        v_out.height = h
-                        v_out.pix_fmt = "yuv420p"
-                        v_out.options = {"preset": "veryfast", "crf": "18"}
+                        v_out = _add_h264_stream(out, fps=fps, width=w, height=h)
                     new_frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
                     new_frame = new_frame.reformat(format="yuv420p")
-                    new_frame.pts = None
+                    _stamp_encode_video_pts(new_frame, v_pts, fps)
+                    v_pts += 1
                     for packet in v_out.encode(new_frame):
                         out.mux(packet)
                 elif isinstance(frame, AudioFrame) and a_out is not None and a_resampler is not None:
@@ -733,24 +786,29 @@ def trim_media(
             v_out = None
             a_out = None
             a_resampler = None
+            v_pts = 0
+            fps = float(FPS)
             if has_video:
                 v_in = next(s for s in inp.streams if s.type == "video")
-                fps = float(v_in.average_rate) if v_in.average_rate else 24.0
-                v_out = out.add_stream("libx264", rate=max(1, int(round(fps))))
-                v_out.width = int(v_in.codec_context.width or 0)
-                v_out.height = int(v_in.codec_context.height or 0)
-                v_out.pix_fmt = "yuv420p"
-                v_out.options = {"preset": "veryfast", "crf": "18"}
+                fps = _sane_video_fps(v_in)
+                v_out = _add_h264_stream(
+                    out,
+                    fps=fps,
+                    width=int(v_in.codec_context.width or 0),
+                    height=int(v_in.codec_context.height or 0),
+                )
             if has_audio:
                 if has_video:
                     a_out = out.add_stream("aac", rate=48000)
                     a_out.layout = "stereo"
+                    a_out.time_base = Fraction(1, 48000)
                     a_resampler = _make_audio_resampler(
                         sample_fmt="fltp", layout="stereo", rate=48000
                     )
                 else:
                     a_out = out.add_stream("pcm_s16le", rate=48000)
                     a_out.layout = "stereo"
+                    a_out.time_base = Fraction(1, 48000)
                     a_resampler = _make_audio_resampler(
                         sample_fmt="s16", layout="stereo", rate=48000
                     )
@@ -765,7 +823,9 @@ def trim_media(
                     continue
                 if isinstance(frame, VideoFrame) and v_out is not None:
                     frame = frame.reformat(format="yuv420p")
-                    frame.pts = None
+                    # PyAV Time docs: encode PTS in 1/fps, not the source time_base.
+                    _stamp_encode_video_pts(frame, v_pts, fps)
+                    v_pts += 1
                     for packet in v_out.encode(frame):
                         out.mux(packet)
                 elif isinstance(frame, AudioFrame) and a_out is not None and a_resampler is not None:
@@ -820,19 +880,19 @@ def upscale_video(
         out_w -= out_w % 2
         out_h -= out_h % 2
 
-        fps = float(v_in.average_rate) if v_in.average_rate else 24.0
+        fps = _sane_video_fps(v_in)
         out = av.open(str(target), mode="w")
         try:
-            v_out = out.add_stream("libx264", rate=max(1, int(round(fps))))
-            v_out.width = out_w
-            v_out.height = out_h
-            v_out.pix_fmt = "yuv420p"
-            v_out.options = {"preset": "medium", "crf": "17"}
+            v_out = _add_h264_stream(
+                out, fps=fps, width=out_w, height=out_h, preset="medium", crf="17"
+            )
             a_out = None
             a_resampler = None
+            v_pts = 0
             if any(s.type == "audio" for s in inp.streams):
                 a_out = out.add_stream("aac", rate=48000)
                 a_out.layout = "stereo"
+                a_out.time_base = Fraction(1, 48000)
                 a_resampler = _make_audio_resampler(
                     sample_fmt="fltp", layout="stereo", rate=48000
                 )
@@ -843,7 +903,8 @@ def upscale_video(
                     scaled = img.resize((out_w, out_h), Image.Resampling.LANCZOS)
                     new_frame = av.VideoFrame.from_ndarray(np.asarray(scaled), format="rgb24")
                     new_frame = new_frame.reformat(format="yuv420p")
-                    new_frame.pts = None
+                    _stamp_encode_video_pts(new_frame, v_pts, fps)
+                    v_pts += 1
                     for packet in v_out.encode(new_frame):
                         out.mux(packet)
                 elif isinstance(frame, AudioFrame) and a_out is not None and a_resampler is not None:

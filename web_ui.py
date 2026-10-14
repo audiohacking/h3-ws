@@ -179,6 +179,8 @@ class RunRecord:
     merged_clip_id: Optional[str] = None
     # Optional Faces post-pass knobs from the composer pill.
     faces: Optional[dict[str, Any]] = None
+    # Optional Long take refine (default off). Twin clip A/B when enabled.
+    longtake: Optional[dict[str, Any]] = None
 
 
 class AppState:
@@ -1646,6 +1648,224 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     state.engine.clear_preview_latent_dumps()
                     _purge_preview_stem(faces_stem)
 
+            # Optional Long take refine (composer pill, default off): init-video
+            # re-denoise + temporal blend → sibling *_longtake.mp4 for A/B.
+            longtake_cfg = run.longtake if isinstance(run.longtake, dict) else None
+            longtake_twin_id: str | None = None
+            if longtake_cfg and longtake_cfg.get("enabled") and dest.is_file():
+                from h3_longtake import (
+                    DEFAULT_INTERPOLATION,
+                    DEFAULT_KEYFRAMES,
+                    DEFAULT_LONGTAKE_DENOISE,
+                    LongTakeError,
+                    LongTakeSettings,
+                    clamp_longtake_denoise,
+                    run_longtake_refine,
+                )
+
+                lt_watcher: LatentPreviewWatcher | None = None
+                lt_stem = state.output_dir / ".preview" / f"{run_id}_{clip.id}_longtake"
+                try:
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "longtake_refine",
+                            "message": "Long take refine…",
+                            "clip_id": clip.id,
+                        },
+                    )
+                    lt_name = f"{Path(clip.filename).stem}_longtake.mp4"
+                    lt_path = state.output_dir / lt_name
+                    lt_settings = LongTakeSettings(
+                        denoise=clamp_longtake_denoise(
+                            float(
+                                longtake_cfg.get("denoise")
+                                if longtake_cfg.get("denoise") is not None
+                                else DEFAULT_LONGTAKE_DENOISE
+                            )
+                        ),
+                        seed=int(
+                            longtake_cfg.get("seed")
+                            if longtake_cfg.get("seed") is not None
+                            else (clip.seed or 42)
+                        ),
+                        keyframes=str(
+                            longtake_cfg.get("keyframes") or DEFAULT_KEYFRAMES
+                        ),
+                        interpolation=str(
+                            longtake_cfg.get("interpolation") or DEFAULT_INTERPOLATION
+                        ),
+                    )
+                    lt_refs = parse_refs_payload(body.get("refs"), validate=False)
+                    lt_loras = _loras_from_body(state, body)
+                    lt_quality = str(body.get("quality") or clip.quality or "fast")
+                    lt_steps = (
+                        int(body["num_steps"])
+                        if body.get("num_steps") is not None
+                        else clip.num_steps
+                    )
+                    lt_layers = (
+                        int(body["layers"]) if body.get("layers") is not None else clip.layers
+                    )
+                    lt_reuse = (
+                        int(body["reuse"]) if body.get("reuse") is not None else clip.reuse
+                    )
+
+                    lt_preview_dir: Path | None = None
+                    if taeh3_decode_ready():
+                        lt_preview_dir = state.engine.ensure_preview_latent_dir()
+
+                        def _on_lt_preview(
+                            info: dict[str, Any],
+                            *,
+                            _rid=run_id,
+                            _stem=lt_stem.name,
+                        ) -> None:
+                            served = Path(str(info.get("path") or ""))
+                            ext = served.suffix if served.suffix else ".mp4"
+                            url = f"/api/preview/{_stem}{ext}?t={int(time.time() * 1000)}"
+                            asyncio.run_coroutine_threadsafe(
+                                state.emit(
+                                    _rid,
+                                    {
+                                        "type": "preview",
+                                        "url": url,
+                                        "mime": info.get("mime") or "image/webp",
+                                        "step": info.get("step"),
+                                        "total": info.get("total"),
+                                        "fps": info.get("fps"),
+                                    },
+                                ),
+                                loop,
+                            )
+
+                        lt_watcher = LatentPreviewWatcher(
+                            lt_preview_dir, lt_stem, on_preview=_on_lt_preview
+                        )
+                        lt_watcher.start()
+
+                    def _lt_prog(phase: str, extra: dict[str, Any]) -> None:
+                        msg = str(extra.get("message") or phase)
+                        mp = extra.get("model_progress")
+                        payload: dict[str, Any] = {
+                            "type": "progress",
+                            "phase": phase,
+                            "message": msg,
+                            "clip_id": clip.id,
+                        }
+                        if isinstance(mp, dict):
+                            payload["model_progress"] = mp
+                            if mp.get("elapsed_s") is not None:
+                                payload["elapsed_s"] = mp.get("elapsed_s")
+                            stage = str(mp.get("stage") or "").strip()
+                            step, total = mp.get("step"), mp.get("total")
+                            bits = [msg]
+                            if step is not None and total is not None:
+                                label = stage.capitalize() if stage else "Step"
+                                bits.append(f"{label} {step}/{total}")
+                            eta = mp.get("eta_s")
+                            if eta is not None:
+                                eta_i = max(0, int(round(float(eta))))
+                                bits.append(f"{eta_i // 60:02d}:{eta_i % 60:02d} remaining")
+                            elif mp.get("avg_step_s") is not None:
+                                bits.append(f"{mp['avg_step_s']}s/it")
+                            payload["message"] = " · ".join(bits)
+                        log.info("longtake %s clip=%s %s", phase, clip.id, payload["message"])
+                        asyncio.run_coroutine_threadsafe(
+                            state.emit(run_id, payload),
+                            loop,
+                        )
+
+                    await asyncio.to_thread(
+                        run_longtake_refine,
+                        dest,
+                        lt_path,
+                        prompt=clip.prompt,
+                        engine=state.engine,
+                        settings=lt_settings,
+                        on_progress=_lt_prog,
+                        refs=lt_refs,
+                        loras=lt_loras,
+                        quality=lt_quality,
+                        steps=lt_steps,
+                        layers=lt_layers,
+                        reuse=lt_reuse,
+                        preview_latent_dir=lt_preview_dir,
+                    )
+                    if lt_path.is_file():
+                        twin_id = str(uuid.uuid4())
+                        twin = ClipRecord(
+                            id=twin_id,
+                            prompt=f"[LongTake] {clip.prompt}",
+                            label=(clip.label or "CURRENT") + "+LongTake",
+                            video_url=state.clip_url(lt_name),
+                            filename=lt_name,
+                            chain_id=clip.chain_id,
+                            clip_index=clip.clip_index,
+                            mode=clip.mode,
+                            status=RunStatus.DONE.value,
+                            created_at=datetime.now().isoformat(),
+                            num_frames=clip.num_frames,
+                            width=clip.width,
+                            height=clip.height,
+                            seed=lt_settings.seed,
+                            project_id=clip.project_id,
+                            quality=clip.quality,
+                            num_steps=clip.num_steps,
+                            layers=clip.layers,
+                            reuse=clip.reuse,
+                            bytes=lt_path.stat().st_size,
+                            generation={
+                                **(clip.generation or {}),
+                                "longtake": {
+                                    "denoise": lt_settings.denoise,
+                                    "keyframes": lt_settings.keyframes,
+                                    "seed": lt_settings.seed,
+                                    "source_clip_id": clip.id,
+                                },
+                            },
+                        )
+                        state.clips[twin_id] = twin
+                        longtake_twin_id = twin_id
+                        await state.emit(
+                            run_id,
+                            {
+                                "type": "progress",
+                                "phase": "longtake_done",
+                                "message": "Long take refine complete",
+                                "clip_id": clip.id,
+                                "twin_clip_id": twin_id,
+                            },
+                        )
+                except LongTakeError as exc:
+                    log.warning("Long take skipped for %s: %s", clip.id, exc)
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "longtake_skip",
+                            "message": f"Long take skipped: {exc}",
+                            "clip_id": clip.id,
+                        },
+                    )
+                except Exception as exc:
+                    log.exception("Long take failed for %s", clip.id)
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "longtake_error",
+                            "message": f"Long take failed: {exc}",
+                            "clip_id": clip.id,
+                        },
+                    )
+                finally:
+                    if lt_watcher is not None:
+                        lt_watcher.stop(cleanup=False)
+                    state.engine.clear_preview_latent_dumps()
+                    _purge_preview_stem(lt_stem)
+
             clip.status = RunStatus.DONE.value
             clip.elapsed_s = round(time.time() - t0, 2)
             clip.bytes = dest.stat().st_size if dest.is_file() else size
@@ -1667,6 +1887,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     "filename": clip.filename,
                     "chain_id": clip.chain_id,
                     "faces": faces_applied,
+                    "longtake": bool(longtake_twin_id),
+                    "longtake_twin_id": longtake_twin_id,
                 },
             )
             _purge_preview_stem(preview_stem)
@@ -1873,6 +2095,29 @@ def create_app(
             ),
         }
 
+    def _longtake_public() -> dict[str, Any]:
+        from h3_longtake import (
+            DEFAULT_INTERPOLATION,
+            DEFAULT_KEYFRAMES,
+            DEFAULT_LONGTAKE_DENOISE,
+            MAX_LONGTAKE_DENOISE,
+            MIN_LONGTAKE_DENOISE,
+        )
+
+        return {
+            "available": True,
+            "enabled_default": False,
+            "denoise": DEFAULT_LONGTAKE_DENOISE,
+            "denoise_min": MIN_LONGTAKE_DENOISE,
+            "denoise_max": MAX_LONGTAKE_DENOISE,
+            "keyframes": DEFAULT_KEYFRAMES,
+            "interpolation": DEFAULT_INTERPOLATION,
+            "note": (
+                "Opt-in long-take refine: init-video re-denoise + temporal blend. "
+                "Writes a *_longtake.mp4 twin so the baseline stays for A/B."
+            ),
+        }
+
     @app.get("/api/health")
     async def api_health(request: Request):
         ws_url, http_url = urls_from_request(request)
@@ -2065,6 +2310,7 @@ def create_app(
             ),
             "network": network_settings_public(),
             "faces": _faces_public(state),
+            "longtake": _longtake_public(),
         }
 
     # ── Models management (status + user-confirmed download) ─────────────────
@@ -3035,6 +3281,7 @@ def create_app(
         state.touch_project(project_id)
 
         faces_body = body.get("faces") if isinstance(body.get("faces"), dict) else None
+        longtake_body = body.get("longtake") if isinstance(body.get("longtake"), dict) else None
         run = RunRecord(
             id=run_id,
             status=RunStatus.QUEUED.value,
@@ -3045,6 +3292,7 @@ def create_app(
             autocontinue=autocontinue,
             autoconcat=autoconcat,
             faces=dict(faces_body) if faces_body else None,
+            longtake=dict(longtake_body) if longtake_body else None,
         )
         state.runs[run_id] = run
         _RUN_BODIES[run_id] = body
@@ -3387,6 +3635,151 @@ def create_app(
                 "faces": {
                     "canvas": canvas,
                     "denoise": denoise,
+                    "seed": seed,
+                    "source_clip_id": clip.id,
+                },
+            },
+        )
+        state.clips[new_id] = new_clip
+        state.save_index()
+        return {
+            "ok": True,
+            "clip": _clip_for_api(state, new_clip),
+            "events": events[-20:],
+        }
+
+    @app.post("/api/clips/{clip_id}/longtake")
+    async def longtake_pass(clip_id: str, body: dict[str, Any] | None = None):
+        """Run Long take refine on a done clip → sibling *_longtake.mp4 (A/B)."""
+        body = body or {}
+        clip = state.clips.get(clip_id)
+        if not clip or clip.status != "done":
+            raise HTTPException(404, "done clip not found")
+        path = state.output_dir / clip.filename
+        if not path.is_file():
+            raise HTTPException(404, "clip file missing")
+        if state._active_run_id is not None:
+            raise HTTPException(409, "engine is busy")
+
+        from h3_longtake import (
+            DEFAULT_INTERPOLATION,
+            DEFAULT_KEYFRAMES,
+            DEFAULT_LONGTAKE_DENOISE,
+            LongTakeError,
+            LongTakeSettings,
+            clamp_longtake_denoise,
+            run_longtake_refine,
+        )
+        from h3_paths import console_h3
+
+        denoise = clamp_longtake_denoise(
+            float(
+                body.get("denoise")
+                if body.get("denoise") is not None
+                else DEFAULT_LONGTAKE_DENOISE
+            )
+        )
+        seed = int(body.get("seed") if body.get("seed") is not None else (clip.seed or 42))
+        keyframes = str(body.get("keyframes") or DEFAULT_KEYFRAMES)
+        interpolation = str(body.get("interpolation") or DEFAULT_INTERPOLATION)
+        out_name = f"{Path(clip.filename).stem}_longtake.mp4"
+        out_path = state.output_dir / out_name
+        settings = LongTakeSettings(
+            denoise=denoise,
+            seed=seed,
+            keyframes=keyframes,
+            interpolation=interpolation,
+        )
+        prompt = str(body.get("prompt") or clip.prompt or "detailed cinematic shot")
+
+        gen = clip.generation if isinstance(clip.generation, dict) else {}
+        refs_raw = body.get("refs") if body.get("refs") is not None else gen.get("refs")
+        try:
+            lt_refs = parse_refs_payload(refs_raw, validate=False)
+            lt_refs = _resolve_refs(state, lt_refs)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        lora_body = {
+            "loras": body.get("loras")
+            if body.get("loras") is not None
+            else (clip.loras or gen.get("loras") or []),
+        }
+        lt_loras = _loras_from_body(state, lora_body)
+        lt_quality = str(
+            body.get("quality") or gen.get("quality") or clip.quality or "fast"
+        )
+        lt_steps = (
+            int(body["num_steps"])
+            if body.get("num_steps") is not None
+            else clip.num_steps
+        )
+        lt_layers = (
+            int(body["layers"]) if body.get("layers") is not None else clip.layers
+        )
+        lt_reuse = int(body["reuse"]) if body.get("reuse") is not None else clip.reuse
+
+        events: list[dict[str, Any]] = []
+
+        def on_progress(phase: str, extra: dict[str, Any]) -> None:
+            events.append({"phase": phase, **extra})
+            console_h3("longtake %s %s", phase, extra.get("message") or "")
+
+        async with state._submit_lock:
+            if state._active_run_id is not None:
+                raise HTTPException(409, "engine is busy")
+            state._active_run_id = f"longtake:{clip_id}"
+            try:
+                await asyncio.to_thread(
+                    run_longtake_refine,
+                    path,
+                    out_path,
+                    prompt=prompt,
+                    engine=state.engine,
+                    settings=settings,
+                    on_progress=on_progress,
+                    refs=lt_refs,
+                    loras=lt_loras,
+                    quality=lt_quality,
+                    steps=lt_steps,
+                    layers=lt_layers,
+                    reuse=lt_reuse,
+                )
+            except LongTakeError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            except Exception as exc:
+                log.exception("longtake pass failed")
+                raise HTTPException(500, f"longtake pass failed: {exc}") from exc
+            finally:
+                state._active_run_id = None
+
+        new_id = str(uuid.uuid4())
+        ts = datetime.now().isoformat()
+        new_clip = ClipRecord(
+            id=new_id,
+            prompt=f"[LongTake] {clip.prompt}",
+            label="LongTake",
+            video_url=state.clip_url(out_name),
+            filename=out_name,
+            chain_id=clip.chain_id,
+            clip_index=clip.clip_index,
+            mode=clip.mode,
+            status=RunStatus.DONE.value,
+            created_at=ts,
+            num_frames=clip.num_frames,
+            width=clip.width,
+            height=clip.height,
+            seed=seed,
+            project_id=clip.project_id,
+            quality=clip.quality,
+            num_steps=clip.num_steps,
+            layers=clip.layers,
+            reuse=clip.reuse,
+            bytes=out_path.stat().st_size if out_path.is_file() else None,
+            generation={
+                **(clip.generation or {}),
+                "longtake": {
+                    "denoise": denoise,
+                    "keyframes": keyframes,
                     "seed": seed,
                     "source_clip_id": clip.id,
                 },
