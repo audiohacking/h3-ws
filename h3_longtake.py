@@ -151,7 +151,7 @@ def run_longtake_refine(
     preview_latent_dir: Path | None = None,
 ) -> Path:
     """Full long-take refine. Requires h3 ``--init-video`` support."""
-    from h3_facepass import decode_clip_rgb, remux_audio, write_rgb_mp4
+    from h3_media import decode_clip_rgb, remux_audio, write_rgb_mp4
     from h3_backend import GenerateRequest
 
     settings = settings or LongTakeSettings()

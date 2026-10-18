@@ -16,7 +16,9 @@ from h3_backend import GenerateRequest, LoraRef, build_h3_argv
 from h3_lora import (
     BUILTIN_LORAS,
     DMAD_REPO,
+    LIGHTX2V_REPO,
     TUTU_REPO,
+    _hint_for_lora_name,
     ensure_lora,
     find_cached_lora,
     lora_cached_path,
@@ -65,6 +67,26 @@ class LoraCatalogTests(unittest.TestCase):
                     ids = [p["id"] for p in catalog]
                     self.assertIn("dmad_h3_4step", ids)
                     self.assertLess(ids.index("taomate_h3_3step"), ids.index("dmad_h3_4step"))
+
+    def test_lightx2v_turbo_recipe_strength_is_1(self) -> None:
+        """Continuity / NVIDIA Comfy pack — users must not have to guess 1.0."""
+        ref2v = next(p for p in BUILTIN_LORAS if p["id"] == "lightx2v_ref2v_turbo_8step")
+        fl2v = next(p for p in BUILTIN_LORAS if p["id"] == "lightx2v_fl2v_turbo_8step")
+        for preset in (ref2v, fl2v):
+            self.assertTrue(preset.get("turbo"), preset["id"])
+            self.assertEqual(preset["scale"], 1.0, preset["id"])
+            self.assertEqual(preset["default_scale"], 1.0, preset["id"])
+            self.assertEqual(preset["steps"], 8, preset["id"])
+            self.assertIn(LIGHTX2V_REPO, preset["spec"])
+        self.assertIn("ref2v_turbo_8step", ref2v["spec"])
+        self.assertIn("fl2v_turbo_8step", fl2v["spec"])
+        hint = _hint_for_lora_name(
+            "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors "
+            "lightx2v__Minimax-h3-Turbo"
+        )
+        self.assertEqual(hint.get("scale"), 1.0)
+        self.assertEqual(hint.get("steps"), 8)
+        self.assertTrue(hint.get("turbo"))
 
     def test_creative_library_has_hf_cards(self) -> None:
         creative = [p for p in BUILTIN_LORAS if not p.get("turbo")]

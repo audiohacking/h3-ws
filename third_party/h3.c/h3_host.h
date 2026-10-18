@@ -147,4 +147,28 @@ int h3_denoise_start_step(int steps, float strength);
 void h3_mix_latent_noise(float *destination, const float *clean,
                          const float *noise, size_t count, float sigma);
 
+/* Continuity Faces soft hold — Comfy KSamplerX0Inpaint noise_mask:
+ *   x0 = sample + sigma * velocity
+ *   x0 = strength * x0 + (1 - strength) * clean_init
+ *   velocity = (x0 - sample) / sigma
+ * Remask the *x0 prediction* before the Euler step. Blending the post-step
+ * latent toward clean (wrong noise level) ghosts / freezes Faces. Layout is
+ * DiT video C×T×H×W. strengths[t]=1 → keep model velocity; 0 → point at init. */
+int h3_hold_video_velocity_strengths(float *velocity, const float *sample,
+                                     const float *init, float sigma,
+                                     int channels, int time, int height,
+                                     int width, const float *strengths,
+                                     int strength_count);
+
+/* Direct latent blend (tests / tools). Not the Faces Euler hold. */
+int h3_blend_video_latent_strengths(float *video, const float *init,
+                                    int channels, int time, int height,
+                                    int width, const float *strengths,
+                                    int strength_count);
+
+/* Legacy velocity scale (kept for micro-tests). Prefer x0 hold. */
+int h3_scale_video_velocity_strengths(float *velocity, int channels, int time,
+                                      int height, int width,
+                                      const float *strengths, int strength_count);
+
 #endif

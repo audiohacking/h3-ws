@@ -671,6 +671,66 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
         h3_set_error(ctx, "denoise-strength < 1 requires --init-video");
         return 0;
     }
+    if ((params->denoise_video_strengths ||
+         params->denoise_video_strengths_file) &&
+        !(params->init_video && params->init_video[0])) {
+        h3_set_error(ctx,
+            "denoise video strengths require --init-video");
+        return 0;
+    }
+    return 1;
+}
+
+static int load_denoise_video_strengths_file(const char *path, int want,
+                                            float **out_values,
+                                            char *error, size_t error_size) {
+    *out_values = NULL;
+    if (!path || !path[0] || want < 1) {
+        snprintf(error, error_size, "invalid denoise-video-strengths file");
+        return 0;
+    }
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        snprintf(error, error_size, "cannot open denoise-video-strengths %s",
+                 path);
+        return 0;
+    }
+    float *values = (float *)malloc((size_t)want * sizeof(*values));
+    if (!values) {
+        fclose(file);
+        snprintf(error, error_size, "out of memory loading denoise strengths");
+        return 0;
+    }
+    int filled = 0;
+    while (filled < want) {
+        int ch = fgetc(file);
+        while (ch != EOF && (ch == ' ' || ch == '\t' || ch == '\n' ||
+                             ch == '\r' || ch == ','))
+            ch = fgetc(file);
+        if (ch == EOF) break;
+        ungetc(ch, file);
+        errno = 0;
+        double value = 0.0;
+        if (fscanf(file, "%lf", &value) != 1 || errno || value < 0.0 ||
+            value > 1.0) {
+            free(values);
+            fclose(file);
+            snprintf(error, error_size,
+                     "denoise-video-strengths entry %d invalid in %s",
+                     filled, path);
+            return 0;
+        }
+        values[filled++] = (float)value;
+    }
+    fclose(file);
+    if (filled != want) {
+        free(values);
+        snprintf(error, error_size,
+                 "denoise-video-strengths has %d values; need %d", filled,
+                 want);
+        return 0;
+    }
+    *out_values = values;
     return 1;
 }
 
@@ -1031,6 +1091,8 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     h3_live_preview live_preview;
     memset(&live_preview, 0, sizeof(live_preview));
     float *video = NULL, *audio = NULL;
+    float *video_hold_init = NULL;
+    float *video_hold_noise = NULL;
     h3_video_frames frames;
     memset(&frames, 0, sizeof(frames));
     h3_audio_waveform waveform;
@@ -1815,8 +1877,11 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         float sigma = denoise_start >= sigmas.steps ? 0.0f :
                       sigmas.video[denoise_start];
         h3_mix_latent_noise(video, clean, noise, video_count, sigma);
-        free(clean);
-        free(noise);
+        /* Keep clean + fixed noise for Continuity re-noise soft hold. */
+        video_hold_init = clean;
+        video_hold_noise = noise;
+        clean = NULL;
+        noise = NULL;
         hold_audio = 1;
         /* Encode soundtrack when present; hold it through denoise. Silent
          * init clips keep the seeded audio noise frozen instead. */
@@ -1880,12 +1945,51 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             preview_cb = h3_dump_denoise_latent;
             preview_opaque = &latent_dump;
         }
+        const float *video_strengths = params->denoise_video_strengths;
+        int video_strengths_count = params->denoise_video_strengths_count;
+        float *video_strengths_owned = NULL;
+        if (params->denoise_video_strengths_file &&
+            params->denoise_video_strengths_file[0]) {
+            if (!load_denoise_video_strengths_file(
+                    params->denoise_video_strengths_file, temporal.video_t,
+                    &video_strengths_owned, detail, sizeof(detail))) {
+                h3_set_error(ctx, "%s", detail);
+                goto cleanup;
+            }
+            video_strengths = video_strengths_owned;
+            video_strengths_count = temporal.video_t;
+        } else if (video_strengths &&
+                   video_strengths_count != temporal.video_t) {
+            h3_set_error(ctx,
+                "denoise video strengths count %d != latent video_t %d",
+                video_strengths_count, temporal.video_t);
+            goto cleanup;
+        }
+        if (video_strengths) {
+            if (!video_hold_init || !video_hold_noise) {
+                free(video_strengths_owned);
+                h3_set_error(ctx,
+                    "denoise video strengths require --init-video clean+noise");
+                goto cleanup;
+            }
+            fprintf(stderr,
+                    "h3: init-video soft hold %d latent frame strength(s)\n",
+                    video_strengths_count);
+        }
         if (!h3_dit_denoise_euler_preview(
                 dit, video, audio, params->denoise_reuse,
                 denoise_start, hold_audio,
+                video_strengths, video_strengths_count,
+                video_strengths ? video_hold_init : NULL,
+                video_strengths ? video_hold_noise : NULL,
                 h3_dit_progress_bridge, &progress,
                 preview_cb, preview_opaque,
                 detail, sizeof(detail))) {
+            free(video_strengths_owned);
+            free(video_hold_init);
+            free(video_hold_noise);
+            video_hold_init = NULL;
+            video_hold_noise = NULL;
             if (!live_preview.failed) h3_set_error(ctx, "%s", detail);
             if (dit_is_cached) {
                 ctx->dit = NULL;
@@ -1895,6 +1999,11 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             }
             goto cleanup;
         }
+        free(video_strengths_owned);
+        free(video_hold_init);
+        free(video_hold_noise);
+        video_hold_init = NULL;
+        video_hold_noise = NULL;
     }
     if (!dit_is_cached) h3_dit_free(dit);
     dit = NULL;
@@ -2028,6 +2137,8 @@ cleanup:
     h3_layout_free(&layout);
     if (!dit_is_cached) h3_dit_free(dit);
     if (!decoder_is_cached) h3_video_vae_decoder_free(preview_decoder);
+    free(video_hold_init);
+    free(video_hold_noise);
     free(video); free(audio); free(rgb8);
     h3_video_frames_free(&frames);
     h3_audio_waveform_free(&waveform);

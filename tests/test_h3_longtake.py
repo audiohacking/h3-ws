@@ -72,7 +72,7 @@ class _FakeEngine:
     """Copies init-video RGB with a constant offset as the 'refine' output."""
 
     def generate(self, req: Any, on_progress=None) -> None:
-        from h3_facepass import decode_clip_rgb, write_rgb_mp4
+        from h3_media import decode_clip_rgb, write_rgb_mp4
 
         if on_progress:
             on_progress({"stage": "denoise", "step": 1, "total": 2})
@@ -84,7 +84,7 @@ class _FakeEngine:
 
 def test_run_longtake_refine_fake_engine(tmp_path: Path):
     pytest.importorskip("av")
-    from h3_facepass import decode_clip_rgb, write_rgb_mp4
+    from h3_media import decode_clip_rgb, write_rgb_mp4
 
     n, h, w = 45, 32, 32
     src = np.zeros((n, h, w, 3), dtype=np.uint8)

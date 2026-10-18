@@ -671,3 +671,82 @@ void h3_mix_latent_noise(float *destination, const float *clean,
     for (size_t index = 0; index < count; index++)
         destination[index] = keep * clean[index] + sigma * noise[index];
 }
+
+int h3_hold_video_velocity_strengths(float *velocity, const float *sample,
+                                     const float *init, float sigma,
+                                     int channels, int time, int height,
+                                     int width, const float *strengths,
+                                     int strength_count) {
+    if (!velocity || !sample || !init || !strengths || channels < 1 ||
+        time < 1 || height < 1 || width < 1 || strength_count != time ||
+        !isfinite(sigma) || !(sigma > 0.0f)) {
+        return 0;
+    }
+    size_t spatial = (size_t)height * (size_t)width;
+    for (int c = 0; c < channels; c++) {
+        for (int t = 0; t < time; t++) {
+            float strength = strengths[t];
+            if (!(strength >= 0.0f)) strength = 0.0f;
+            if (strength > 1.0f) strength = 1.0f;
+            if (strength == 1.0f) continue;
+            float keep = 1.0f - strength;
+            size_t base = ((size_t)c * (size_t)time + (size_t)t) * spatial;
+            for (size_t index = 0; index < spatial; index++) {
+                size_t at = base + index;
+                float x0 = sample[at] + sigma * velocity[at];
+                x0 = strength * x0 + keep * init[at];
+                velocity[at] = (x0 - sample[at]) / sigma;
+            }
+        }
+    }
+    return 1;
+}
+
+int h3_blend_video_latent_strengths(float *video, const float *init,
+                                    int channels, int time, int height,
+                                    int width, const float *strengths,
+                                    int strength_count) {
+    if (!video || !init || !strengths || channels < 1 || time < 1 ||
+        height < 1 || width < 1 || strength_count != time) {
+        return 0;
+    }
+    size_t spatial = (size_t)height * (size_t)width;
+    for (int c = 0; c < channels; c++) {
+        for (int t = 0; t < time; t++) {
+            float strength = strengths[t];
+            if (!(strength >= 0.0f)) strength = 0.0f;
+            if (strength > 1.0f) strength = 1.0f;
+            if (strength == 1.0f) continue;
+            float keep = 1.0f - strength;
+            size_t base = ((size_t)c * (size_t)time + (size_t)t) * spatial;
+            for (size_t index = 0; index < spatial; index++) {
+                size_t at = base + index;
+                video[at] = strength * video[at] + keep * init[at];
+            }
+        }
+    }
+    return 1;
+}
+
+int h3_scale_video_velocity_strengths(float *velocity, int channels, int time,
+                                      int height, int width,
+                                      const float *strengths,
+                                      int strength_count) {
+    if (!velocity || !strengths || channels < 1 || time < 1 || height < 1 ||
+        width < 1 || strength_count != time) {
+        return 0;
+    }
+    size_t spatial = (size_t)height * (size_t)width;
+    for (int c = 0; c < channels; c++) {
+        for (int t = 0; t < time; t++) {
+            float scale = strengths[t];
+            if (!(scale >= 0.0f)) scale = 0.0f;
+            if (scale > 1.0f) scale = 1.0f;
+            if (scale == 1.0f) continue;
+            size_t base = ((size_t)c * (size_t)time + (size_t)t) * spatial;
+            for (size_t index = 0; index < spatial; index++)
+                velocity[base + index] *= scale;
+        }
+    }
+    return 1;
+}

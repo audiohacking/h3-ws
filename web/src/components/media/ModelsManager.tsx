@@ -51,13 +51,12 @@ const SIZE_HINT: Record<string, string> = {
   ref2va: "~62 GB",
   taeh3: "~22 MB",
   taomate: "~2.4 GB",
-  sam3: "~3.3 GB",
 };
 
 /**
  * Compact Models dialog. Fixed chrome (path + actions); only the component
  * list scrolls. Downloads are optional except where a workflow auto-fetches
- * (TAEH3 on launch, SAM when Faces runs).
+ * (TAEH3 on launch).
  */
 export function ModelsManager({ api, onClose, onDownloadStateChange, onPathApplied }: ModelsManagerProps) {
   const [status, setStatus] = useState<ModelsStatus | null>(null);
@@ -216,14 +215,13 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
   function startDownload(component: ModelComponent) {
     if (busyId !== null) return;
     const sizeHint = SIZE_HINT[component.id] || "~? GB";
-    const needsConfirm = component.id === "fl2va" || component.id === "ref2va" || component.id === "taomate" || component.id === "sam3";
+    const needsConfirm = component.id === "fl2va" || component.id === "ref2va" || component.id === "taomate";
     if (
       !component.present &&
       needsConfirm &&
       !window.confirm(
         `Download ${component.label}?\n\n` +
           `Size: ${sizeHint}.\n` +
-          (component.id === "sam3" ? "May need Hugging Face login + SAM license.\n" : "") +
           `Downloads resume if interrupted.\n\nProceed?`,
       )
     ) {

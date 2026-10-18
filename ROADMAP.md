@@ -24,14 +24,14 @@ Inspiration: [ComfyUI-Continuity](https://github.com/roadmaus/ComfyUI-Continuity
 
 | Continuity option | Verdict | Why |
 |-------------------|---------|-----|
-| **Faces** | **Next epic** (highest interest) | Continuity crop → low-denoise re-draw → composite (`faces.py` / `facepass.py`). Needs SAM3 + h3.c video-init / partial denoise / denoise-mask — not in the engine yet. |
+| **Faces** | **Removed — rewrite later** | First Continuity port shipped then pulled (patchwork / ghosting). Clean-slate re-implement next; no UI/API until then. |
 | **block_cache / Tea / Easy** | Skip | Comfy sampler step-skip plugins. Different from our warm VAE session + `H3_REF_CACHE_DIR` ref-latent disk cache. |
 | **Spectrum** | Skip | External forecast sampler ([ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)); fidelity tradeoffs; no h3.c path. |
 | **Motion fix** | Skip for now | Second pass (slow / re-draw / restore timing) needs latent motion profile + re-sample. |
 | **Long take refine** | **Phase 1 shipped** (opt-in) | Pixel path: `--init-video` denoise ~0.55 + RGB keyframe blend (`h3_longtake.py`). Twin `*_longtake.mp4` for A/B; default **off**. |
 | **Latent motion-context** | **Deferred** (Phase 2 epic) | True Comfy-style pin/save/load of video+audio latents + head trim in vendored h3.c. Do not block on Phase 1. |
 
-Faces is shipped. Spectrum / Tea / block_cache stay skipped. Latent motion-context is a separate h3.c fork epic after Phase 1 validation.
+Faces was pulled for a clean-slate rewrite. Spectrum / Tea / block_cache stay skipped. Latent motion-context is a separate h3.c fork epic after Phase 1 validation.
 
 ---
 

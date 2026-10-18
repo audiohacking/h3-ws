@@ -56,11 +56,22 @@ export const TURBO_CONFIG = {
   LABEL: "Tutu 8-NFE Turbo",
 
   /**
-   * Preferred on-disk filename needles (first match wins).
-   * Continuity default remains TaoMate (3-step, Ref2VA-friendly).
-   * DMAD is next for FL2VA/T2VA 4-step (Diffusers→native on download).
+   * Ranking needles among presets already classified as turbo (first match wins).
+   * Continuity default remains TaoMate (3-step). Do NOT put bare "minimax_h3" here —
+   * that is not a turbo classifier (every H3 LoRA path contains it).
    */
-  PREFERRED: ["taomate", "dmad", "tutu", "minimax_h3", "minimax-h3", "h3_turbo", "h3-turbo", "fasth3"] as const,
+  PREFERRED: [
+    "taomate",
+    "dmad",
+    "tutu",
+    "ref2v_turbo",
+    "fl2v_turbo",
+    "lightx2v",
+    "fasth3",
+    "h3_turbo",
+    "h3-turbo",
+    "8step",
+  ] as const,
 
   /** Recommended layers for turbo mode */
   LAYERS: 50,
@@ -68,7 +79,10 @@ export const TURBO_CONFIG = {
   /** Reuse must be 1 for low-step generation */
   REUSE: 1,
 
-  /** LoRA strength for turbo mode */
+  /**
+   * Fallback strength only when a turbo preset has no scale/default_scale.
+   * Real recipes carry their own defaults (TaoMate/Tutu 0.8, LightX2V/DMAD 1.0).
+   */
   SCALE: 0.8,
 
   /** Quality tiers with step counts */

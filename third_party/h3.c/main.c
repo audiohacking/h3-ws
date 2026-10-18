@@ -52,6 +52,7 @@ static void usage(const char *program) {
         "      --seed N           Random seed (default: 42)\n"
         "      --init-video PATH  RGB clip to VAE-encode as starting video latent\n"
         "      --denoise-strength F  0..1 partial denoise (needs --init-video; default 1)\n"
+        "      --denoise-video-strengths FILE  Per-latent-frame soft hold (Faces)\n"
         "      --first-frame PATH First-frame conditioning image\n"
         "      --last-frame PATH  Last-frame conditioning image\n"
         "      --ref-image PATH    Append an ordered Ref2VA image\n"
@@ -257,6 +258,7 @@ int main(int argc, char **argv) {
            OPT_USE_SLOWER_DYNAMIC_FC1_K,
            OPT_USE_SLOWER_GROUPED_QUANTIZER,
            OPT_SEED, OPT_INIT_VIDEO, OPT_DENOISE_STRENGTH,
+           OPT_DENOISE_VIDEO_STRENGTHS,
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
            OPT_REF_AUDIO, OPT_FRAMES_DIR, OPT_PREVIEW_LATENT, OPT_SHOW, OPT_ZOOM,
@@ -306,6 +308,8 @@ int main(int argc, char **argv) {
         {"seed", required_argument, NULL, OPT_SEED},
         {"init-video", required_argument, NULL, OPT_INIT_VIDEO},
         {"denoise-strength", required_argument, NULL, OPT_DENOISE_STRENGTH},
+        {"denoise-video-strengths", required_argument, NULL,
+         OPT_DENOISE_VIDEO_STRENGTHS},
         {"first-frame", required_argument, NULL, OPT_FIRST},
         {"last-frame", required_argument, NULL, OPT_LAST},
         {"ref-image", required_argument, NULL, OPT_REF_IMAGE},
@@ -493,6 +497,9 @@ int main(int argc, char **argv) {
                 params.denoise_strength = (float)value;
                 break;
             }
+            case OPT_DENOISE_VIDEO_STRENGTHS:
+                params.denoise_video_strengths_file = optarg;
+                break;
             case OPT_FIRST: params.first_frame = optarg; break;
             case OPT_LAST: params.last_frame = optarg; break;
             case OPT_REF_IMAGE: {

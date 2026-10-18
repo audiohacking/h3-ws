@@ -893,7 +893,15 @@ body {
   cursor: text;
 }
 
-.error-banner__copy {
+.error-banner__actions {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.error-banner__copy,
+.error-banner__dismiss {
   flex: 0 0 auto;
   border: 1px solid #fecaca;
   background: #fff;
@@ -906,8 +914,14 @@ body {
   cursor: pointer;
 }
 
-.error-banner__copy:hover {
+.error-banner__copy:hover,
+.error-banner__dismiss:hover {
   background: #fef2f2;
+}
+
+.error-banner__dismiss {
+  border-color: #e5e7eb;
+  color: var(--muted, #6b7280);
 }
 
 .console-modal {

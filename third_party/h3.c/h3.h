@@ -140,13 +140,21 @@ typedef struct {
     /* 0..1 — fraction of the schedule to denoise. 1 = full noise (default);
      * 0.45 is Continuity's Faces default. Ignored without init_video. */
     float denoise_strength;
+    /* Optional Continuity Faces soft hold: one multiplier per DiT latent
+     * frame (video_t). NULL / count 0 → full updates (legacy). Values in
+     * [0,1] scale the Euler velocity per temporal slice. */
+    const float *denoise_video_strengths;
+    int denoise_video_strengths_count;
+    /* Alternate to the pointer above: whitespace/comma-separated floats file
+     * with exactly video_t values. Loaded inside h3_generate. */
+    const char *denoise_video_strengths_file;
 } h3_params;
 
 #define H3_PARAMS_DEFAULT { \
     H3_DEFAULT_WIDTH, H3_DEFAULT_HEIGHT, H3_DEFAULT_FRAMES, H3_DEFAULT_STEPS, \
     UINT64_C(42), NULL, NULL, NULL, NULL, 0, H3_REFERENCE_IMAGE_MATCH, \
     1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
-    NULL, NULL, NULL, NULL, NULL, 1.0f \
+    NULL, NULL, NULL, NULL, NULL, 1.0f, NULL, 0, NULL \
 }
 
 typedef struct {

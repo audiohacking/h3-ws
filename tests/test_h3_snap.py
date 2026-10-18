@@ -308,6 +308,49 @@ class QualityTests(unittest.TestCase):
         self.assertIn("--use-slower-bf16-mlp", argv)
         self.assertNotIn("--token-reduction", argv)
 
+    def test_init_video_strengths_file_flag(self) -> None:
+        strengths = Path("/tmp/denoise_video_strengths.txt")
+        strengths.write_text("0.8,0.5,0.35\n", encoding="utf-8")
+        req = GenerateRequest(
+            prompt="face",
+            output_path=Path("/tmp/out.mp4"),
+            width=512,
+            height=512,
+            init_video=Path("/tmp/init.mp4"),
+            denoise_strength=0.45,
+            denoise_video_strengths_file=strengths,
+        )
+        argv = build_h3_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
+        self.assertIn("--denoise-video-strengths", argv)
+        self.assertEqual(argv[argv.index("--denoise-video-strengths") + 1], str(strengths))
+
+    def test_m3_init_video_forces_native_canvas_not_fast_384(self) -> None:
+        """Faces on Ultra: fast@512 must not denoise at 384 (doubled paste)."""
+        from h3_backend import apply_platform_generate_defaults
+
+        req = GenerateRequest(
+            prompt="face",
+            output_path=Path("/tmp/out.mp4"),
+            width=512,
+            height=512,
+            quality="fast",
+            init_video=Path("/tmp/init.mp4"),
+            denoise_strength=0.45,
+            int8_row_fc2=False,
+        )
+        apply_platform_generate_defaults(req, chip_class="m3")
+        self.assertFalse(req.token_reduction)
+        self.assertEqual(req.render_width, 512)
+        self.assertEqual(req.render_height, 512)
+        # Init-video / Faces always uses BF16 close path (int8 melts crops).
+        self.assertTrue(req.use_slower_bf16_mlp)
+        argv = build_h3_argv(h3_bin=Path("/opt/h3"), model_dir=Path("/m"), req=req)
+        self.assertNotIn("--token-reduction", argv)
+        self.assertIn("--use-slower-bf16-mlp", argv)
+        # Native canvas — no --render-width 384.
+        if "--render-width" in argv:
+            self.assertEqual(argv[argv.index("--render-width") + 1], "512")
+
     def test_m3_generate_unchanged(self) -> None:
         from h3_backend import apply_platform_generate_defaults
 

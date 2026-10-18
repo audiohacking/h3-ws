@@ -337,6 +337,38 @@ static void test_rng_and_solver(void) {
     h3_mix_latent_noise(mixed, clean, noise, 2, 0.25f);
     CHECK(close_enough(mixed[0], 0.75, 1e-6));
     CHECK(close_enough(mixed[1], 0.75, 1e-6));
+
+    /* Soft hold: strength 0 points velocity at clean init; 1 leaves it. */
+    {
+        enum { C = 2, T = 3, H = 2, W = 2, N = C * T * H * W };
+        float sample[N];
+        float velocity[N];
+        float init[N];
+        for (size_t index = 0; index < N; index++) {
+            sample[index] = 4.0f;
+            velocity[index] = 2.0f; /* x0 = 4 + 0.5*2 = 5 */
+            init[index] = 1.0f;
+        }
+        float strengths[] = {0.0f, 0.5f, 1.0f};
+        float sigma = 0.5f;
+        CHECK(h3_hold_video_velocity_strengths(
+            velocity, sample, init, sigma, C, T, H, W, strengths, T));
+        /* t=0 strength 0 → x0=1 → v=(1-4)/0.5 = -6 */
+        CHECK(close_enough(velocity[0], -6.0f, 1e-6));
+        CHECK(close_enough(velocity[3], -6.0f, 1e-6));
+        /* t=1 strength 0.5 → x0=0.5*5+0.5*1=3 → v=(3-4)/0.5 = -2 */
+        CHECK(close_enough(velocity[4], -2.0f, 1e-6));
+        /* t=2 strength 1 → unchanged */
+        CHECK(close_enough(velocity[8], 2.0f, 1e-6));
+        CHECK(close_enough(velocity[11], 2.0f, 1e-6));
+        CHECK(close_enough(velocity[T * H * W], -6.0f, 1e-6));
+        CHECK(close_enough(velocity[T * H * W + H * W], -2.0f, 1e-6));
+        CHECK(close_enough(velocity[T * H * W + 2 * H * W], 2.0f, 1e-6));
+        CHECK(!h3_hold_video_velocity_strengths(
+            velocity, sample, init, sigma, C, T, H, W, strengths, T - 1));
+        CHECK(!h3_hold_video_velocity_strengths(
+            velocity, sample, init, 0.0f, C, T, H, W, strengths, T));
+    }
 }
 
 static void test_rgb_resize(void) {

@@ -375,7 +375,36 @@ def _stamp_encode_video_pts(frame: Any, pts: int, fps: float) -> None:
     frame.time_base = tb
 
 
-def _add_h264_stream(out: Any, *, fps: float, width: int, height: int, preset: str = "veryfast", crf: str = "18") -> Any:
+def _copy_video_color_tags(dst_stream: Any, src_stream: Any | None) -> None:
+    """Copy non-unspecified color tags so re-encoded refs keep BT.709 / MPEG range."""
+    if src_stream is None:
+        return
+    src_ctx = getattr(src_stream, "codec_context", None)
+    dst_ctx = getattr(dst_stream, "codec_context", None)
+    if src_ctx is None or dst_ctx is None:
+        return
+    for attr in ("color_range", "colorspace", "color_primaries", "color_trc"):
+        try:
+            val = getattr(src_ctx, attr, None)
+            if val is None:
+                continue
+            if int(val) == 0:  # UNSPECIFIED
+                continue
+            setattr(dst_ctx, attr, val)
+        except (TypeError, ValueError, AttributeError):
+            continue
+
+
+def _add_h264_stream(
+    out: Any,
+    *,
+    fps: float,
+    width: int,
+    height: int,
+    preset: str = "veryfast",
+    crf: str = "18",
+    color_from: Any | None = None,
+) -> Any:
     """libx264 stream with rate + time_base hint matching PyAV encoding guidance."""
     rate = max(1, int(round(float(fps))))
     stream = out.add_stream("libx264", rate=rate)
@@ -384,7 +413,31 @@ def _add_h264_stream(out: Any, *, fps: float, width: int, height: int, preset: s
     stream.pix_fmt = "yuv420p"
     stream.options = {"preset": preset, "crf": crf}
     stream.time_base = _video_time_base(rate)
+    _copy_video_color_tags(stream, color_from)
     return stream
+
+
+def _frame_for_h264_encode(frame: Any, *, fps: float, pts: int) -> Any:
+    """Prepare a decoded frame for libx264 without scrubbing color range.
+
+    Already-``yuv420p`` frames are left in place (only PTS retagged). Other
+    formats convert with ``src_color_range``/``dst_color_range`` preserved so
+    swscale does not treat limited-range BT.709 as full-range (see PyAV
+    ColorRange / issue #2149).
+    """
+    fmt = getattr(getattr(frame, "format", None), "name", None)
+    if fmt != "yuv420p":
+        kwargs: dict[str, Any] = {"format": "yuv420p"}
+        src_range = getattr(frame, "color_range", None)
+        try:
+            if src_range is not None and int(src_range) != 0:
+                kwargs["src_color_range"] = src_range
+                kwargs["dst_color_range"] = src_range
+        except (TypeError, ValueError):
+            pass
+        frame = frame.reformat(**kwargs)
+    _stamp_encode_video_pts(frame, pts, fps)
+    return frame
 
 
 def _mux_audio_frame(out, stream, resampler, frame) -> None:
@@ -549,6 +602,7 @@ def adapt_audio_for_h3(src: Path | str, dest: Path | str) -> Path:
                     fps=fps,
                     width=int(v_in.codec_context.width or 0),
                     height=int(v_in.codec_context.height or 0),
+                    color_from=v_in,
                 )
             if has_video:
                 a_out = out.add_stream("aac", rate=48000)
@@ -567,8 +621,7 @@ def adapt_audio_for_h3(src: Path | str, dest: Path | str) -> Path:
 
             for frame in inp.decode():
                 if isinstance(frame, VideoFrame) and v_out is not None:
-                    frame = frame.reformat(format="yuv420p")
-                    _stamp_encode_video_pts(frame, v_pts, fps)
+                    frame = _frame_for_h264_encode(frame, fps=fps, pts=v_pts)
                     v_pts += 1
                     for packet in v_out.encode(frame):
                         out.mux(packet)
@@ -796,6 +849,7 @@ def trim_media(
                     fps=fps,
                     width=int(v_in.codec_context.width or 0),
                     height=int(v_in.codec_context.height or 0),
+                    color_from=v_in,
                 )
             if has_audio:
                 if has_video:
@@ -822,9 +876,8 @@ def trim_media(
                         break
                     continue
                 if isinstance(frame, VideoFrame) and v_out is not None:
-                    frame = frame.reformat(format="yuv420p")
-                    # PyAV Time docs: encode PTS in 1/fps, not the source time_base.
-                    _stamp_encode_video_pts(frame, v_pts, fps)
+                    # PyAV Time docs: encode PTS in 1/fps; keep yuv420p pixels / color tags.
+                    frame = _frame_for_h264_encode(frame, fps=fps, pts=v_pts)
                     v_pts += 1
                     for packet in v_out.encode(frame):
                         out.mux(packet)
@@ -1077,4 +1130,134 @@ def concat_mp4s(paths: list[Path], dest: Path) -> Path:
             src.close()
     finally:
         out.close()
+    return dest
+
+
+def decode_clip_rgb(path: str | Path) -> tuple[Any, int, int]:
+    """Decode a clip to ``[T,H,W,3]`` uint8 RGB plus width/height."""
+    import numpy as np
+    import av
+
+    container = av.open(str(path))
+    try:
+        frames: list[Any] = []
+        for frame in container.decode(video=0):
+            frames.append(frame.to_ndarray(format="rgb24"))
+        if not frames:
+            raise ValueError(f"no video frames in {path}")
+        arr = np.stack(frames, axis=0)
+        h, w = int(arr.shape[1]), int(arr.shape[2])
+        return arr, w, h
+    finally:
+        container.close()
+
+
+def write_rgb_mp4(frames: Any, dest: str | Path, fps: int = 24) -> Path:
+    """Write ``[T,H,W,3]`` uint8 RGB to an H.264 MP4 (silent)."""
+    import av
+    import numpy as np
+
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    h, w = int(frames.shape[1]), int(frames.shape[2])
+    out = av.open(str(dest), mode="w")
+    try:
+        stream = out.add_stream("libx264", rate=fps)
+        stream.width = w
+        stream.height = h
+        stream.pix_fmt = "yuv420p"
+        stream.time_base = Fraction(1, int(fps))
+        stream.options = {
+            "crf": "12",
+            "preset": "veryfast",
+            "bf": "0",
+            "g": "1",
+            "keyint_min": "1",
+            "sc_threshold": "0",
+            "x264-params": "keyint=1:min-keyint=1:scenecut=0:bframes=0",
+        }
+        for index, frame in enumerate(frames):
+            vf = av.VideoFrame.from_ndarray(np.asarray(frame), format="rgb24")
+            vf.pts = int(index)
+            for packet in stream.encode(vf):
+                out.mux(packet)
+        for packet in stream.encode():
+            out.mux(packet)
+    finally:
+        out.close()
+    return dest
+
+
+def remux_audio(
+    video_no_audio: str | Path, audio_source: str | Path, dest: str | Path
+) -> Path:
+    """Copy video from ``video_no_audio`` and audio stream(s) from ``audio_source``."""
+    import shutil
+
+    import av
+
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    video_no_audio = Path(video_no_audio)
+    audio_source = Path(audio_source)
+
+    ain = av.open(str(audio_source))
+    try:
+        has_audio = any(s.type == "audio" for s in ain.streams)
+    finally:
+        ain.close()
+    if not has_audio:
+        shutil.copy2(video_no_audio, dest)
+        return dest
+
+    try:
+        vin = av.open(str(video_no_audio))
+        ain = av.open(str(audio_source))
+        try:
+            out = av.open(str(dest), mode="w")
+            try:
+                v_in = vin.streams.video[0]
+                a_in = next(s for s in ain.streams if s.type == "audio")
+                try:
+                    v_out = out.add_stream(template=v_in)
+                    a_out = out.add_stream(template=a_in)
+                    copy_packets = True
+                except TypeError:
+                    rate = v_in.average_rate or 24
+                    v_out = out.add_stream("libx264", rate=rate)
+                    v_out.width = v_in.width
+                    v_out.height = v_in.height
+                    v_out.pix_fmt = "yuv420p"
+                    a_out = out.add_stream("aac")
+                    copy_packets = False
+                if copy_packets:
+                    for packet in vin.demux(v_in):
+                        if packet.dts is None:
+                            continue
+                        packet.stream = v_out
+                        out.mux(packet)
+                    for packet in ain.demux(a_in):
+                        if packet.dts is None:
+                            continue
+                        packet.stream = a_out
+                        out.mux(packet)
+                else:
+                    for frame in vin.decode(v_in):
+                        for packet in v_out.encode(frame):
+                            out.mux(packet)
+                    for packet in v_out.encode(None):
+                        out.mux(packet)
+                    for frame in ain.decode(a_in):
+                        for packet in a_out.encode(frame):
+                            out.mux(packet)
+                    for packet in a_out.encode(None):
+                        out.mux(packet)
+            finally:
+                out.close()
+        finally:
+            vin.close()
+            ain.close()
+    except Exception as exc:
+        log.warning("audio remux failed (%s); keeping silent video", exc)
+        shutil.copy2(video_no_audio, dest)
     return dest

@@ -104,15 +104,6 @@ export type ComposerPanelProps = {
   onSsdStreaming: (v: boolean) => void;
   upscale?: boolean;
   onUpscale?: (v: boolean) => void;
-  facesConfig?: import("../../types").FacesConfigPublic | null;
-  facesEnabled?: boolean;
-  facesCanvas?: number;
-  facesDenoise?: number;
-  facesSeed?: number;
-  onFacesEnabled?: (v: boolean) => void;
-  onFacesCanvas?: (v: number) => void;
-  onFacesDenoise?: (v: number) => void;
-  onFacesSeed?: (v: number) => void;
   longtakeConfig?: import("../../types").LongTakeConfigPublic | null;
   longtakeEnabled?: boolean;
   longtakeDenoise?: number;
@@ -405,15 +396,6 @@ export function ComposerPanel(props: ComposerPanelProps) {
           clipMultiplierMax={props.config.clip_multiplier_max ?? 10}
           showClips={compiled.modeHint !== "ref2va"}
           onClipMultiplier={props.onClipMultiplier}
-          facesConfig={props.facesConfig}
-          facesEnabled={props.facesEnabled}
-          facesCanvas={props.facesCanvas}
-          facesDenoise={props.facesDenoise}
-          facesSeed={props.facesSeed}
-          onFacesEnabled={props.onFacesEnabled}
-          onFacesCanvas={props.onFacesCanvas}
-          onFacesDenoise={props.onFacesDenoise}
-          onFacesSeed={props.onFacesSeed}
           longtakeConfig={props.longtakeConfig}
           longtakeEnabled={props.longtakeEnabled}
           longtakeDenoise={props.longtakeDenoise}

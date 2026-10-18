@@ -2,14 +2,28 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { TURBO_CONFIG, type TurboTier } from "../../config";
 import type { LoraPreset } from "../../types";
 
+/**
+ * Distill / turbo adapters only. Prefer the backend `turbo` flag; fall back to
+ * tight filename needles — never bare "minimax_h3" (that matches every H3 LoRA).
+ */
 export function isTurboPreset(p: LoraPreset): boolean {
-  if (p.turbo) return true;
-  const hay = `${p.label} ${p.spec}`.toLowerCase();
-  return TURBO_CONFIG.PREFERRED.some((n) => hay.includes(n));
+  if (p.turbo === true || p.category === "turbo") return true;
+  const hay = `${p.id} ${p.label} ${p.spec}`.toLowerCase();
+  if (/\b(taomate|dmad|fasth3)\b/.test(hay)) return true;
+  if (/tutu|20to8[_-]?nfe/.test(hay)) return true;
+  // H3/MiniMax distill packs (LightX2V, *turbo*, *8step*, …) — require h3|minimax.
+  if (
+    /(?:lightx2v|[_-]turbo[_-]|\bdmd\b|8step|3step|4step).*(?:h3|minimax)|(?:h3|minimax).*(?:lightx2v|[_-]turbo[_-]|dmd|8step|3step|4step|nfe)/.test(
+      hay,
+    )
+  ) {
+    return true;
+  }
+  return false;
 }
 
 export function rankTurboPreset(p: LoraPreset): number {
-  const hay = `${p.label} ${p.spec}`.toLowerCase();
+  const hay = `${p.id} ${p.label} ${p.spec}`.toLowerCase();
   const rank = TURBO_CONFIG.PREFERRED.findIndex((n) => hay.includes(n));
   return rank < 0 ? 99 : rank;
 }
@@ -17,6 +31,27 @@ export function rankTurboPreset(p: LoraPreset): number {
 export function pickDefaultTurboId(presets: LoraPreset[]): string | null {
   const ranked = presets.filter(isTurboPreset).sort((a, b) => rankTurboPreset(a) - rankTurboPreset(b));
   return ranked[0]?.id ?? null;
+}
+
+/**
+ * Published recipe strength for a turbo adapter. Prefer `default_scale` from the
+ * API; fall back to Continuity / HF card defaults so a stale catalog (e.g. old
+ * LightX2V 0.6) cannot ship the wrong fuse weight.
+ */
+export function recipeScaleForTurbo(p: LoraPreset): number {
+  if (typeof p.default_scale === "number" && Number.isFinite(p.default_scale)) {
+    return p.default_scale;
+  }
+  const hay = `${p.id} ${p.label} ${p.spec}`.toLowerCase();
+  if (/\bdmad\b/.test(hay) && !/8step/.test(hay)) return 1.0;
+  if (
+    /(?:lightx2v|ref2v_turbo|fl2v_turbo|[_-]turbo[_-].*8step|8step.*turbo)/.test(hay) &&
+    /(?:h3|minimax)/.test(hay)
+  ) {
+    return 1.0;
+  }
+  if (/\b(taomate|tutu|20to8|fasth3)\b/.test(hay)) return 0.8;
+  return Number.isFinite(p.scale) ? p.scale : TURBO_CONFIG.SCALE;
 }
 
 interface TurboToggleProps {
@@ -153,15 +188,16 @@ export function TurboToggle({
                 title={opt.spec}
                 onClick={() => {
                   if (locked) return;
+                  // Select alone enables turbo (applyTurboPreset). Do NOT also call
+                  // onChange(true) — that raced with a stale turboLoraId and re-applied TaoMate.
                   onSelectId(opt.id);
                   setMenuOpen(false);
-                  if (!enabled) onChange(true);
                 }}
               >
                 <span className="turbo-menu__name">{shortLabel(opt)}</span>
                 <span className="turbo-menu__meta">
                   {opt.steps ? `${opt.steps} step` : "turbo"}
-                  {opt.scale != null ? ` · ×${opt.scale}` : ""}
+                  {` · ×${recipeScaleForTurbo(opt)}`}
                 </span>
               </button>
             );
@@ -181,7 +217,11 @@ export function TurboToggle({
             min={0}
             max={2}
             step={0.05}
-            value={Number.isFinite(selected.scale) ? selected.scale : TURBO_CONFIG.SCALE}
+            value={
+              Number.isFinite(selected.scale)
+                ? selected.scale
+                : recipeScaleForTurbo(selected)
+            }
             disabled={locked}
             onChange={(e) => {
               if (locked) return;

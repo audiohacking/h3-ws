@@ -64,7 +64,7 @@ for pkg in ("av", "tokenizers", "mlx", "cv2"):
     except Exception as exc:
         print(f"[H3WS.spec] collect_dynamic_libs({pkg}): {exc}")
 
-for pkg in ("av", "certifi", "huggingface_hub", "mlx", "mlx_vlm", "cv2", "transformers"):
+for pkg in ("av", "certifi", "huggingface_hub", "mlx", "cv2", "transformers"):
     try:
         datas += collect_data_files(pkg)
     except Exception as exc:
@@ -103,9 +103,6 @@ hiddenimports = [
     "certifi",
     "h3_preview",
     "h3_lora",
-    "h3_sam",
-    "h3_faces",
-    "h3_facepass",
     "h3_media",
     "h3_crop",
     "h3_session",
@@ -117,16 +114,11 @@ hiddenimports = [
     "cv2",
     "mlx",
     "mlx.core",
-    "mlx_vlm",
-    "mlx_vlm.utils",
-    "mlx_vlm.models.sam3.generate",
-    "mlx_vlm.models.sam3_1.processing_sam3_1",
     *collect_submodules("uvicorn"),
     *collect_submodules("fastapi"),
     *collect_submodules("starlette"),
 ]
-# Faces SAM needs the full mlx_vlm model tree; collect_submodules is best-effort.
-for pkg in ("mlx", "mlx_vlm", "mlx_lm"):
+for pkg in ("mlx",):
     try:
         hiddenimports += collect_submodules(pkg)
     except Exception as exc:

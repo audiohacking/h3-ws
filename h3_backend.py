@@ -461,19 +461,53 @@ def resolve_int8_row_fc2(req: "GenerateRequest", *, metal4: bool) -> bool:
     return False
 
 
+def apply_init_video_defaults(req: "GenerateRequest") -> "GenerateRequest":
+    """Init-video (long-take / future refine): native canvas + BF16 close path.
+
+    ``quality=fast`` on a 512×512 canvas otherwise picks render 384×384.
+    The crop is denoised small then upscaled, so the paste no longer lines up
+    with the source face — classic doubled / ghosted merge. Lock native canvas
+    and disable token-reduction for every init-video job (M3 Ultra + M5).
+
+    Also force close-reference BF16 DiT — default int8 melts init-video crops
+    even on Ultra when ``--denoise-strength`` is partial.
+    """
+    if req.init_video is None:
+        return req
+    req.token_reduction = False
+    if req.render_width is None and req.render_height is None:
+        req.render_width = int(req.width)
+        req.render_height = int(req.height)
+    req.int8_row_fc2 = False
+    req.use_slower_bf16_mlp = True
+    req.use_slower_bf16_qkv = True
+    req.use_slower_bf16_attention_output = True
+    log.info(
+        "init-video: native canvas %sx%s BF16 close path (no fast@512→384)",
+        req.width,
+        req.height,
+    )
+    return req
+
+
 def apply_platform_generate_defaults(
     req: "GenerateRequest",
     *,
     chip_class: str | None = None,
     explicit_int8_row_fc2: bool | None = None,
 ) -> "GenerateRequest":
-    """Apply chip-optimal h3.c settings. **M3 / non-M5: no-op.**
+    """Apply chip-optimal h3.c settings. **M3 / non-M5: no-op for BF16.**
 
     M5's default int8 DiT (MLP/QKV/attn + row-FC2) deforms faces in normal
     Ref2VA/FL2VA output — not only the Faces post-pass. Product default on M5
     is therefore the close-reference BF16 stack (same math class as M3 Ultra).
     Pass ``explicit_int8_row_fc2=True`` to keep the fast int8 path for A/B.
+
+    Init-video canvas locking is chip-agnostic — see ``apply_init_video_defaults``.
     """
+    # Always: init-video must not inherit fast@512 → 384 render.
+    apply_init_video_defaults(req)
+
     klass = chip_class if chip_class is not None else apple_silicon_class()
     if klass != "m5":
         return req
@@ -485,15 +519,9 @@ def apply_platform_generate_defaults(
     req.use_slower_bf16_mlp = True
     req.use_slower_bf16_qkv = True
     req.use_slower_bf16_attention_output = True
-    # init-video / Faces crops: also kill fast@512 → 384 + token-reduction.
     if req.init_video is not None:
-        req.token_reduction = False
-        if req.render_width is None and req.render_height is None:
-            req.render_width = int(req.width)
-            req.render_height = int(req.height)
         log.info(
-            "M5 init-video: close-reference BF16 "
-            "(native %sx%s, no token-reduction)",
+            "M5 init-video: close-reference BF16 (%sx%s)",
             req.width,
             req.height,
         )
@@ -503,8 +531,8 @@ def apply_platform_generate_defaults(
 
 
 def m5_close_path_env(req: "GenerateRequest", env: dict[str, str]) -> dict[str, str]:
-    """CPU Euler sampler on M5 when using the BF16 close path (Ultra parity)."""
-    if not req.use_slower_bf16_mlp or apple_silicon_class() != "m5":
+    """CPU Euler when using the BF16 close path (Faces / M5 parity)."""
+    if not req.use_slower_bf16_mlp:
         return env
     out = dict(env)
     out.setdefault("H3_CPU_SAMPLER", "1")
@@ -843,6 +871,8 @@ class GenerateRequest:
     # Faces / img2vid: VAE-encode this clip as the starting video latent.
     init_video: Path | None = None
     denoise_strength: float | None = None
+    # Soft hold: per-latent-frame multipliers (length = video_t).
+    denoise_video_strengths_file: Path | None = None
 
 
 def uses_ref2va(req: GenerateRequest) -> bool:
@@ -959,8 +989,17 @@ def build_h3_argv(
         if strength >= 1.0:
             raise ValueError("init_video requires denoise_strength < 1")
         cmd.extend(["--denoise-strength", f"{strength:.4g}"])
+        if req.denoise_video_strengths_file is not None:
+            strengths_path = Path(req.denoise_video_strengths_file)
+            if not strengths_path.is_file():
+                raise ValueError(
+                    f"denoise_video_strengths_file not found: {strengths_path}"
+                )
+            cmd.extend(["--denoise-video-strengths", str(strengths_path)])
     elif req.denoise_strength is not None and float(req.denoise_strength) < 1.0:
         raise ValueError("denoise_strength < 1 requires init_video")
+    elif req.denoise_video_strengths_file is not None:
+        raise ValueError("denoise_video_strengths_file requires init_video")
     append_ref_flags(cmd, req.refs)
     return cmd
 

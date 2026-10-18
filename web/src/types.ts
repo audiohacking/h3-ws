@@ -3,6 +3,8 @@ export interface LoraPreset {
   label: string;
   spec: string;
   scale: number;
+  /** Published recipe strength; Turbo select resets `scale` from this. */
+  default_scale?: number;
   custom?: boolean;
   /** Discovered under models/loras — not removable via custom delete. */
   local?: boolean;
@@ -59,7 +61,7 @@ export interface Config {
   ram_gb?: number | null;
   recommend_ssd_streaming?: boolean;
   metal4?: boolean;
-  /** ``m5`` | ``m3`` | ``other`` — drives M5 Faces BF16 close path. */
+  /** ``m5`` | ``m3`` | ``other``. */
   chip_class?: string;
   chip_brand?: string;
   quality_presets: QualityPreset[];
@@ -86,24 +88,9 @@ export interface Config {
   taeh3_available?: boolean;
   refine?: RefineSettingsPublic;
   network?: NetworkSettingsPublic;
-  faces?: FacesConfigPublic;
   longtake?: LongTakeConfigPublic;
 }
 
-export interface FacesConfigPublic {
-  available: boolean;
-  sam3_ready: boolean;
-  backend?: string;
-  enabled_default?: boolean;
-  canvas: number;
-  canvas_min: number;
-  canvas_max: number;
-  denoise: number;
-  denoise_min: number;
-  denoise_max: number;
-  abstain_px?: number;
-  note?: string;
-}
 
 export interface LongTakeConfigPublic {
   available: boolean;

@@ -104,10 +104,16 @@ int h3_dit_denoise(h3_dit *dit, float *video_latent, float *audio_latent,
 
 /* Current serving sampler: independent video/audio shifted Euler grids.
  * start_step skips early schedule entries (img2vid / Faces). hold_audio
- * freezes the audio latent (Euler delta 0) while video continues. */
+ * freezes the audio latent (Euler delta 0) while video continues.
+ * video_strengths + hold_init: Continuity Faces noise_mask — remask the x0
+ * prediction toward clean init before each Euler step (Comfy X0Inpaint).
+ * hold_noise unused (ABI). NULL strengths → full updates. */
 int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
                          int start_step, int hold_audio,
+                         const float *video_strengths, int video_strengths_count,
+                         const float *video_hold_init,
+                         const float *video_hold_noise,
                          h3_dit_progress progress, void *progress_opaque,
                          char *error, size_t error_size);
 
@@ -118,6 +124,9 @@ int h3_dit_denoise_euler_preview(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
                          int start_step, int hold_audio,
+                         const float *video_strengths, int video_strengths_count,
+                         const float *video_hold_init,
+                         const float *video_hold_noise,
                          h3_dit_progress progress, void *progress_opaque,
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size);

@@ -40,6 +40,16 @@ TUTU_GUIDANCE = (
     "(scripts/build_h3.sh) so --lora is fused at DiT load."
 )
 
+LIGHTX2V_REPO = "lightx2v/Minimax-h3-Turbo"
+LIGHTX2V_REF2V_FILE = "minimax_h3_ref2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors"
+LIGHTX2V_FL2V_FILE = "minimax_h3_fl2v_turbo_8step_v1.0_comfyui_bf16.safetensors"
+LIGHTX2V_GUIDANCE = (
+    "LightX2V Continuity 8-step turbo (BF16 Comfy pack). "
+    "Recipe strength is 1.0 at 8 steps — same as the NVIDIA ComfyUI workflow. "
+    "Ref2VA → ref2v_turbo_8step; FL2VA/T2VA → fl2v_turbo_8step. "
+    "Do not turn this down to 0.6 unless you are A/B testing."
+)
+
 
 def _hf_card(repo: str) -> str:
     return f"https://huggingface.co/{repo}"
@@ -69,6 +79,8 @@ def _recipe(
         "label": label,
         "spec": _hf_resolve(repo, filename),
         "scale": scale,
+        # Immutable recipe strength — UI may edit `scale`; Turbo select resets from this.
+        "default_scale": scale,
         "guidance": guidance,
         "category": category,
         "card_url": _hf_card(repo),
@@ -114,12 +126,17 @@ _DISK_LORA_HINTS: tuple[dict[str, Any], ...] = (
         "card_url": _hf_card(TUTU_REPO),
     },
     {
-        "match": re.compile(r"(?:lightx2v|[_-]turbo[_-]|\bdmd\b|8step).*(?:h3|minimax)|(?:h3|minimax).*(?:lightx2v|turbo|dmd|8step)", re.I),
-        "scale": 0.6,
+        # Continuity / LightX2V 8-step packs — strength 1.0 (not 0.6).
+        "match": re.compile(
+            r"(?:lightx2v|[_-]turbo[_-]|8step).*(?:h3|minimax)|(?:h3|minimax).*(?:lightx2v|[_-]turbo[_-]|8step)",
+            re.I,
+        ),
+        "scale": 1.0,
         "steps": 8,
-        "guidance": "Turbo / distill adapter — try 6–8 steps at the suggested strength.",
+        "guidance": LIGHTX2V_GUIDANCE,
         "turbo": True,
         "category": "turbo",
+        "card_url": _hf_card(LIGHTX2V_REPO),
     },
     {
         "match": re.compile(r"(?:fasth3|3step|3[_-]?nfe).*(?:h3|minimax)|(?:h3|minimax).*(?:fasth3|3step|3[_-]?nfe)", re.I),
@@ -329,6 +346,32 @@ BUILTIN_LORAS: list[dict[str, Any]] = [
         layers=50,
         reuse=1,
         guidance=TUTU_GUIDANCE,
+        category="turbo",
+        turbo=True,
+    ),
+    _recipe(
+        id="lightx2v_ref2v_turbo_8step",
+        label="LightX2V Ref2VA 8-step Turbo",
+        repo=LIGHTX2V_REPO,
+        filename=LIGHTX2V_REF2V_FILE,
+        scale=1.0,
+        steps=8,
+        layers=50,
+        reuse=1,
+        guidance=LIGHTX2V_GUIDANCE,
+        category="turbo",
+        turbo=True,
+    ),
+    _recipe(
+        id="lightx2v_fl2v_turbo_8step",
+        label="LightX2V FL2VA 8-step Turbo",
+        repo=LIGHTX2V_REPO,
+        filename=LIGHTX2V_FL2V_FILE,
+        scale=1.0,
+        steps=8,
+        layers=50,
+        reuse=1,
+        guidance=LIGHTX2V_GUIDANCE,
         category="turbo",
         turbo=True,
     ),
@@ -978,15 +1021,17 @@ def _entry_for_lora_path(path: Path, *, root: Path | None = None, source: str = 
     hint = _hint_for_lora_path(path)
     builtin = _builtin_match_for_path(path)
     label_root = root if root is not None else path.parent
+    scale = float(
+        hint.get("scale")
+        or (builtin or {}).get("scale")
+        or 0.8
+    )
     entry: dict[str, Any] = {
         "id": _local_lora_id(path),
         "label": _human_lora_label(path, label_root),
         "spec": str(path.resolve()),
-        "scale": float(
-            hint.get("scale")
-            or (builtin or {}).get("scale")
-            or 0.8
-        ),
+        "scale": scale,
+        "default_scale": scale,
         "local": True,
         "cached": True,
         "path": str(path.resolve()),

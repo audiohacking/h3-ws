@@ -9,7 +9,7 @@ import { LoraModal } from "./components/lora/LoraModal";
 import { TimelineStrip } from "./components/timeline/TimelineStrip";
 import { ModelsManager } from "./components/media/ModelsManager";
 import { ComposerPanel } from "./components/composer/ComposerPanel";
-import { isTurboPreset, pickDefaultTurboId } from "./components/composer/TurboToggle";
+import { isTurboPreset, pickDefaultTurboId, recipeScaleForTurbo } from "./components/composer/TurboToggle";
 import { FeaturesPopup } from "./components/composer/FeaturesPopup";
 import { DebugModal } from "./components/DebugModal";
 import { RefinePanel } from "./components/composer/RefinePanel";
@@ -350,10 +350,8 @@ export default function App() {
   const [turboTier, setTurboTier] = useState<TurboTier>(TURBO_CONFIG.DEFAULT_TIER);
   const [turboLoading, setTurboLoading] = useState(false);
   const [turboLoraId, setTurboLoraId] = useState<string | null>(null);
-  const [facesEnabled, setFacesEnabled] = useState(false);
-  const [facesCanvas, setFacesCanvas] = useState(512);
-  const [facesDenoise, setFacesDenoise] = useState(0.45);
-  const [facesSeed, setFacesSeed] = useState(42);
+  const turboLoraIdRef = useRef<string | null>(null);
+  turboLoraIdRef.current = turboLoraId;
   const [longtakeEnabled, setLongtakeEnabled] = useState(false);
   const [longtakeDenoise, setLongtakeDenoise] = useState(0.55);
   const [longtakeKeyframes, setLongtakeKeyframes] = useState("0:0, 22:0, 44:1");
@@ -491,10 +489,6 @@ export default function App() {
         setLoraPresets(cfg.lora_presets ?? []);
         setTurboLoraId((prev) => prev ?? pickDefaultTurboId(cfg.lora_presets ?? []));
         if (cfg.refine) setRefineSettings(cfg.refine);
-        if (cfg.faces) {
-          setFacesCanvas(cfg.faces.canvas);
-          setFacesDenoise(cfg.faces.denoise);
-        }
         if (cfg.longtake) {
           setLongtakeDenoise(cfg.longtake.denoise);
           if (cfg.longtake.keyframes) setLongtakeKeyframes(cfg.longtake.keyframes);
@@ -731,6 +725,11 @@ export default function App() {
     if (chosen.cached === false) {
       await ensureLoraSpec(chosen.spec, chosen.label);
     }
+    // Always re-apply the published recipe strength (users won't guess 1.0 vs 0.8).
+    const recipeScale = recipeScaleForTurbo(chosen);
+    setLoraPresets((prev) =>
+      prev.map((p) => (p.id === chosen.id ? { ...p, scale: recipeScale } : p)),
+    );
     setTurboLoraId(chosen.id);
     setLoraPresetIds((prev) => {
       const withoutTurbo = prev.filter((id) => {
@@ -747,13 +746,16 @@ export default function App() {
     setTokenReduction(false);
     setSsdStreaming(false);
     setTurboEnabled(true);
-    setLoraActivity(`${chosen.label} enabled`);
+    setLoraActivity(`${chosen.label} · ×${recipeScale}`);
   }
 
   async function handleTurboLoraSelect(id: string) {
     if (busy) return;
     const chosen = loraPresets.find((p) => p.id === id);
-    if (!chosen) return;
+    if (!chosen || !isTurboPreset(chosen)) return;
+    // Sync before any await so a concurrent Turbo ON uses this id, not TaoMate.
+    turboLoraIdRef.current = id;
+    setTurboLoraId(id);
     setTurboLoading(true);
     try {
       await applyTurboPreset(chosen);
@@ -770,18 +772,15 @@ export default function App() {
     if (enabled) {
       setTurboLoading(true);
       try {
-        let chosen: LoraPreset | undefined =
-          (turboLoraId ? loraPresets.find((p) => p.id === turboLoraId) : undefined) ??
-          [...loraPresets]
-            .filter(isTurboPreset)
-            .sort((a, b) => {
-              const rank = (p: LoraPreset) => {
-                const hay = `${p.label} ${p.spec}`.toLowerCase();
-                const i = TURBO_CONFIG.PREFERRED.findIndex((n) => hay.includes(n));
-                return i < 0 ? 99 : i;
-              };
-              return rank(a) - rank(b);
-            })[0];
+        // Prefer the submenu selection (ref avoids stale closure after a just-clicked pick).
+        const selectedId = turboLoraIdRef.current;
+        let chosen: LoraPreset | undefined = selectedId
+          ? loraPresets.find((p) => p.id === selectedId && isTurboPreset(p))
+          : undefined;
+        if (!chosen) {
+          const defId = pickDefaultTurboId(loraPresets);
+          chosen = defId ? loraPresets.find((p) => p.id === defId) : undefined;
+        }
 
         if (!chosen) {
           await ensureLoraSpec(TURBO_CONFIG.LORA_SPEC, TURBO_CONFIG.LABEL);
@@ -1445,11 +1444,8 @@ export default function App() {
           if (step != null && total != null && total > 0) {
             setProgress((prev) => {
               const pct = Math.round((100 * step) / total);
-              // Keep Faces / Long take window label; only refresh step/pct from preview ticks.
-              if (
-                prev?.phase?.startsWith("faces_") ||
-                prev?.phase?.startsWith("longtake_")
-              ) {
+              // Keep Long take window label; only refresh step/pct from preview ticks.
+              if (prev?.phase?.startsWith("longtake_")) {
                 return {
                   ...prev,
                   step,
@@ -1643,15 +1639,6 @@ export default function App() {
     if (res?.render_width) body.render_width = res.render_width;
     if (res?.render_height) body.render_height = res.render_height;
     if (opts.seed.trim() !== "") body.seed = Number(opts.seed);
-    if (facesEnabled) {
-      body.faces = {
-        enabled: true,
-        canvas: facesCanvas,
-        denoise: facesDenoise,
-        seed: facesSeed,
-        abstain: false,
-      };
-    }
     if (longtakeEnabled) {
       body.longtake = {
         enabled: true,
@@ -1986,14 +1973,25 @@ export default function App() {
             {error && (
               <div className="error-banner" role="alert">
                 <pre className="error-banner__text">{error}</pre>
-                <button
-                  type="button"
-                  className="error-banner__copy"
-                  onClick={() => void navigator.clipboard.writeText(error).catch(() => undefined)}
-                  title="Copy error"
-                >
-                  Copy
-                </button>
+                <div className="error-banner__actions">
+                  <button
+                    type="button"
+                    className="error-banner__copy"
+                    onClick={() => void navigator.clipboard.writeText(error).catch(() => undefined)}
+                    title="Copy error"
+                  >
+                    Copy
+                  </button>
+                  <button
+                    type="button"
+                    className="error-banner__dismiss"
+                    onClick={() => setError(null)}
+                    title="Dismiss"
+                    aria-label="Dismiss error"
+                  >
+                    Dismiss
+                  </button>
+                </div>
               </div>
             )}
             {showChainPicker && (
@@ -2150,34 +2148,6 @@ export default function App() {
               onSsdStreaming={setSsdStreaming}
               clipMultiplier={clipMultiplier}
               onClipMultiplier={setClipMultiplier}
-              facesConfig={config.faces}
-              facesEnabled={facesEnabled}
-              facesCanvas={facesCanvas}
-              facesDenoise={facesDenoise}
-              facesSeed={facesSeed}
-              onFacesEnabled={(v) => {
-                setFacesEnabled(v);
-                // Prefetch SAM when Faces is turned on; keep the stream until
-                // complete so config.sam3_ready refreshes for the pill badge.
-                if (v && config?.faces && !config.faces.sam3_ready) {
-                  const es = new EventSource(`${API}/api/models/download/stream?component=sam3`);
-                  const stop = () => {
-                    try {
-                      es.close();
-                    } catch {
-                      /* ignore */
-                    }
-                    void fetchConfig().then((cfg) => setConfig(cfg));
-                  };
-                  es.addEventListener("complete", stop);
-                  es.addEventListener("error", (ev) => {
-                    if (ev instanceof MessageEvent) stop();
-                  });
-                }
-              }}
-              onFacesCanvas={setFacesCanvas}
-              onFacesDenoise={setFacesDenoise}
-              onFacesSeed={setFacesSeed}
               longtakeConfig={config.longtake}
               longtakeEnabled={longtakeEnabled}
               longtakeDenoise={longtakeDenoise}
@@ -2339,103 +2309,6 @@ export default function App() {
                   <span className="library-prompt">{clipDisplayPrompt(clip.prompt)}</span>
                 </button>
                 <div className="library-job-actions library-job-actions--done">
-                  <button
-                    type="button"
-                    className="library-job-btn"
-                    title="Inspect faces (detect + overlay boxes)"
-                    disabled={busy}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void (async () => {
-                        try {
-                          const r = await fetch(`${API}/api/clips/${clip.id}/faces/inspect`);
-                          const data = await r.json();
-                          if (!r.ok) throw new Error(data.detail || "Inspect failed");
-                          const msg = data.found_count
-                            ? `Found faces on ${data.found_count} sample frame(s) · backend ${data.backend}${data.abstain ? " · would abstain (close-up)" : ""}`
-                            : `No faces detected (${data.backend})`;
-                          window.alert(msg);
-                          window.open(
-                            `${API}/api/clips/${clip.id}/faces/overlay.png?frame=0`,
-                            "_blank",
-                            "noopener,noreferrer",
-                          );
-                        } catch (err) {
-                          window.alert(err instanceof Error ? err.message : String(err));
-                        }
-                      })();
-                    }}
-                  >
-                    Inspect
-                  </button>
-                  <button
-                    type="button"
-                    className="library-job-btn"
-                    title={
-                      config?.faces?.sam3_ready
-                        ? "Run Faces repair (SAM detect + Ref2VA refs)"
-                        : "Run Faces — SAM 3.1 downloads automatically if needed"
-                    }
-                    disabled={busy}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void (async () => {
-                        if (!window.confirm("Run Faces pass on this clip? This uses the GPU.")) return;
-                        try {
-                          const r = await fetch(`${API}/api/clips/${clip.id}/faces`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              canvas: facesCanvas,
-                              denoise: facesDenoise,
-                              seed: facesSeed,
-                              confirm_boxes: true,
-                            }),
-                          });
-                          const data = await r.json();
-                          if (!r.ok) throw new Error(data.detail || "Faces failed");
-                          if (data.needs_confirm) {
-                            const ok = window.confirm(
-                              `Detected ${data.overlays?.length ?? 0} face box(es)` +
-                                (data.abstain ? " (close-up — may abstain)" : "") +
-                                ". Continue with repair?",
-                            );
-                            if (!ok) return;
-                            const boxes = (data.overlays || []).reduce(
-                              (acc: Array<{ x: number; y: number; w: number; h: number }>, o: { frame: number; box: { x: number; y: number; w: number; h: number } }) => {
-                                acc[o.frame] = o.box;
-                                return acc;
-                              },
-                              [] as Array<{ x: number; y: number; w: number; h: number }>,
-                            );
-                            // Fill missing frames with zeros for confirm path length check — server re-detects if incomplete.
-                            const r2 = await fetch(`${API}/api/clips/${clip.id}/faces`, {
-                              method: "POST",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({
-                                canvas: facesCanvas,
-                                denoise: facesDenoise,
-                                seed: facesSeed,
-                                confirm_boxes: false,
-                              }),
-                            });
-                            const data2 = await r2.json();
-                            if (!r2.ok) throw new Error(data2.detail || "Faces failed");
-                            await refreshProjectClips();
-                            window.alert("Faces pass complete.");
-                            void boxes;
-                            return;
-                          }
-                          await refreshProjectClips();
-                          window.alert("Faces pass complete.");
-                        } catch (err) {
-                          window.alert(err instanceof Error ? err.message : String(err));
-                        }
-                      })();
-                    }}
-                  >
-                    Faces
-                  </button>
                   <button
                     type="button"
                     className="library-job-btn"

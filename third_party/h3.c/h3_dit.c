@@ -3017,6 +3017,9 @@ int h3_dit_denoise_euler_preview(
                          h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
                          int start_step, int hold_audio,
+                         const float *video_strengths, int video_strengths_count,
+                         const float *video_hold_init,
+                         const float *video_hold_noise,
                          h3_dit_progress progress, void *progress_opaque,
                          h3_dit_preview preview, void *preview_opaque,
                          char *error, size_t error_size) {
@@ -3027,6 +3030,19 @@ int h3_dit_denoise_euler_preview(
         fail(error, error_size, "invalid Euler denoising arguments");
         return 0;
     }
+    int use_video_hold = video_strengths != NULL && video_strengths_count > 0;
+    if (use_video_hold && video_strengths_count != dit->latent_t) {
+        fail(error, error_size,
+             "denoise video strengths count %d != latent_t %d",
+             video_strengths_count, dit->latent_t);
+        return 0;
+    }
+    if (use_video_hold && !video_hold_init) {
+        fail(error, error_size,
+             "denoise video strengths require a hold-init latent");
+        return 0;
+    }
+    (void)video_hold_noise;
     if (start_step < 0) start_step = 0;
     if (start_step > dit->sigmas.steps) start_step = dit->sigmas.steps;
     if (start_step >= dit->sigmas.steps) {
@@ -3034,7 +3050,9 @@ int h3_dit_denoise_euler_preview(
                dit->sigmas.steps);
         return 1;
     }
-    if (gpu_sampler_requested(dit))
+    /* Soft per-frame hold needs a sync after each DiT forward so velocity can
+     * be scaled in channel-major layout — use the CPU Euler outer loop. */
+    if (gpu_sampler_requested(dit) && !use_video_hold)
         return denoise_euler_gpu(dit, video_latent, audio_latent,
                                  reuse_interval, start_step, hold_audio,
                                  progress, progress_opaque,
@@ -3121,9 +3139,23 @@ int h3_dit_denoise_euler_preview(
                 previous_evaluated >= 0);
         }
         if (ok) {
-            ok = h3_euler_velocity_step(
-                     video_latent, video_velocity, video_count,
-                     dit->sigmas.video[step], dit->sigmas.video[step + 1]);
+            /* Continuity / Comfy KSamplerX0Inpaint: remask the x0 prediction
+             * (via velocity) toward clean init, then Euler. Do not yank the
+             * post-step latent — that sits at the wrong sigma and ghosts. */
+            if (use_video_hold &&
+                !h3_hold_video_velocity_strengths(
+                    video_velocity, video_latent, video_hold_init,
+                    dit->sigmas.video[step], VIDEO_CHANNELS, dit->latent_t,
+                    dit->latent_h, dit->latent_w, video_strengths,
+                    video_strengths_count)) {
+                fail(error, error_size,
+                     "cannot apply video denoise strengths at step %d", step);
+                ok = 0;
+            }
+            if (ok)
+                ok = h3_euler_velocity_step(
+                         video_latent, video_velocity, video_count,
+                         dit->sigmas.video[step], dit->sigmas.video[step + 1]);
             if (ok && !hold_audio)
                 ok = h3_euler_velocity_step(
                          audio_latent, audio_velocity, audio_count,
@@ -3158,12 +3190,16 @@ int h3_dit_denoise_euler_preview(
 int h3_dit_denoise_euler(h3_dit *dit, float *video_latent,
                          float *audio_latent, int reuse_interval,
                          int start_step, int hold_audio,
+                         const float *video_strengths, int video_strengths_count,
+                         const float *video_hold_init,
+                         const float *video_hold_noise,
                          h3_dit_progress progress, void *progress_opaque,
                          char *error, size_t error_size) {
     return h3_dit_denoise_euler_preview(
         dit, video_latent, audio_latent, reuse_interval,
-        start_step, hold_audio,
-        progress, progress_opaque, NULL, NULL, error, error_size);
+        start_step, hold_audio, video_strengths, video_strengths_count,
+        video_hold_init, video_hold_noise, progress, progress_opaque, NULL,
+        NULL, error, error_size);
 }
 
 void h3_dit_free(h3_dit *dit) {

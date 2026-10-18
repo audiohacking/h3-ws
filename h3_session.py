@@ -609,24 +609,45 @@ class H3InteractiveSession:
         on_chunk: Callable[[str], None] | None = None,
     ) -> str:
         if self._master is None:
+            if self._cancel is not None and self._cancel.is_set():
+                raise GenerationCancelledError("cancelled")
             raise SessionError("interactive h3 is not running")
         deadline = time.time() + timeout_s
         buf = ""
         while time.time() < deadline:
             if self._cancel is not None and self._cancel.is_set():
                 raise GenerationCancelledError("cancelled")
+            # Snapshot each iteration: request_cancel → session.stop() nulls
+            # ``_master`` while we are blocked in select/read. Re-reading the
+            # attribute after stop() would pass None into os.read → TypeError.
+            master = self._master
+            if master is None:
+                if self._cancel is not None and self._cancel.is_set():
+                    raise GenerationCancelledError("cancelled")
+                self.alive = False
+                raise SessionError("interactive h3 pty closed")
             if self._proc is not None and self._proc.poll() is not None:
                 self.alive = False
                 raise SessionError(f"interactive h3 exited {self._proc.returncode}")
-            ready, _, _ = select.select([self._master], [], [], 0.25)
+            try:
+                ready, _, _ = select.select([master], [], [], 0.25)
+            except (TypeError, ValueError, OSError) as exc:
+                if self._cancel is not None and self._cancel.is_set():
+                    raise GenerationCancelledError("cancelled") from exc
+                self.alive = False
+                raise SessionError(f"interactive h3 pty closed: {exc}") from exc
             if not ready:
                 continue
             try:
-                data = os.read(self._master, 8192)
+                data = os.read(master, 8192)
             except OSError as exc:
+                if self._cancel is not None and self._cancel.is_set():
+                    raise GenerationCancelledError("cancelled") from exc
                 self.alive = False
                 raise SessionError(f"interactive h3 pty closed: {exc}") from exc
             if not data:
+                if self._cancel is not None and self._cancel.is_set():
+                    raise GenerationCancelledError("cancelled")
                 self.alive = False
                 raise SessionError("interactive h3 pty EOF")
             chunk = data.decode("utf-8", errors="replace")
