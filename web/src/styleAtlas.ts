@@ -51,6 +51,37 @@ export function leadWithStyle(text: string, phrase: string): string {
   return `${descriptor}, ${tail}`;
 }
 
+/** Ref2VA cue when a look's preview is attached as an image reference. */
+export function styleOfPhrase(handle: string): string {
+  const h = String(handle ?? "").trim();
+  if (!h) return "";
+  return `(using the style of ${h})`;
+}
+
+const STYLE_OF_RE = /\s*\(using the style of @[^)]+\)/gi;
+
+/** Drop prior style-of cues so re-applying a look doesn't stack them. */
+export function stripStyleOfPhrases(text: string): string {
+  return String(text ?? "")
+    .replace(STYLE_OF_RE, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+/** Append `(using the style of @img-N)` after stripping any previous cue. */
+export function extendWithStyleOf(text: string, handle: string): string {
+  const base = stripStyleOfPhrases(text);
+  const cue = styleOfPhrase(handle);
+  if (!cue) return base;
+  if (!base) return cue;
+  return `${base} ${cue}`;
+}
+
+export type ApplyStyleOptions = {
+  /** When true, attach the look preview as a Ref2VA image and add a style-of cue. */
+  attachImage?: boolean;
+};
+
 export function ensureStyleVocabulary() {
   if (vocabulary.length) return;
   setStyleVocabulary(STYLE_ATLAS.styles.flatMap((s) => [s.text, s.caption ?? ""]));

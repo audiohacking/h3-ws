@@ -14,8 +14,15 @@ import { FeaturesPopup } from "./components/composer/FeaturesPopup";
 import { DebugModal } from "./components/DebugModal";
 import { RefinePanel } from "./components/composer/RefinePanel";
 import { ProjectSwitcher, type Project } from "./components/ProjectSwitcher";
-import { compilePrompt } from "./compile";
-import { leadWithStyle } from "./styleAtlas";
+import { compilePrompt, handleForRef } from "./compile";
+import {
+  extendWithStyleOf,
+  leadWithStyle,
+  styleThumbUrl,
+  stripStyleOfPhrases,
+  type ApplyStyleOptions,
+  type StyleEntry,
+} from "./styleAtlas";
 import {
   applyTheme,
   cycleTheme,
@@ -352,6 +359,8 @@ export default function App() {
   const [turboLoraId, setTurboLoraId] = useState<string | null>(null);
   const turboLoraIdRef = useRef<string | null>(null);
   turboLoraIdRef.current = turboLoraId;
+  /** Fresh session: turn Turbo on with TaoMate once presets load (skip if a snap/preset restores). */
+  const wantDefaultTurboRef = useRef<boolean>(Boolean(FEATURES.TURBO_MODE && TURBO_CONFIG.DEFAULT_ON));
   const [longtakeEnabled, setLongtakeEnabled] = useState(false);
   const [longtakeDenoise, setLongtakeDenoise] = useState(0.55);
   const [longtakeKeyframes, setLongtakeKeyframes] = useState("0:0, 22:0, 44:1");
@@ -594,6 +603,7 @@ export default function App() {
       setSeed(snap.seed);
       setQuality(coerceBaseQuality(snap.quality));
       setLoraPresetIds(snap.loraPresetIds ?? []);
+      wantDefaultTurboRef.current = false;
       setTurboEnabled(Boolean(snap.turboEnabled));
       if (snap.turboTier) setTurboTier(snap.turboTier as TurboTier);
       setRefs(snap.refs ?? []);
@@ -768,6 +778,7 @@ export default function App() {
 
   async function handleTurboToggle(enabled: boolean) {
     if (!FEATURES.TURBO_MODE || busy) return;
+    wantDefaultTurboRef.current = false;
 
     if (enabled) {
       setTurboLoading(true);
@@ -845,6 +856,16 @@ export default function App() {
     }
   }
 
+  // Continuity default: Turbo ON with TaoMate 3-step once the catalog is ready.
+  useEffect(() => {
+    if (!wantDefaultTurboRef.current) return;
+    if (!FEATURES.TURBO_MODE) return;
+    if (loraPresets.length === 0) return;
+    wantDefaultTurboRef.current = false;
+    void handleTurboToggle(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- boot once when catalog arrives
+  }, [loraPresets]);
+
   function addToSceneQueue() {
     const scene: SceneQueueItem = {
       id: generateId(),
@@ -897,6 +918,7 @@ export default function App() {
     setReuse(scene.reuse);
     setSeed(scene.seed);
     setLoraPresetIds(scene.loraPresetIds);
+    wantDefaultTurboRef.current = false;
     setTurboEnabled(scene.turboEnabled);
     if (scene.turboTier) setTurboTier(scene.turboTier as TurboTier);
     setRefs(scene.refs);
@@ -974,6 +996,7 @@ export default function App() {
     setLayers(preset.layers);
     setReuse(preset.reuse);
     setLoraPresetIds(preset.loraIds);
+    wantDefaultTurboRef.current = false;
     setTurboEnabled(preset.turboEnabled);
     setTokenReduction(preset.tokenReduction);
     setSsdStreaming(preset.ssdStreaming);
@@ -1262,6 +1285,60 @@ export default function App() {
     setEndImagePath(null);
     setEndImageName(null);
     setClipMultiplier(1);
+  }
+
+  async function applyStyleLook(style: StyleEntry, options?: ApplyStyleOptions) {
+    const attachImage = Boolean(options?.attachImage);
+    setActiveStyleId(style.id);
+
+    let nextRefs = refs.filter((r) => r.source !== "style");
+    let styleHandle: string | null = null;
+
+    if (attachImage) {
+      try {
+        const thumb = styleThumbUrl(style.id);
+        const res = await fetch(thumb);
+        if (!res.ok) throw new Error(`Could not load look preview (${res.status})`);
+        const blob = await res.blob();
+        const safeLead = (style.lead || style.id)
+          .replace(/[^\w\-]+/g, "_")
+          .replace(/_+/g, "_")
+          .slice(0, 48);
+        const file = new File(
+          [blob],
+          `style_${style.id}_${safeLead || "look"}.webp`,
+          { type: blob.type || "image/webp" },
+        );
+        const up = await uploadFile(file, "image");
+        const newRef: ReferenceItem = {
+          id: generateId(),
+          kind: "image",
+          path: up.path,
+          name: style.lead || `Look ${style.id}`,
+          enabled: true,
+          previewUrl: thumb,
+          refSize: "max",
+          source: "style",
+        };
+        nextRefs = [...nextRefs, newRef];
+        styleHandle = handleForRef(nextRefs, nextRefs.length - 1);
+        setRouting("ref2va");
+        setMode("ref2va");
+        handleRefsChange(nextRefs);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        // Still apply the text look even if the image attach fails.
+      }
+    } else {
+      // Drop a prior style-atlas ref when re-applying text-only.
+      if (nextRefs.length !== refs.length) handleRefsChange(nextRefs);
+    }
+
+    setPrompt((prev) => {
+      let next = leadWithStyle(stripStyleOfPhrases(prev), style.text);
+      if (styleHandle) next = extendWithStyleOf(next, styleHandle);
+      return next;
+    });
   }
 
   async function addFromLibrary(
@@ -2063,10 +2140,7 @@ export default function App() {
               onLoadPreset={loadPreset}
               onDeletePreset={deletePreset}
               activeStyleId={activeStyleId}
-              onApplyStyle={(style) => {
-                setPrompt((prev) => leadWithStyle(prev, style.text));
-                setActiveStyleId(style.id);
-              }}
+              onApplyStyle={(style, options) => void applyStyleLook(style, options)}
               routing={routing}
               onRoutingChange={setRouting}
               durationId={durationId}

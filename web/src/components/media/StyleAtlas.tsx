@@ -1,12 +1,18 @@
 import { useMemo, useState } from "react";
-import { filterStyles, STYLE_ATLAS, styleThumbUrl, type StyleEntry } from "../../styleAtlas";
+import {
+  filterStyles,
+  STYLE_ATLAS,
+  styleThumbUrl,
+  type ApplyStyleOptions,
+  type StyleEntry,
+} from "../../styleAtlas";
 
 const PAGE = 48;
 
 type Props = {
   disabled?: boolean;
   activeId?: string | null;
-  onApply: (style: StyleEntry) => void;
+  onApply: (style: StyleEntry, options?: ApplyStyleOptions) => void;
 };
 
 export function StyleAtlas({ disabled, activeId, onApply }: Props) {
@@ -14,14 +20,22 @@ export function StyleAtlas({ disabled, activeId, onApply }: Props) {
   const [category, setCategory] = useState("");
   const [limit, setLimit] = useState(PAGE);
   const [openId, setOpenId] = useState<string | null>(null);
+  /** Optional Ref2VA attach — remembered for grid + detail (+). */
+  const [attachImage, setAttachImage] = useState(true);
 
   const rows = useMemo(() => filterStyles(query, category), [query, category]);
   const visible = rows.slice(0, limit);
-  const open = openId ? rows.find((s) => s.id === openId) ?? STYLE_ATLAS.styles.find((s) => s.id === openId) : null;
+  const open = openId
+    ? rows.find((s) => s.id === openId) ?? STYLE_ATLAS.styles.find((s) => s.id === openId)
+    : null;
+
+  function apply(style: StyleEntry) {
+    onApply(style, { attachImage });
+  }
 
   if (open) {
     return (
-      <div className="style-atlas">
+      <div className="style-atlas style-atlas--detail">
         <div className="style-atlas__detail-bar">
           <button type="button" className="style-atlas__back" onClick={() => setOpenId(null)}>
             ← Looks
@@ -30,17 +44,28 @@ export function StyleAtlas({ disabled, activeId, onApply }: Props) {
             type="button"
             className="style-atlas__add"
             disabled={disabled}
-            title="Add this look to the prompt"
-            onClick={() => onApply(open)}
+            title={
+              attachImage
+                ? "Add look to prompt and attach preview as Ref2VA image"
+                : "Add look to prompt"
+            }
+            onClick={() => apply(open)}
           >
             +
           </button>
         </div>
-        <img
-          className="style-atlas__hero"
-          src={styleThumbUrl(open.id)}
-          alt=""
-        />
+        <div className="style-atlas__hero-wrap">
+          <img className="style-atlas__hero" src={styleThumbUrl(open.id)} alt="" />
+        </div>
+        <label className="style-atlas__attach">
+          <input
+            type="checkbox"
+            checked={attachImage}
+            disabled={disabled}
+            onChange={(e) => setAttachImage(e.target.checked)}
+          />
+          <span>Also attach preview as Ref2VA image</span>
+        </label>
         <p className="style-atlas__cat">{open.category}</p>
         <p className="style-atlas__full">{open.text}</p>
         {open.caption && open.caption !== open.text && (
@@ -85,9 +110,21 @@ export function StyleAtlas({ disabled, activeId, onApply }: Props) {
           ))}
         </select>
       </div>
+      <label className="style-atlas__attach style-atlas__attach--bar">
+        <input
+          type="checkbox"
+          checked={attachImage}
+          disabled={disabled}
+          onChange={(e) => setAttachImage(e.target.checked)}
+        />
+        <span>Attach look image as Ref2VA (+)</span>
+      </label>
       <div className="style-atlas__grid">
         {visible.map((style) => (
-          <div key={style.id} className={`style-atlas__cell${activeId === style.id ? " is-on" : ""}`}>
+          <div
+            key={style.id}
+            className={`style-atlas__cell${activeId === style.id ? " is-on" : ""}`}
+          >
             <button
               type="button"
               className="style-atlas__thumb"
@@ -101,8 +138,12 @@ export function StyleAtlas({ disabled, activeId, onApply }: Props) {
               type="button"
               className="style-atlas__add style-atlas__add--cell"
               disabled={disabled}
-              title={`Add ${style.lead}`}
-              onClick={() => onApply(style)}
+              title={
+                attachImage
+                  ? `Add ${style.lead} + Ref2VA image`
+                  : `Add ${style.lead}`
+              }
+              onClick={() => apply(style)}
             >
               +
             </button>

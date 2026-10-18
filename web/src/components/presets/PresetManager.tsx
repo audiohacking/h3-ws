@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { GenerationPreset } from "../../types";
-import type { StyleEntry } from "../../styleAtlas";
+import type { ApplyStyleOptions, StyleEntry } from "../../styleAtlas";
 import { StyleAtlas } from "../media/StyleAtlas";
 
 interface PresetManagerProps {
@@ -10,7 +10,7 @@ interface PresetManagerProps {
   onDelete: (id: string) => void;
   disabled?: boolean;
   activeStyleId?: string | null;
-  onApplyStyle: (style: StyleEntry) => void;
+  onApplyStyle: (style: StyleEntry, options?: ApplyStyleOptions) => void | Promise<void>;
 }
 
 export function PresetManager({
@@ -65,9 +65,8 @@ export function PresetManager({
     setOpen(false);
   }
 
-  function handleApplyStyle(style: StyleEntry) {
-    onApplyStyle(style);
-    setOpen(false);
+  function handleApplyStyle(style: StyleEntry, options?: ApplyStyleOptions) {
+    void Promise.resolve(onApplyStyle(style, options)).finally(() => setOpen(false));
   }
 
   return (

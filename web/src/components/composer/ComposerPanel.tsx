@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import type { CastMediaType, CastMember, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, PillOption, ReferenceItem, RoutingMode, SceneQueueItem } from "../../types";
-import type { StyleEntry } from "../../styleAtlas";
+import type { ApplyStyleOptions, StyleEntry } from "../../styleAtlas";
 import { FEATURES, type TurboTier } from "../../config";
 import { mentionCandidates, type CompileResult } from "../../compile";
 import { ComposerRail } from "./ComposerRail";
@@ -56,7 +56,7 @@ export type ComposerPanelProps = {
   onLoadPreset: (preset: GenerationPreset) => void;
   onDeletePreset: (id: string) => void;
   activeStyleId?: string | null;
-  onApplyStyle: (style: StyleEntry) => void;
+  onApplyStyle: (style: StyleEntry, options?: ApplyStyleOptions) => void | Promise<void>;
   routing: RoutingMode;
   onRoutingChange: (next: RoutingMode) => void;
   durationId: string;
@@ -309,10 +309,6 @@ export function ComposerPanel(props: ComposerPanelProps) {
                   setMention(null);
                   return;
                 }
-              }
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                onGenerate();
               }
             }}
             disabled={locked}

@@ -220,7 +220,7 @@ export interface ReferenceItem {
   durationS?: number;
   refSize?: RefSize;
   previewUrl?: string;
-  source?: "upload" | "cast" | "library";
+  source?: "upload" | "cast" | "library" | "style";
   castId?: string;
   /** Continuity spatial framing (images + video). */
   crop?: ImageCrop | null;

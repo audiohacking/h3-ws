@@ -46,14 +46,17 @@ export const FEATURES = {
 export const TURBO_CONFIG = {
   /**
    * Fallback HF recipe when no on-disk turbo LoRA is found.
-   * Prefer selecting from catalog entries marked turbo (TaoMate, Tutu, LightX2V, …).
+   * Continuity product default is TaoMate 3-step (also first in PREFERRED).
    */
   LORA_SPEC:
-    "https://huggingface.co/tutututututu/Tutu-MiniMax-H3-AudioVideo-20to8-NFE-LoRA/" +
-    "resolve/main/comfyui/tutu-t8-minimax-h3-av-20to8-nfe-lora-step000100-bf16-comfyui.safetensors",
+    "https://huggingface.co/Robert1212star/TaoMate-H3-3Step-ComfyUI/" +
+    "resolve/main/taomate_h3_3step_comfy.safetensors",
 
   /** Display label for the turbo LoRA */
-  LABEL: "Tutu 8-NFE Turbo",
+  LABEL: "TaoMate H3 3-step",
+
+  /** Fresh composer sessions start with Turbo on (TaoMate). */
+  DEFAULT_ON: true,
 
   /**
    * Ranking needles among presets already classified as turbo (first match wins).

@@ -135,12 +135,56 @@
   padding: 0;
 }
 
-.style-atlas__hero {
-  width: 100%;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
+.style-atlas__hero-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
   border-radius: 8px;
-  background: #111;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+}
+
+/* Native thumbs are 192×149 — never full-bleed stretch (pixelates in the modal). */
+.style-atlas__hero {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(100%, 384px);
+  max-height: min(40vh, 298px);
+  object-fit: contain;
+  image-rendering: auto;
+  border-radius: 4px;
+  background: transparent;
+}
+
+.style-atlas__attach {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.style-atlas__attach--bar {
+  padding: 2px 0 4px;
+  color: var(--color-muted);
+}
+
+.style-atlas__attach input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+.style-atlas__attach input:disabled {
+  cursor: not-allowed;
 }
 
 .style-atlas__cat {
