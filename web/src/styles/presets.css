@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────────────────────────────────────
- * Preset Manager Styles
+ * Preset Manager — toggle + fullscreen modal (Looks / Saved)
  * ───────────────────────────────────────────────────────────────────────────── */
 
 .preset-manager {
@@ -34,16 +34,6 @@
   cursor: not-allowed;
 }
 
-.preset-manager__icon {
-  width: 16px;
-  height: 16px;
-  transition: transform var(--transition-fast);
-}
-
-.preset-manager__icon--open {
-  transform: rotate(180deg);
-}
-
 .preset-manager__count {
   margin-left: auto;
   padding: var(--space-1) var(--space-2);
@@ -53,44 +43,95 @@
   color: var(--text-secondary);
 }
 
-.preset-manager__panel {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: var(--z-dropdown);
-  width: min(360px, 92vw);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  box-shadow: var(--shadow-md);
+.presets-modal {
+  /* Near-full window — ≤2.5% side chrome (see .modal--fullscreen). */
+  width: 95vw;
+  max-width: 95vw;
+  max-height: 96vh;
 }
 
-.preset-manager__tabs {
+.presets-modal__tabs {
   display: flex;
-  gap: 4px;
+  gap: 6px;
+  padding: var(--space-3) var(--modal-padding);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+  background: var(--color-bg);
 }
 
-.preset-manager__tab {
-  height: 26px;
-  padding: 0 10px;
+.presets-modal__tab {
+  height: 30px;
+  padding: 0 14px;
   border: 1px solid var(--color-border);
   border-radius: 999px;
   background: var(--color-surface);
   color: var(--color-muted);
   font: inherit;
-  font-size: 0.72rem;
+  font-size: 0.78rem;
   font-weight: 600;
   cursor: pointer;
 }
 
-.preset-manager__tab.is-on {
+.presets-modal__tab.is-on {
   border-color: var(--color-accent);
   background: var(--color-accent-soft);
   color: var(--color-accent-dark);
+}
+
+.presets-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+}
+
+.presets-modal__body .style-atlas {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 4 across on wide modals; 3 on narrower. Square cells ≥ preview size. */
+.presets-modal__body .style-atlas__grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  max-height: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+  align-items: start;
+}
+
+.presets-modal__body .style-atlas__cell {
+  /* Native style-atlas thumbs are 192×149 — keep that ratio so previews aren't cropped short. */
+  aspect-ratio: 192 / 149;
+  width: 100%;
+  min-height: 149px;
+  height: auto;
+}
+
+.presets-modal__body .style-atlas__thumb img {
+  object-fit: cover;
+}
+
+@media (max-width: 900px) {
+  .presets-modal__body .style-atlas__grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .presets-modal__body .style-atlas__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.presets-modal__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
 }
 
 .preset-manager__empty {
@@ -98,15 +139,7 @@
   font-size: var(--font-size-sm);
   text-align: center;
   margin: 0;
-  padding: var(--space-4);
-}
-
-.preset-manager__list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  max-height: 200px;
-  overflow-y: auto;
+  padding: var(--space-8) var(--space-4);
 }
 
 .preset-manager__save-btn {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { GenerationPreset } from "../../types";
 import type { StyleEntry } from "../../styleAtlas";
 import { StyleAtlas } from "../media/StyleAtlas";
@@ -22,11 +22,28 @@ export function PresetManager({
   activeStyleId,
   onApplyStyle,
 }: PresetManagerProps) {
-  const [isExpanded, setIsExpanded] = useState(false);
+  const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<"looks" | "saved">("looks");
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [saveDescription, setSaveDescription] = useState("");
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      setShowSaveForm(false);
+      setSaveName("");
+      setSaveDescription("");
+    }
+  }, [open]);
 
   function handleSave() {
     if (!saveName.trim()) return;
@@ -43,147 +60,185 @@ export function PresetManager({
     }
   }
 
+  function handleLoad(preset: GenerationPreset) {
+    onLoad(preset);
+    setOpen(false);
+  }
+
+  function handleApplyStyle(style: StyleEntry) {
+    onApplyStyle(style);
+    setOpen(false);
+  }
+
   return (
     <div className="preset-manager">
       <button
         type="button"
         className="preset-manager__toggle"
-        onClick={() => setIsExpanded(!isExpanded)}
+        onClick={() => setOpen(true)}
         disabled={disabled}
       >
-        <svg
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          className={`preset-manager__icon ${isExpanded ? "preset-manager__icon--open" : ""}`}
-        >
-          <path d="M19 9l-7 7-7-7" />
-        </svg>
         <span>Presets</span>
         {presets.length > 0 && (
           <span className="preset-manager__count">{presets.length}</span>
         )}
       </button>
 
-      {isExpanded && (
-        <div className="preset-manager__panel">
-          <div className="preset-manager__tabs" role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "looks"}
-              className={`preset-manager__tab${tab === "looks" ? " is-on" : ""}`}
-              onClick={() => setTab("looks")}
-            >
-              Looks
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={tab === "saved"}
-              className={`preset-manager__tab${tab === "saved" ? " is-on" : ""}`}
-              onClick={() => setTab("saved")}
-            >
-              Saved
-            </button>
-          </div>
-
-          {tab === "looks" && (
-            <StyleAtlas disabled={disabled} activeId={activeStyleId} onApply={onApplyStyle} />
-          )}
-
-          {tab === "saved" && presets.length === 0 && !showSaveForm && (
-            <p className="preset-manager__empty">
-              No saved presets. Save your current settings to reuse them later.
-            </p>
-          )}
-
-          {tab === "saved" && presets.length > 0 && (
-            <div className="preset-manager__list">
-              {presets.map((preset) => (
-                <div
-                  key={preset.id}
-                  className="preset-card"
-                  onClick={() => onLoad(preset)}
-                  role="button"
-                  tabIndex={0}
-                  onKeyDown={(e) => e.key === "Enter" && onLoad(preset)}
+      {open && (
+        <div className="modal-backdrop" onClick={() => setOpen(false)}>
+          <div
+            className="modal modal--fullscreen presets-modal"
+            role="dialog"
+            aria-labelledby="presets-modal-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <header className="modal__header">
+              <h2 id="presets-modal-title" className="modal__title">
+                Presets
+              </h2>
+              <button
+                type="button"
+                className="modal__close"
+                onClick={() => setOpen(false)}
+                aria-label="Close modal"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  aria-hidden
                 >
-                  <div className="preset-card__content">
-                    <span className="preset-card__name">{preset.name}</span>
-                    {preset.description && (
-                      <span className="preset-card__description">
-                        {preset.description}
-                      </span>
-                    )}
-                    <span className="preset-card__meta">
-                      {preset.mode} · {preset.resolutionId} · {preset.numSteps} steps
-                      {preset.turboEnabled && " · Turbo"}
-                    </span>
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </header>
+
+            <div className="presets-modal__tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === "looks"}
+                className={`presets-modal__tab${tab === "looks" ? " is-on" : ""}`}
+                onClick={() => setTab("looks")}
+              >
+                Looks
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tab === "saved"}
+                className={`presets-modal__tab${tab === "saved" ? " is-on" : ""}`}
+                onClick={() => setTab("saved")}
+              >
+                Saved{presets.length > 0 ? ` (${presets.length})` : ""}
+              </button>
+            </div>
+
+            <div className="modal__body presets-modal__body">
+              {tab === "looks" && (
+                <StyleAtlas
+                  disabled={disabled}
+                  activeId={activeStyleId}
+                  onApply={handleApplyStyle}
+                />
+              )}
+
+              {tab === "saved" && presets.length === 0 && !showSaveForm && (
+                <p className="preset-manager__empty">
+                  No saved presets. Save your current settings to reuse them later.
+                </p>
+              )}
+
+              {tab === "saved" && presets.length > 0 && (
+                <div className="presets-modal__list">
+                  {presets.map((preset) => (
+                    <div
+                      key={preset.id}
+                      className="preset-card"
+                      onClick={() => handleLoad(preset)}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => e.key === "Enter" && handleLoad(preset)}
+                    >
+                      <div className="preset-card__content">
+                        <span className="preset-card__name">{preset.name}</span>
+                        {preset.description && (
+                          <span className="preset-card__description">
+                            {preset.description}
+                          </span>
+                        )}
+                        <span className="preset-card__meta">
+                          {preset.mode} · {preset.resolutionId} · {preset.numSteps} steps
+                          {preset.turboEnabled && " · Turbo"}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        className="preset-card__delete"
+                        onClick={(e) => handleDelete(e, preset.id)}
+                        title="Delete preset"
+                      >
+                        &times;
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {tab === "saved" &&
+                (showSaveForm ? (
+                  <div className="preset-save-form">
+                    <input
+                      type="text"
+                      className="preset-save-form__input"
+                      placeholder="Preset name"
+                      value={saveName}
+                      onChange={(e) => setSaveName(e.target.value)}
+                      autoFocus
+                    />
+                    <input
+                      type="text"
+                      className="preset-save-form__input"
+                      placeholder="Description (optional)"
+                      value={saveDescription}
+                      onChange={(e) => setSaveDescription(e.target.value)}
+                    />
+                    <div className="preset-save-form__actions">
+                      <button
+                        type="button"
+                        className="preset-save-form__btn preset-save-form__btn--save"
+                        onClick={handleSave}
+                        disabled={!saveName.trim()}
+                      >
+                        Save
+                      </button>
+                      <button
+                        type="button"
+                        className="preset-save-form__btn preset-save-form__btn--cancel"
+                        onClick={() => {
+                          setShowSaveForm(false);
+                          setSaveName("");
+                          setSaveDescription("");
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
+                ) : (
                   <button
                     type="button"
-                    className="preset-card__delete"
-                    onClick={(e) => handleDelete(e, preset.id)}
-                    title="Delete preset"
+                    className="preset-manager__save-btn"
+                    onClick={() => setShowSaveForm(true)}
+                    disabled={disabled}
                   >
-                    &times;
+                    + Save Current Settings
                   </button>
-                </div>
-              ))}
+                ))}
             </div>
-          )}
-
-          {tab === "saved" && (showSaveForm ? (
-            <div className="preset-save-form">
-              <input
-                type="text"
-                className="preset-save-form__input"
-                placeholder="Preset name"
-                value={saveName}
-                onChange={(e) => setSaveName(e.target.value)}
-                autoFocus
-              />
-              <input
-                type="text"
-                className="preset-save-form__input"
-                placeholder="Description (optional)"
-                value={saveDescription}
-                onChange={(e) => setSaveDescription(e.target.value)}
-              />
-              <div className="preset-save-form__actions">
-                <button
-                  type="button"
-                  className="preset-save-form__btn preset-save-form__btn--save"
-                  onClick={handleSave}
-                  disabled={!saveName.trim()}
-                >
-                  Save
-                </button>
-                <button
-                  type="button"
-                  className="preset-save-form__btn preset-save-form__btn--cancel"
-                  onClick={() => {
-                    setShowSaveForm(false);
-                    setSaveName("");
-                    setSaveDescription("");
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              type="button"
-              className="preset-manager__save-btn"
-              onClick={() => setShowSaveForm(true)}
-              disabled={disabled}
-            >
-              + Save Current Settings
-            </button>
-          ))}
+          </div>
         </div>
       )}
     </div>

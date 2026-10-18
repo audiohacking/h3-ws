@@ -16,7 +16,8 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--space-7);
+  /* ≤2.5% side / ~2% top-bottom chrome so app windows aren't inset like a card. */
+  padding: 2vh 2.5vw;
   animation: modal-fade-in 0.2s ease;
   /* Keep wheel / touch from scrolling the page behind the dialog. */
   overscroll-behavior: none;
@@ -44,7 +45,7 @@ body.modal-open {
   position: relative;
   width: 100%;
   max-width: var(--modal-max-width);
-  max-height: calc(100vh - var(--space-7) * 2);
+  max-height: 96vh;
   background: var(--color-surface);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-lg);
@@ -66,16 +67,17 @@ body.modal-open {
 }
 
 .modal--fullscreen {
-  max-width: calc(100vw - var(--space-7) * 2);
-  max-height: calc(100vh - var(--space-7) * 2);
+  width: 95vw;
+  max-width: 95vw;
+  max-height: 96vh;
 }
 
 /* Models: sized dialog (not page-filling), list scrolls inside. */
 .models-modal {
-  width: min(560px, calc(100vw - var(--space-7) * 2));
-  max-width: min(560px, calc(100vw - var(--space-7) * 2));
-  height: min(640px, calc(100vh - var(--space-7) * 2));
-  max-height: min(640px, calc(100vh - var(--space-7) * 2));
+  width: min(560px, 95vw);
+  max-width: min(560px, 95vw);
+  height: min(640px, 96vh);
+  max-height: min(640px, 96vh);
   min-height: 0;
   touch-action: auto;
 }
@@ -91,12 +93,15 @@ body.modal-open {
  * ───────────────────────────────────────────────────────────────────────────── */
 
 .modal__header {
+  position: relative;
+  z-index: 2; /* above any absolute children that escape card containment */
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: var(--space-6) var(--modal-padding);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
+  background: var(--color-surface);
 }
 
 .modal__title {
@@ -128,6 +133,9 @@ body.modal-open {
 .modal__close svg {
   width: 18px;
   height: 18px;
+  display: block;
+  flex-shrink: 0;
+  pointer-events: none;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -221,6 +229,7 @@ body.modal-open {
  * ───────────────────────────────────────────────────────────────────────────── */
 
 .lora-card {
+  position: relative; /* contain absolute ✓ badge — else it pins to .modal top-right */
   display: flex;
   align-items: stretch;
   background: var(--color-surface);
