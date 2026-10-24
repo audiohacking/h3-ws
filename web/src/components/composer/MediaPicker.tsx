@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useDismissable } from "../../hooks/useDismissable";
 
 export type MediaPickItem = {
   id: string;
@@ -61,15 +62,7 @@ export function MediaPickerGrid({
 export function MediaPicker({ label, items, disabled, emptyHint, variant = "chip", onPick }: Props) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  useDismissable(open, () => setOpen(false), rootRef);
 
   return (
     <div className="popover-anchor" ref={rootRef}>

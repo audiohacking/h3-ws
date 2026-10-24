@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildGenerationSnapshot, clipDisplayPrompt, composerIsEmpty, generationFromClip } from "./clipEditor";
-import { applyProgressEvent } from "./progress";
+import { applyProgressEvent, isPostPassPhase } from "./progress";
 import { captureVideoFrame, formatVideoTime } from "./frameCapture";
 import { refsAreValid } from "./components/composer/RefListEnhanced";
 import { generateId } from "./utils";
@@ -9,6 +9,18 @@ import { LoraModal } from "./components/lora/LoraModal";
 import { TimelineStrip } from "./components/timeline/TimelineStrip";
 import { ModelsManager } from "./components/media/ModelsManager";
 import { ComposerPanel } from "./components/composer/ComposerPanel";
+import {
+  defaultResolutionCanvas,
+  type ResolutionCanvasState,
+} from "./components/composer/ResolutionPill";
+import {
+  canvasId,
+  faceCanvasForVideo,
+  geometryFromResolutionId,
+  ratioOfAspect,
+  resolveCanvas,
+  sampleEdgeOf,
+} from "./h3Canvas";
 import { isTurboPreset, pickDefaultTurboId, recipeScaleForTurbo } from "./components/composer/TurboToggle";
 import { FeaturesPopup } from "./components/composer/FeaturesPopup";
 import { DebugModal } from "./components/DebugModal";
@@ -314,7 +326,34 @@ export default function App() {
   const [mode, setMode] = useState("ref2va");
   const [routing, setRouting] = useState<RoutingMode>("ref2va");
   const [quality, setQuality] = useState("fast");
-  const [resolutionId, setResolutionId] = useState("512x512");
+  /** Continuity canvas — default native 768 / 16:9 (``declare.RULES`` + empty piece). */
+  const [resolutionCanvas, setResolutionCanvas] = useState<ResolutionCanvasState>(
+    () => defaultResolutionCanvas(),
+  );
+  const resolutionId = useMemo(() => {
+    const edge =
+      resolutionCanvas.upscale === "redetail"
+        ? sampleEdgeOf(resolutionCanvas.sampleEdge, resolutionCanvas.shortEdge)
+        : resolutionCanvas.shortEdge;
+    const [w, h] = resolveCanvas(ratioOfAspect(resolutionCanvas.aspect), edge);
+    return canvasId(w, h);
+  }, [resolutionCanvas]);
+  const patchResolutionCanvas = useCallback((next: Partial<ResolutionCanvasState>) => {
+    setResolutionCanvas((prev) => ({ ...prev, ...next }));
+  }, []);
+
+  const applyResolutionId = useCallback(
+    (id: string, presets?: Config["resolution_presets"]) => {
+      const geo = geometryFromResolutionId(id, presets ?? config?.resolution_presets ?? []);
+      setResolutionCanvas((prev) => ({
+        ...prev,
+        aspect: geo.aspect,
+        shortEdge: geo.shortEdge,
+        sampleEdge: Math.min(prev.sampleEdge, geo.shortEdge),
+      }));
+    },
+    [config?.resolution_presets],
+  );
   const [durationId, setDurationId] = useState("1s");
   const [clipMultiplier, setClipMultiplier] = useState(1);
   const [numSteps, setNumSteps] = useState(H3_DEFAULT_STEPS);
@@ -365,8 +404,19 @@ export default function App() {
   const [longtakeDenoise, setLongtakeDenoise] = useState(0.55);
   const [longtakeKeyframes, setLongtakeKeyframes] = useState("0:0, 22:0, 44:1");
   const [longtakeSeed, setLongtakeSeed] = useState(42);
-  const [redetailEnabled, setRedetailEnabled] = useState(false);
+  const redetailEnabled = resolutionCanvas.upscale === "redetail";
+  const setRedetailEnabled = useCallback((on: boolean) => {
+    setResolutionCanvas((prev) => ({
+      ...prev,
+      upscale: on ? "redetail" : "two_pass",
+    }));
+  }, []);
   const [upframeEnabled, setUpframeEnabled] = useState(false);
+  const [facesEnabled, setFacesEnabled] = useState(false);
+  /** Derived from shot short edge — not an independent dial. */
+  const facesCanvas = faceCanvasForVideo(resolutionCanvas.shortEdge);
+  const [facesDenoise, setFacesDenoise] = useState(0.45);
+  const [facesSeed, setFacesSeed] = useState(42);
   const [libraryPassBusyId, setLibraryPassBusyId] = useState<string | null>(null);
   const [loraModalOpen, setLoraModalOpen] = useState(false);
   const [sceneQueue, setSceneQueue] = useState<SceneQueueItem[]>([]);
@@ -505,21 +555,17 @@ export default function App() {
           setLongtakeDenoise(cfg.longtake.denoise);
           if (cfg.longtake.keyframes) setLongtakeKeyframes(cfg.longtake.keyframes);
         }
+        if (cfg.faces) {
+          setFacesDenoise(cfg.faces.denoise);
+        }
         if (cfg.network) setNetworkSettings(cfg.network);
         // Fresh install / upgrade with empty weights — open Models immediately.
         if (cfg.models_ready === false) {
           setModelsOpen(true);
           if (cfg.models_note) setError(cfg.models_note);
         }
-        const defRes =
-          cfg.resolution_presets.find((r) => r.id === "512x512") ??
-          cfg.resolution_presets.find(
-            (r) =>
-              r.width === cfg.defaults.width &&
-              r.height === cfg.defaults.height &&
-              !r.render_width,
-          );
-        if (defRes) setResolutionId(defRes.id);
+        // Continuity defaults already apply (16:9 · 768 native). Do not stomp
+        // with the old 512×512 tagged preset.
         const defDur = cfg.duration_presets.find((d) => d.num_frames === cfg.defaults.num_frames);
         if (defDur) setDurationId(defDur.id);
       })
@@ -597,7 +643,7 @@ export default function App() {
           ?? (snap.mode === "ref2va" ? "ref2va" : snap.mode === "t2va" ? "auto" : "fl2va"),
       );
       setSelectedCastIds(snap.selectedCastIds ?? []);
-      setResolutionId(snap.resolutionId);
+      applyResolutionId(snap.resolutionId, config.resolution_presets);
       setDurationId(snap.durationId);
       setClipMultiplier(snap.clipMultiplier);
       setNumSteps(snap.numSteps);
@@ -618,6 +664,7 @@ export default function App() {
       setSsdStreaming(Boolean(snap.ssdStreaming));
       setRedetailEnabled(Boolean(snap.redetail));
       setUpframeEnabled(Boolean(snap.upframe));
+      setFacesEnabled(Boolean(snap.faces));
     },
     [config, selectClipId, prompt, refs, imagePath, endImagePath],
   );
@@ -898,6 +945,7 @@ export default function App() {
       ssdStreaming,
       redetail: redetailEnabled,
       upframe: upframeEnabled,
+      faces: facesEnabled,
       status: "pending",
       createdAt: new Date().toISOString(),
     };
@@ -918,7 +966,7 @@ export default function App() {
     setRouting(scene.routing ?? (scene.mode === "ref2va" ? "ref2va" : scene.mode === "t2va" ? "auto" : "fl2va"));
     setSelectedCastIds(scene.selectedCastIds ?? []);
     setQuality(coerceBaseQuality(scene.quality));
-    setResolutionId(scene.resolutionId);
+    applyResolutionId(scene.resolutionId);
     setDurationId(scene.durationId);
     setNumSteps(scene.numSteps);
     setLayers(scene.layers);
@@ -937,6 +985,7 @@ export default function App() {
     setSsdStreaming(scene.ssdStreaming);
     setRedetailEnabled(Boolean(scene.redetail));
     setUpframeEnabled(Boolean(scene.upframe));
+    setFacesEnabled(Boolean(scene.faces));
   }
 
   function clearSceneQueue() {
@@ -999,7 +1048,7 @@ export default function App() {
     setMode(preset.mode);
     setRouting(preset.mode === "ref2va" ? "ref2va" : preset.mode === "t2va" ? "auto" : "fl2va");
     setQuality(coerceBaseQuality(preset.quality));
-    setResolutionId(preset.resolutionId);
+    applyResolutionId(preset.resolutionId);
     setDurationId(preset.durationId);
     setNumSteps(preset.numSteps);
     setLayers(preset.layers);
@@ -1267,12 +1316,13 @@ export default function App() {
 
   async function runLibraryPass(
     clip: Clip,
-    kind: "redetail" | "upframe" | "longtake",
+    kind: "redetail" | "upframe" | "longtake" | "faces",
   ): Promise<void> {
     const labels = {
       redetail: "ReDetail",
       upframe: "Upframe",
       longtake: "Long take",
+      faces: "Faces",
     } as const;
     const confirms = {
       redetail:
@@ -1280,6 +1330,8 @@ export default function App() {
       upframe: "Run Upframe on this clip? Writes a twin *_upframe.mp4 (baseline kept).",
       longtake:
         "Run Long take refine on this clip? Writes a twin *_longtake.mp4 (baseline kept). Uses the GPU.",
+      faces:
+        "Run Faces on this clip? Writes a twin *_faces.mp4 (baseline kept). SAM 3.1 downloads if needed. Uses the GPU.",
     } as const;
     if (!window.confirm(confirms[kind])) return;
     setLibraryPassBusyId(clip.id);
@@ -1293,7 +1345,13 @@ export default function App() {
             }
           : kind === "upframe"
             ? { multiplier: 2 }
-            : {};
+            : kind === "faces"
+              ? {
+                  canvas: facesCanvas,
+                  denoise: facesDenoise,
+                  seed: facesSeed,
+                }
+              : {};
       const r = await fetch(`${API}/api/clips/${clip.id}/${kind}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1579,15 +1637,7 @@ export default function App() {
             setProgress((prev) => {
               const pct = Math.round((100 * step) / total);
               // Keep post-pass window label; only refresh step/pct from preview ticks.
-              const phase = prev?.phase ?? "";
-              if (
-                prev
-                && (
-                  phase.startsWith("longtake_")
-                  || phase.startsWith("redetail_")
-                  || phase.startsWith("upframe_")
-                )
-              ) {
+              if (prev && isPostPassPhase(prev.phase)) {
                 return {
                   ...prev,
                   step,
@@ -1745,6 +1795,7 @@ export default function App() {
     upscale?: boolean;
     redetail?: boolean;
     upframe?: boolean;
+    faces?: boolean;
     /** User-facing composer state for library restore (kept separate from compiled prompt). */
     generation?: ReturnType<typeof buildGenerationSnapshot>;
   }): Record<string, unknown> {
@@ -1758,12 +1809,21 @@ export default function App() {
       opts.quality === "aggressive" ||
       (opts.layers === 40 && opts.reuse === 3) ||
       opts.loraPresetIds.length > 0;
+    // Continuity resolveCanvas — free short edge, not the tagged allowlist.
+    const edge =
+      resolutionCanvas.upscale === "redetail"
+        ? sampleEdgeOf(resolutionCanvas.sampleEdge, resolutionCanvas.shortEdge)
+        : resolutionCanvas.shortEdge;
+    const [canvasW, canvasH] = resolveCanvas(
+      ratioOfAspect(resolutionCanvas.aspect),
+      edge,
+    );
     const body: Record<string, unknown> = {
       prompt: opts.compiledPrompt.trim() || opts.fallbackPrompt.trim(),
       mode: opts.modeHint,
       quality: opts.quality,
-      width: res?.width ?? 512,
-      height: res?.height ?? 512,
+      width: canvasW,
+      height: canvasH,
       duration_seconds: dur?.seconds,
       num_frames: dur?.num_frames,
       clip_count: ref2va ? 1 : opts.clipMultiplier,
@@ -1796,6 +1856,14 @@ export default function App() {
     }
     if (opts.upframe ?? upframeEnabled) {
       body.upframe = { enabled: true, multiplier: 2 };
+    }
+    if (opts.faces ?? facesEnabled) {
+      body.faces = {
+        enabled: true,
+        canvas: facesCanvas,
+        denoise: facesDenoise,
+        seed: facesSeed,
+      };
     }
     if (ref2va) {
       body.refs = opts.refs.map((r) => ({
@@ -1853,11 +1921,13 @@ export default function App() {
         upscale,
         redetail: scene.redetail ?? redetailEnabled,
         upframe: scene.upframe ?? upframeEnabled,
+        faces: scene.faces ?? facesEnabled,
         generation: buildGenerationSnapshot({
           ...scene,
           upscale,
           redetail: scene.redetail ?? redetailEnabled,
           upframe: scene.upframe ?? upframeEnabled,
+          faces: scene.faces ?? facesEnabled,
         }),
       }),
       { follow: true },
@@ -1891,6 +1961,7 @@ export default function App() {
           upscale,
           redetail: redetailEnabled,
           upframe: upframeEnabled,
+          faces: facesEnabled,
           generation: buildGenerationSnapshot({
             prompt,
             mode: compiled.modeHint,
@@ -1915,6 +1986,7 @@ export default function App() {
             upscale,
             redetail: redetailEnabled,
             upframe: upframeEnabled,
+            faces: facesEnabled,
           }),
         }),
         { follow },
@@ -2229,11 +2301,8 @@ export default function App() {
               onRoutingChange={setRouting}
               durationId={durationId}
               onDurationId={setDurationId}
-              resolutionId={resolutionId}
-              onResolutionId={(id) => {
-                setResolutionId(id);
-                if (id === "256x256" || id === "512x512-aggressive") setTokenReduction(false);
-              }}
+              resolutionCanvas={resolutionCanvas}
+              onResolutionCanvas={patchResolutionCanvas}
               config={config}
               imageName={imageName}
               endImageName={endImageName}
@@ -2321,6 +2390,33 @@ export default function App() {
               upframeConfig={config.upframe}
               upframeEnabled={upframeEnabled}
               onUpframeEnabled={setUpframeEnabled}
+              facesConfig={config.faces}
+              facesEnabled={facesEnabled}
+              facesCanvas={facesCanvas}
+              facesDenoise={facesDenoise}
+              facesSeed={facesSeed}
+              onFacesEnabled={(v) => {
+                setFacesEnabled(v);
+                if (v && config?.faces && !config.faces.sam3_ready) {
+                  const es = new EventSource(
+                    `${API}/api/models/download/stream?component=sam3`,
+                  );
+                  const stop = () => {
+                    try {
+                      es.close();
+                    } catch {
+                      /* ignore */
+                    }
+                    void fetchConfig().then((cfg) => setConfig(cfg));
+                  };
+                  es.addEventListener("complete", stop);
+                  es.addEventListener("error", (ev) => {
+                    if (ev instanceof MessageEvent) stop();
+                  });
+                }
+              }}
+              onFacesDenoise={setFacesDenoise}
+              onFacesSeed={setFacesSeed}
               sceneQueue={sceneQueue}
               onRemoveScene={removeFromSceneQueue}
               onReorderScenes={reorderSceneQueue}
@@ -2520,6 +2616,22 @@ export default function App() {
                     }}
                   >
                     LT
+                  </button>
+                  <button
+                    type="button"
+                    className="library-action"
+                    title={
+                      config?.faces?.sam3_ready
+                        ? "Faces — Continuity face refine twin (*_faces.mp4)"
+                        : "Faces — SAM 3.1 downloads automatically if needed"
+                    }
+                    disabled={libraryPassBusyId === clip.id || busy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void runLibraryPass(clip, "faces");
+                    }}
+                  >
+                    Face
                   </button>
                   <button
                     type="button"

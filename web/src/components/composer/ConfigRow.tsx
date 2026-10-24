@@ -1,7 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { activeRefs, handleForRef, nearestDurationId } from "../../compile";
+import { ratioOfAspect, resolutionChipLabel } from "../../h3Canvas";
+import { useDismissable } from "../../hooks/useDismissable";
 import type { PresetOption, ReferenceItem, RoutingMode } from "../../types";
+import { AspectPill } from "./AspectPill";
 import { MediaLibraryModal, type LibraryPickPurpose } from "./MediaLibraryModal";
+import {
+  type ResolutionCanvasState,
+  ResolutionPill,
+} from "./ResolutionPill";
 
 type Props = {
   disabled?: boolean;
@@ -10,9 +17,9 @@ type Props = {
   durationId: string;
   durationPresets: PresetOption[];
   onDurationId: (id: string) => void;
-  resolutionId: string;
-  resolutionPresets: PresetOption[];
-  onResolutionId: (id: string) => void;
+  canvas: ResolutionCanvasState;
+  onCanvas: (next: Partial<ResolutionCanvasState>) => void;
+  redetailAvailable?: boolean;
   refs: ReferenceItem[];
   imageName: string | null;
   endImageName: string | null;
@@ -47,9 +54,9 @@ export function ConfigRow({
   durationId,
   durationPresets,
   onDurationId,
-  resolutionId,
-  resolutionPresets,
-  onResolutionId,
+  canvas,
+  onCanvas,
+  redetailAvailable = true,
   refs,
   imageName,
   endImageName,
@@ -61,39 +68,14 @@ export function ConfigRow({
   engineNote,
 }: Props) {
   const aspectAnchor = useRef<HTMLDivElement>(null);
-  const resAnchor = useRef<HTMLDivElement>(null);
+  const [aspectChipEl, setAspectChipEl] = useState<HTMLButtonElement | null>(null);
+  const [resChipEl, setResChipEl] = useState<HTMLButtonElement | null>(null);
   const durAnchor = useRef<HTMLDivElement>(null);
   const [framePicker, setFramePicker] = useState<LibraryPickPurpose | null>(null);
   const [aspectOpen, setAspectOpen] = useState(false);
   const [resOpen, setResOpen] = useState(false);
   const [durOpen, setDurOpen] = useState(false);
-
-  useEffect(() => {
-    const onDoc = (e: MouseEvent) => {
-      const t = e.target as Node;
-      if (aspectAnchor.current && !aspectAnchor.current.contains(t)) setAspectOpen(false);
-      if (resAnchor.current && !resAnchor.current.contains(t)) setResOpen(false);
-      if (durAnchor.current && !durAnchor.current.contains(t)) setDurOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, []);
-
-  const resolution = resolutionPresets.find((r) => r.id === resolutionId);
-  const aspect = resolution?.aspect || "1:1";
-  const aspects = useMemo(() => {
-    const seen = new Set<string>();
-    const order: string[] = [];
-    for (const p of resolutionPresets) {
-      const a = p.aspect || "1:1";
-      if (!seen.has(a)) {
-        seen.add(a);
-        order.push(a);
-      }
-    }
-    return order;
-  }, [resolutionPresets]);
-  const inAspect = resolutionPresets.filter((p) => (p.aspect || "1:1") === aspect);
+  useDismissable(durOpen, () => setDurOpen(false), durAnchor);
 
   const durIndex = Math.max(0, durationPresets.findIndex((d) => d.id === durationId));
   const durLabel = durationPresets[durIndex]?.id ?? durationId;
@@ -102,11 +84,17 @@ export function ConfigRow({
   const matchIndex = matchRef ? refs.indexOf(matchRef) : -1;
   const matchHandle = matchRef && matchIndex >= 0 ? handleForRef(refs, matchIndex) : null;
 
-  const resLabel = resolution
-    ? resolution.render_width
-      ? `${resolution.render_width}→${resolution.width}×${resolution.height}`
-      : `${resolution.width}×${resolution.height}`
-    : resolutionId;
+  const chip = useMemo(
+    () =>
+      resolutionChipLabel({
+        aspect: canvas.aspect,
+        shortEdge: canvas.shortEdge,
+        sampleEdge: canvas.sampleEdge,
+        upscale: canvas.upscale,
+      }),
+    [canvas.aspect, canvas.shortEdge, canvas.sampleEdge, canvas.upscale],
+  );
+  const resTitle = `${chip.title} ${chip.sub}`;
 
   return (
     <>
@@ -229,61 +217,49 @@ export function ConfigRow({
         )}
         <div className="popover-anchor" ref={aspectAnchor}>
           <button
+            ref={setAspectChipEl}
             type="button"
             className="chip-btn chip-btn--aspect"
             disabled={disabled}
+            aria-expanded={aspectOpen}
             onClick={() => setAspectOpen((v) => !v)}
           >
-            {aspect}
+            {canvas.aspect}
           </button>
-          {aspectOpen && (
-            <div className="aspect-menu">
-              {aspects.map((a) => (
-                <button
-                  key={a}
-                  type="button"
-                  className={a === aspect ? "is-active" : ""}
-                  onClick={() => {
-                    const first =
-                      resolutionPresets.find((p) => (p.aspect || "1:1") === a && !p.render_width) ??
-                      resolutionPresets.find((p) => (p.aspect || "1:1") === a);
-                    if (first) onResolutionId(first.id);
-                    setAspectOpen(false);
-                  }}
-                >
-                  {a}
-                </button>
-              ))}
-            </div>
-          )}
+          <AspectPill
+            disabled={disabled}
+            open={aspectOpen}
+            anchor={aspectChipEl}
+            aspect={canvas.aspect}
+            onAspect={(label) => onCanvas({ aspect: label })}
+            aspectSource="pill"
+            refs={refs}
+            autoRatio={ratioOfAspect(canvas.aspect)}
+            autoSub={canvas.aspect}
+            onClose={() => setAspectOpen(false)}
+          />
         </div>
-        <div className="popover-anchor" ref={resAnchor}>
+        <div className="popover-anchor">
           <button
+            ref={setResChipEl}
             type="button"
             className="chip-btn"
             disabled={disabled}
-            title={resolution?.label ?? resLabel}
+            title={resTitle}
+            aria-expanded={resOpen}
             onClick={() => setResOpen((v) => !v)}
           >
-            {resLabel}
+            {chip.sub.includes("→") ? `${chip.title} ${chip.sub}` : `${chip.title} ${chip.sub}`}
           </button>
-          {resOpen && (
-            <div className="aspect-menu">
-              {inAspect.map((p) => (
-                <button
-                  key={p.id}
-                  type="button"
-                  className={p.id === resolutionId ? "is-active" : ""}
-                  onClick={() => {
-                    onResolutionId(p.id);
-                    setResOpen(false);
-                  }}
-                >
-                  {p.label}
-                </button>
-              ))}
-            </div>
-          )}
+          <ResolutionPill
+            disabled={disabled}
+            open={resOpen}
+            anchor={resChipEl}
+            canvas={canvas}
+            onCanvas={onCanvas}
+            redetailAvailable={redetailAvailable}
+            onClose={() => setResOpen(false)}
+          />
         </div>
       </div>
       {engineNote && <p className="engine-note">{engineNote}</p>}

@@ -61,6 +61,8 @@ export interface GenerationSnapshot {
   redetail?: boolean;
   /** Opt-in Upframe twin (independent of redetail). */
   upframe?: boolean;
+  /** Opt-in Faces twin (independent of redetail / upframe). */
+  faces?: boolean;
 }
 
 export interface ClipEditorSnapshot {
@@ -185,6 +187,10 @@ export function generationFromClip(
         g.upframe === true
           || (typeof g.upframe === "object" && g.upframe && (g.upframe as { enabled?: boolean }).enabled),
       ),
+      faces: Boolean(
+        g.faces === true
+          || (typeof g.faces === "object" && g.faces && (g.faces as { enabled?: boolean }).enabled),
+      ),
     };
   }
 
@@ -201,6 +207,7 @@ export function generationFromClip(
     ssdStreaming: false,
     redetail: false,
     upframe: false,
+    faces: false,
   };
 }
 
@@ -241,7 +248,7 @@ export function buildGenerationSnapshot(scene: Pick<
   | "clipMultiplier"
   | "tokenReduction"
   | "ssdStreaming"
-> & { upscale?: boolean; redetail?: boolean; upframe?: boolean }): GenerationSnapshot {
+> & { upscale?: boolean; redetail?: boolean; upframe?: boolean; faces?: boolean }): GenerationSnapshot {
   return {
     prompt: scene.prompt,
     mode: scene.mode,
@@ -270,5 +277,6 @@ export function buildGenerationSnapshot(scene: Pick<
     upscale: scene.upscale,
     redetail: scene.redetail,
     upframe: scene.upframe,
+    faces: scene.faces,
   };
 }

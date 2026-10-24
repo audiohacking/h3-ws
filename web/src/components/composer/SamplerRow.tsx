@@ -1,7 +1,9 @@
 import { TurboToggle } from "./TurboToggle";
+import { FacesPill } from "./FacesPill";
 import { LongTakePill } from "./LongTakePill";
 import { UpframePill } from "./UpframePill";
 import type {
+  FacesConfigPublic,
   LongTakeConfigPublic,
   LoraPreset,
   PillOption,
@@ -46,6 +48,15 @@ type Props = {
   /** Lanczos post-upscale — disabled until latent upscale lands. Kept optional for API stability. */
   upscale?: boolean;
   onUpscale?: (v: boolean) => void;
+  facesConfig?: FacesConfigPublic | null;
+  facesEnabled?: boolean;
+  facesCanvas?: number;
+  facesDenoise?: number;
+  facesSeed?: number;
+  onFacesEnabled?: (v: boolean) => void;
+  onFacesCanvas?: (v: number) => void;
+  onFacesDenoise?: (v: number) => void;
+  onFacesSeed?: (v: number) => void;
   longtakeConfig?: LongTakeConfigPublic | null;
   longtakeEnabled?: boolean;
   longtakeDenoise?: number;
@@ -126,6 +137,15 @@ export function SamplerRow({
   clipMultiplierMax,
   showClips,
   onClipMultiplier,
+  facesConfig,
+  facesEnabled = false,
+  facesCanvas = 512,
+  facesDenoise = 0.45,
+  facesSeed = 42,
+  onFacesEnabled,
+  onFacesCanvas,
+  onFacesDenoise,
+  onFacesSeed,
   longtakeConfig,
   longtakeEnabled = false,
   longtakeDenoise = 0.55,
@@ -205,6 +225,20 @@ export function SamplerRow({
             disabled={disabled || loraBusy}
             loading={turboLoading}
           />
+          {onFacesEnabled && (
+            <FacesPill
+              disabled={disabled}
+              config={facesConfig}
+              enabled={facesEnabled}
+              canvas={facesCanvas}
+              denoise={facesDenoise}
+              seed={facesSeed}
+              onEnabled={onFacesEnabled}
+              onCanvas={onFacesCanvas ?? (() => {})}
+              onDenoise={onFacesDenoise ?? (() => {})}
+              onSeed={onFacesSeed ?? (() => {})}
+            />
+          )}
           {onLongtakeEnabled && (
             <LongTakePill
               disabled={disabled}

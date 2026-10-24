@@ -7,7 +7,8 @@ import { ComposerRail } from "./ComposerRail";
 import { AssetCapsules } from "./AssetCapsules";
 import { ConfigRow } from "./ConfigRow";
 import { SamplerRow } from "./SamplerRow";
-import { ResolutionPill, type ResolutionPassMode } from "./ResolutionPill";
+import type { ResolutionCanvasState } from "./ResolutionPill";
+import { ratioOfAspect } from "../../h3Canvas";
 import { WhatTheModelReads } from "./WhatTheModelReads";
 import { SceneQueue } from "./SceneQueue";
 import { MediaPicker } from "./MediaPicker";
@@ -62,8 +63,8 @@ export type ComposerPanelProps = {
   onRoutingChange: (next: RoutingMode) => void;
   durationId: string;
   onDurationId: (id: string) => void;
-  resolutionId: string;
-  onResolutionId: (id: string) => void;
+  resolutionCanvas: ResolutionCanvasState;
+  onResolutionCanvas: (next: Partial<ResolutionCanvasState>) => void;
   config: Config;
   imageName: string | null;
   endImageName: string | null;
@@ -120,6 +121,15 @@ export type ComposerPanelProps = {
   upframeConfig?: import("../../types").UpframeConfigPublic | null;
   upframeEnabled?: boolean;
   onUpframeEnabled?: (v: boolean) => void;
+  facesConfig?: import("../../types").FacesConfigPublic | null;
+  facesEnabled?: boolean;
+  facesCanvas?: number;
+  facesDenoise?: number;
+  facesSeed?: number;
+  onFacesEnabled?: (v: boolean) => void;
+  onFacesCanvas?: (v: number) => void;
+  onFacesDenoise?: (v: number) => void;
+  onFacesSeed?: (v: number) => void;
   clipMultiplier: number;
   onClipMultiplier: (n: number) => void;
   sceneQueue: SceneQueueItem[];
@@ -256,11 +266,10 @@ export function ComposerPanel(props: ComposerPanelProps) {
         refs={refs}
         disabled={locked}
         onChange={onRefsChange}
-        shotAspect={(() => {
-          const res = props.config.resolution_presets.find((p) => p.id === props.resolutionId);
-          if (!res?.width || !res?.height) return null;
-          return { ratio: res.width / res.height, label: res.aspect || "shot" };
-        })()}
+        shotAspect={{
+          ratio: ratioOfAspect(props.resolutionCanvas.aspect),
+          label: props.resolutionCanvas.aspect,
+        }}
         cardSeconds={
           props.config.duration_presets.find((d) => d.id === props.durationId)?.seconds ?? null
         }
@@ -352,9 +361,9 @@ export function ComposerPanel(props: ComposerPanelProps) {
           durationId={props.durationId}
           durationPresets={props.config.duration_presets}
           onDurationId={props.onDurationId}
-          resolutionId={props.resolutionId}
-          resolutionPresets={props.config.resolution_presets}
-          onResolutionId={props.onResolutionId}
+          canvas={props.resolutionCanvas}
+          onCanvas={props.onResolutionCanvas}
+          redetailAvailable={props.redetailConfig?.available !== false}
           refs={refs}
           imageName={props.imageName}
           endImageName={props.endImageName}
@@ -364,17 +373,6 @@ export function ComposerPanel(props: ComposerPanelProps) {
           onClearStart={props.onClearStart}
           onClearEnd={props.onClearEnd}
           engineNote={props.config.engine_ok === false ? (props.config.engine_error ?? undefined) : undefined}
-        />
-        <ResolutionPill
-          disabled={locked}
-          resolutionId={props.resolutionId}
-          resolutionPresets={props.config.resolution_presets}
-          onResolutionId={props.onResolutionId}
-          passMode={
-            (props.redetailEnabled ? "redetail" : "one_pass") as ResolutionPassMode
-          }
-          onPassMode={(mode) => props.onRedetailEnabled?.(mode === "redetail")}
-          redetailAvailable={props.redetailConfig?.available !== false}
         />
         <SamplerRow
           disabled={locked}
@@ -422,6 +420,15 @@ export function ComposerPanel(props: ComposerPanelProps) {
           upframeConfig={props.upframeConfig}
           upframeEnabled={props.upframeEnabled}
           onUpframeEnabled={props.onUpframeEnabled}
+          facesConfig={props.facesConfig}
+          facesEnabled={props.facesEnabled}
+          facesCanvas={props.facesCanvas}
+          facesDenoise={props.facesDenoise}
+          facesSeed={props.facesSeed}
+          onFacesEnabled={props.onFacesEnabled}
+          onFacesCanvas={props.onFacesCanvas}
+          onFacesDenoise={props.onFacesDenoise}
+          onFacesSeed={props.onFacesSeed}
         />
       </div>
       {props.loraActivity && <p className="lora-inline-hint">{props.loraActivity}</p>}

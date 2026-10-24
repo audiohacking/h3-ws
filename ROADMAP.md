@@ -24,7 +24,7 @@ Inspiration: [ComfyUI-Continuity](https://github.com/roadmaus/ComfyUI-Continuity
 
 | Continuity option | Verdict | Why |
 |-------------------|---------|-----|
-| **Faces** | **Removed — rewrite later** | First Continuity port shipped then pulled (patchwork / ghosting). Clean-slate re-implement next; no UI/API until then. |
+| **Faces** | **Continuity port (branch)** | `MiniMaxH3FacePass` geometry + soft-hold strengths file + SAM 3.1 + `*_faces.mp4` twin. Independent of ReDetail/Upframe. |
 | **block_cache / Tea / Easy** | Skip | Comfy sampler step-skip plugins. Different from our warm VAE session + `H3_REF_CACHE_DIR` ref-latent disk cache. |
 | **Spectrum** | Skip | External forecast sampler ([ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)); fidelity tradeoffs; no h3.c path. |
 | **Motion fix** | Skip for now | Second pass (slow / re-draw / restore timing) needs latent motion profile + re-sample. |
@@ -33,7 +33,7 @@ Inspiration: [ComfyUI-Continuity](https://github.com/roadmaus/ComfyUI-Continuity
 | **Upframe** | **Shipped** (opt-in) | FILM `film_net_fp16` temporal interpolate (`h3_upframe.py`, `*_upframe.mp4`). Models download (~69 MB). Default **off**. Independent of ReDetail — never chained as one required path. |
 | **Latent motion-context** | **Deferred** (Phase 2 epic) | True Comfy-style pin/save/load of video+audio latents + head trim in vendored h3.c. Do not block on Phase 1. |
 
-Faces was pulled for a clean-slate rewrite. Spectrum / Tea / block_cache stay skipped. Latent motion-context is a separate h3.c fork epic after Phase 1 validation.
+Faces is the Continuity soft-hold rewrite (`feature/continuity-faces`). Spectrum / Tea / block_cache stay skipped. Latent motion-context is a separate h3.c fork epic after Phase 1 validation.
 
 ---
 

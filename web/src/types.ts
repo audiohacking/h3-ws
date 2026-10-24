@@ -91,6 +91,24 @@ export interface Config {
   longtake?: LongTakeConfigPublic;
   redetail?: RedetailConfigPublic;
   upframe?: UpframeConfigPublic;
+  faces?: FacesConfigPublic;
+}
+
+export interface FacesConfigPublic {
+  available: boolean;
+  sam3_ready?: boolean;
+  backend?: string;
+  enabled_default?: boolean;
+  canvas: number;
+  canvas_min: number;
+  canvas_max: number;
+  /** When true, face crop canvas follows the shot short edge (384–768). */
+  canvas_follows_video?: boolean;
+  denoise: number;
+  denoise_min: number;
+  denoise_max: number;
+  abstain_px?: number;
+  note?: string;
 }
 
 
@@ -417,6 +435,7 @@ export interface SceneQueueItem {
   ssdStreaming: boolean;
   redetail?: boolean;
   upframe?: boolean;
+  faces?: boolean;
   status: SceneStatus;
   runId?: string;
   error?: string;

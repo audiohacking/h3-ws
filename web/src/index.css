@@ -2262,6 +2262,19 @@ body {
   display: grid;
   gap: 8px;
 }
+.faces-pill__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted, #64748b);
+}
+.faces-pill__match {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  font-weight: 600;
+}
 .faces-pill__pop label {
   display: grid;
   gap: 2px;

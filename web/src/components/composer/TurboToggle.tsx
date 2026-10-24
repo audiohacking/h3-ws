@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { TURBO_CONFIG, type TurboTier } from "../../config";
+import { useDismissable } from "../../hooks/useDismissable";
 import type { LoraPreset } from "../../types";
 
 /**
@@ -105,21 +106,7 @@ export function TurboToggle({
     if (locked) setMenuOpen(false);
   }, [locked]);
 
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onDoc = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setMenuOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenuOpen(false);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menuOpen]);
+  useDismissable(menuOpen, () => setMenuOpen(false), rootRef);
 
   return (
     <div className="turbo-group" ref={rootRef}>

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import { useDismissable } from "../hooks/useDismissable";
 
 export type Project = {
   id: string;
@@ -34,17 +35,10 @@ export function ProjectSwitcher({
   const rootRef = useRef<HTMLDivElement>(null);
   const active = projects.find((p) => p.id === activeProjectId) ?? projects[0];
 
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (ev: MouseEvent) => {
-      if (!rootRef.current?.contains(ev.target as Node)) {
-        setOpen(false);
-        setRenamingId(null);
-      }
-    };
-    document.addEventListener("mousedown", onDoc);
-    return () => document.removeEventListener("mousedown", onDoc);
-  }, [open]);
+  useDismissable(open, () => {
+    setOpen(false);
+    setRenamingId(null);
+  }, rootRef);
 
   async function commitRename(id: string) {
     const name = renameValue.trim();

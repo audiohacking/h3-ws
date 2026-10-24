@@ -72,17 +72,16 @@ class SnapTests(unittest.TestCase):
         self.assertLessEqual(w2 * h2, MAX_PIXELS)
         self.assertEqual(ONE_PASS_MAX_PIXELS, 768 * 1344)
 
-    def test_require_ui_canvas_documented_only(self) -> None:
+    def test_require_ui_canvas_accepts_continuity_free_edge(self) -> None:
         self.assertEqual(require_ui_canvas(512, 512), (512, 512))
         self.assertEqual(require_ui_canvas(256, 256), (256, 256))
         self.assertEqual(require_ui_canvas(1344, 768), (1344, 768))
         self.assertEqual(require_ui_canvas(1024, 576), (1024, 576))
         self.assertEqual(require_ui_canvas(576, 1024), (576, 1024))
         self.assertEqual(require_ui_canvas(768, 960), (768, 960))
-        with self.assertRaises(ValueError):
-            require_ui_canvas(640, 640)
-        with self.assertRaises(ValueError):
-            require_ui_canvas(1024, 1024)
+        # Continuity free short-edge — not limited to the tagged preset list.
+        self.assertEqual(require_ui_canvas(640, 640), (640, 640))
+        self.assertEqual(require_ui_canvas(1024, 1024), (1024, 1024))
 
 
 class ResolutionPresetTests(unittest.TestCase):

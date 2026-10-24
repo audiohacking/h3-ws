@@ -182,6 +182,8 @@ class RunRecord:
     # Independent post-passes (default off) — not chained to each other.
     redetail: Optional[dict[str, Any]] = None
     upframe: Optional[dict[str, Any]] = None
+    # Continuity Faces twin (*_faces.mp4); keeps baseline for A/B.
+    faces: Optional[dict[str, Any]] = None
 
 
 class AppState:
@@ -1886,6 +1888,261 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         },
                     )
 
+            faces_cfg = run.faces if isinstance(run.faces, dict) else None
+            faces_twin_id: str | None = None
+            if faces_cfg and faces_cfg.get("enabled") and dest.is_file():
+                from h3_facepass import FacesSettings, run_faces_pass
+                from h3_faces import (
+                    DEFAULT_FACE_CANVAS,
+                    DEFAULT_FACE_DENOISE,
+                    FaceError,
+                    clamp_face_denoise,
+                    face_canvas_for_video,
+                )
+
+                faces_watcher: LatentPreviewWatcher | None = None
+                faces_stem = state.output_dir / ".preview" / f"{run_id}_{clip.id}_faces"
+                try:
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "faces_detect",
+                            "message": "Faces pass…",
+                            "clip_id": clip.id,
+                        },
+                    )
+                    from h3_sam import SamDownloadError, download_sam3, sam3_ready
+
+                    if not sam3_ready(state.engine.model_dir):
+                        await state.emit(
+                            run_id,
+                            {
+                                "type": "progress",
+                                "phase": "faces_detect",
+                                "message": "Downloading SAM 3.1 for Faces…",
+                                "clip_id": clip.id,
+                            },
+                        )
+                        try:
+                            await asyncio.to_thread(download_sam3, state.engine.model_dir)
+                        except SamDownloadError as exc:
+                            raise FaceError(str(exc)) from exc
+                    faces_name = f"{Path(clip.filename).stem}_faces.mp4"
+                    faces_path = state.output_dir / faces_name
+                    # Faces canvas tracks the shot short edge (not a free dial).
+                    face_canvas = face_canvas_for_video(
+                        clip.width,
+                        clip.height,
+                        fallback=(
+                            int(faces_cfg["canvas"])
+                            if faces_cfg.get("canvas") is not None
+                            else DEFAULT_FACE_CANVAS
+                        ),
+                    )
+                    fsettings = FacesSettings(
+                        canvas=face_canvas,
+                        denoise=clamp_face_denoise(
+                            float(
+                                faces_cfg.get("denoise")
+                                if faces_cfg.get("denoise") is not None
+                                else DEFAULT_FACE_DENOISE
+                            )
+                        ),
+                        seed=int(
+                            faces_cfg.get("seed")
+                            if faces_cfg.get("seed") is not None
+                            else (clip.seed or 42)
+                        ),
+                        abstain=bool(faces_cfg.get("abstain", False)),
+                    )
+                    face_refs = parse_refs_payload(body.get("refs"), validate=False)
+                    face_loras = _loras_from_body(state, body)
+                    face_quality = str(body.get("quality") or clip.quality or "close")
+                    face_steps = (
+                        int(body["num_steps"])
+                        if body.get("num_steps") is not None
+                        else clip.num_steps
+                    )
+                    face_layers = (
+                        int(body["layers"]) if body.get("layers") is not None else clip.layers
+                    )
+                    face_reuse = (
+                        int(body["reuse"]) if body.get("reuse") is not None else clip.reuse
+                    )
+
+                    faces_preview_dir: Path | None = None
+                    if taeh3_decode_ready():
+                        faces_preview_dir = state.engine.ensure_preview_latent_dir()
+
+                        def _on_faces_preview(
+                            info: dict[str, Any],
+                            *,
+                            _rid=run_id,
+                            _stem=faces_stem.name,
+                        ) -> None:
+                            served = Path(str(info.get("path") or ""))
+                            ext = served.suffix if served.suffix else ".mp4"
+                            url = f"/api/preview/{_stem}{ext}?t={int(time.time() * 1000)}"
+                            asyncio.run_coroutine_threadsafe(
+                                state.emit(
+                                    _rid,
+                                    {
+                                        "type": "preview",
+                                        "url": url,
+                                        "mime": info.get("mime") or "image/webp",
+                                        "step": info.get("step"),
+                                        "total": info.get("total"),
+                                    },
+                                ),
+                                loop,
+                            )
+
+                        faces_watcher = LatentPreviewWatcher(
+                            faces_preview_dir, faces_stem, on_preview=_on_faces_preview
+                        )
+                        faces_watcher.start()
+
+                    def _faces_prog(phase: str, extra: dict[str, Any]) -> None:
+                        # Same composition as longtake: window label + nested H3
+                        # denoise so logs and the SSE progress line stay in lockstep
+                        # (never leave the UI stuck on a bare "video vae decode").
+                        msg = str(extra.get("message") or phase)
+                        mp = extra.get("model_progress")
+                        payload: dict[str, Any] = {
+                            "type": "progress",
+                            "phase": phase,
+                            "message": msg,
+                            "clip_id": clip.id,
+                        }
+                        for k in (
+                            "index",
+                            "total",
+                            "start",
+                            "end",
+                            "strength",
+                            "windows",
+                            "canvas",
+                            "mode",
+                            "refs",
+                        ):
+                            if k in extra:
+                                payload[k] = extra[k]
+                        if isinstance(mp, dict):
+                            payload["model_progress"] = mp
+                            if mp.get("elapsed_s") is not None:
+                                payload["elapsed_s"] = mp.get("elapsed_s")
+                            stage = str(mp.get("stage") or "").strip()
+                            step, total = mp.get("step"), mp.get("total")
+                            bits = [msg]
+                            if stage and stage.lower() not in msg.lower():
+                                bits.append(stage)
+                            if step is not None and total is not None:
+                                bits.append(f"{step}/{total}")
+                            eta = mp.get("eta_s")
+                            if eta is not None:
+                                eta_i = max(0, int(round(float(eta))))
+                                bits.append(
+                                    f"{eta_i // 60:02d}:{eta_i % 60:02d} remaining"
+                                )
+                            elif mp.get("avg_step_s") is not None:
+                                bits.append(f"{mp['avg_step_s']}s/it")
+                            payload["message"] = " · ".join(bits)
+                        log.info("faces %s clip=%s %s", phase, clip.id, payload["message"])
+                        asyncio.run_coroutine_threadsafe(
+                            state.emit(run_id, payload), loop
+                        )
+
+                    await asyncio.to_thread(
+                        run_faces_pass,
+                        dest,
+                        faces_path,
+                        prompt=clip.prompt or "a person speaking, detailed face",
+                        engine=state.engine,
+                        settings=fsettings,
+                        model_dir=state.engine.model_dir,
+                        on_progress=_faces_prog,
+                        refs=face_refs,
+                        loras=face_loras,
+                        quality=face_quality,
+                        steps=face_steps,
+                        layers=face_layers,
+                        reuse=face_reuse,
+                        preview_latent_dir=faces_preview_dir,
+                    )
+                    if faces_path.is_file():
+                        twin_id = str(uuid.uuid4())
+                        twin = ClipRecord(
+                            id=twin_id,
+                            prompt=clip.prompt,
+                            label="FACES",
+                            video_url=state.clip_url(faces_name),
+                            filename=faces_name,
+                            chain_id=clip.chain_id,
+                            clip_index=clip.clip_index,
+                            mode=clip.mode,
+                            status=RunStatus.DONE.value,
+                            created_at=datetime.now().isoformat(),
+                            bytes=faces_path.stat().st_size,
+                            project_id=clip.project_id,
+                            width=clip.width,
+                            height=clip.height,
+                            generation={
+                                **(clip.generation or {}),
+                                "faces": {
+                                    "enabled": True,
+                                    "canvas": fsettings.canvas,
+                                    "denoise": fsettings.denoise,
+                                    "seed": fsettings.seed,
+                                },
+                            },
+                            run_id=run_id,
+                            num_frames=clip.num_frames,
+                            seed=clip.seed,
+                            num_steps=clip.num_steps,
+                            layers=clip.layers,
+                            reuse=clip.reuse,
+                            quality=clip.quality,
+                        )
+                        state.clips[twin_id] = twin
+                        faces_twin_id = twin_id
+                        await state.emit(
+                            run_id,
+                            {
+                                "type": "progress",
+                                "phase": "faces_done",
+                                "message": "Faces twin ready",
+                                "clip_id": twin_id,
+                                "video_url": twin.video_url,
+                            },
+                        )
+                except FaceError as exc:
+                    log.warning("Faces post-pass skipped for %s: %s", clip.id, exc)
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "faces_skip",
+                            "message": f"Faces skipped: {exc}",
+                            "clip_id": clip.id,
+                        },
+                    )
+                except Exception as exc:
+                    log.exception("Faces post-pass failed for %s", clip.id)
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "faces_error",
+                            "message": f"Faces failed: {exc}",
+                            "clip_id": clip.id,
+                        },
+                    )
+                finally:
+                    if faces_watcher is not None:
+                        faces_watcher.stop(cleanup=False)
+                    _purge_preview_stem(faces_stem)
+
             clip.status = RunStatus.DONE.value
             clip.elapsed_s = round(time.time() - t0, 2)
             clip.bytes = dest.stat().st_size if dest.is_file() else size
@@ -1912,6 +2169,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     "redetail_twin_id": redetail_twin_id,
                     "upframe": bool(upframe_twin_id),
                     "upframe_twin_id": upframe_twin_id,
+                    "faces": bool(faces_twin_id),
+                    "faces_twin_id": faces_twin_id,
                 },
             )
             _purge_preview_stem(preview_stem)
@@ -2028,6 +2287,7 @@ def create_app(
                 pass
 
         # Preview weights are tiny (~22 MB) and required for live denoise previews.
+        # Also adopt any on-disk MLX SAM pack so Faces upgrades need no click.
         def _boot_light_models() -> None:
             try:
                 from h3_ssl import ensure_ssl_certs
@@ -2041,6 +2301,12 @@ def create_app(
                 ensure_taeh3(model_dir=state.engine.model_dir)
             except Exception:
                 log.exception("background taeh3 ensure failed")
+            try:
+                from h3_sam import adopt_local_sam3
+
+                adopt_local_sam3(state.engine.model_dir)
+            except Exception:
+                log.exception("background SAM adopt failed")
 
         loop.run_in_executor(None, _boot_light_models)
         yield
@@ -2132,6 +2398,41 @@ def create_app(
             "note": (
                 "Opt-in Upframe: FILM temporal interpolate (*_upframe.mp4). "
                 "Download film_net_fp16 in Models. Independent of ReDetail."
+            ),
+        }
+
+    def _faces_public(app_state: AppState) -> dict[str, Any]:
+        from h3_faces import (
+            ABSTAIN_FACE_PX,
+            DEFAULT_FACE_CANVAS,
+            DEFAULT_FACE_DENOISE,
+            MAX_FACE_CANVAS,
+            MAX_FACE_DENOISE,
+            MIN_FACE_CANVAS,
+            MIN_FACE_DENOISE,
+        )
+        from h3_sam import _active_backend_name, sam3_ready
+
+        ready = sam3_ready(app_state.engine.model_dir)
+        return {
+            # Faces is always selectable; SAM is fetched when the pass runs.
+            "available": True,
+            "sam3_ready": ready,
+            "backend": _active_backend_name(app_state.engine.model_dir),
+            "enabled_default": False,
+            "canvas": DEFAULT_FACE_CANVAS,
+            "canvas_min": MIN_FACE_CANVAS,
+            "canvas_max": MAX_FACE_CANVAS,
+            "canvas_follows_video": True,
+            "denoise": DEFAULT_FACE_DENOISE,
+            "denoise_min": MIN_FACE_DENOISE,
+            "denoise_max": MAX_FACE_DENOISE,
+            "abstain_px": ABSTAIN_FACE_PX,
+            "note": (
+                "Opt-in Faces twin (*_faces.mp4): Continuity MiniMaxH3FacePass. "
+                "Face crop canvas matches the shot short edge (384–768). "
+                "SAM 3.1 downloads on first Faces run (~3.3 GB MLX). "
+                "Independent of ReDetail / Upframe."
             ),
         }
 
@@ -2329,6 +2630,7 @@ def create_app(
             "longtake": _longtake_public(),
             "redetail": _redetail_public(),
             "upframe": _upframe_public(),
+            "faces": _faces_public(state),
         }
 
     # ── Models management (status + user-confirmed download) ─────────────────
@@ -2374,6 +2676,7 @@ def create_app(
         tao_ok = tao_path is not None and tao_path.is_file()
 
         from h3_redetail import latent_upscaler_path
+        from h3_sam import sam3_status
         from h3_upframe import film_net_path
 
         film = film_net_path(model_dir)
@@ -2436,6 +2739,7 @@ def create_app(
                 "note": "Optional learned H3 latent upscaler. ReDetail v1 works without it (pixel bridge).",
                 "essential": False,
             },
+            sam3_status(model_dir),
         ]
         return components
 
@@ -2582,13 +2886,27 @@ def create_app(
         "dmad": 1.4 * 1024**3,      # API-compat only (not listed in Models UI)
         "film_net": 69 * 1024**2,    # ~69 MB FILM
         "latent_upscale": 500 * 1024**2,  # ~0.5 GB estimate; optional
+        "sam3": 3.3 * 1024**3,      # ~3.3 GB mlx-community/sam3.1-bf16
     }
-    _DOWNLOAD_COMPONENT_HELP = "fl2va, ref2va, taeh3, taomate, film_net, latent_upscale"
+    _DOWNLOAD_COMPONENT_HELP = (
+        "fl2va, ref2va, taeh3, taomate, film_net, latent_upscale, sam3"
+    )
 
     _COMPONENT_DIR = {"fl2va": "FL2VA", "ref2va": "Ref2VA"}
-    _LIGHT_COMPONENTS = frozenset({"taeh3", "taomate", "film_net", "latent_upscale"})
+    _LIGHT_COMPONENTS = frozenset(
+        {"taeh3", "taomate", "film_net", "latent_upscale", "sam3"}
+    )
     _ALL_DOWNLOAD_COMPONENTS = frozenset(
-        {"fl2va", "ref2va", "taeh3", "taomate", "dmad", "film_net", "latent_upscale"}
+        {
+            "fl2va",
+            "ref2va",
+            "taeh3",
+            "taomate",
+            "dmad",
+            "film_net",
+            "latent_upscale",
+            "sam3",
+        }
     )
 
     def _sum_hf_local_progress(root: Path) -> tuple[int, int]:
@@ -2639,6 +2957,27 @@ def create_app(
             path = latent_upscaler_path(model_dir) or latent_upscale_dest(model_dir)
             complete = path.stat().st_size if path.is_file() else 0
             return complete, 0
+        if component == "sam3":
+            from h3_sam import find_comfy_sam3_multiplex, sam3_ready, sam3_root
+
+            root = sam3_root(model_dir)
+            if sam3_ready(model_dir):
+                total = 0
+                for p in root.rglob("*"):
+                    if p.is_file() and ".cache" not in p.parts:
+                        try:
+                            total += p.stat().st_size
+                        except OSError:
+                            pass
+                if total <= 0:
+                    comfy = find_comfy_sam3_multiplex()
+                    if comfy is not None:
+                        try:
+                            total = comfy.stat().st_size
+                        except OSError:
+                            total = 0
+                return total, 0
+            return _sum_hf_local_progress(root)
         if component in ("taomate", "dmad"):
             from h3_lora import BUILTIN_LORAS, lora_cached_path, lora_download_dir
 
@@ -2730,6 +3069,15 @@ def create_app(
 
                 await asyncio.to_thread(download_latent_upscaler, model_dir=model_dir)
                 _download_state["error"] = None
+            elif component == "sam3":
+                from h3_sam import SamDownloadError, download_sam3
+
+                try:
+                    await asyncio.to_thread(download_sam3, model_dir)
+                    _download_state["error"] = None
+                except SamDownloadError as exc:
+                    _download_state["error"] = str(exc)
+                    log.warning("SAM 3.1 download blocked: %s", exc)
             else:
                 cmd = _download_model_cmd("--local-dir", str(model_dir))
                 if component == "ref2va":
@@ -3317,6 +3665,7 @@ def create_app(
         longtake_body = body.get("longtake") if isinstance(body.get("longtake"), dict) else None
         redetail_body = body.get("redetail") if isinstance(body.get("redetail"), dict) else None
         upframe_body = body.get("upframe") if isinstance(body.get("upframe"), dict) else None
+        faces_body = body.get("faces") if isinstance(body.get("faces"), dict) else None
         run = RunRecord(
             id=run_id,
             status=RunStatus.QUEUED.value,
@@ -3329,6 +3678,7 @@ def create_app(
             longtake=dict(longtake_body) if longtake_body else None,
             redetail=dict(redetail_body) if redetail_body else None,
             upframe=dict(upframe_body) if upframe_body else None,
+            faces=dict(faces_body) if faces_body else None,
         )
         state.runs[run_id] = run
         _RUN_BODIES[run_id] = body
@@ -3448,6 +3798,249 @@ def create_app(
             "(POST /api/clips/{id}/redetail) for ×2 H3 refine, or a larger "
             "one-pass resolution preset.",
         )
+
+    @app.get("/api/clips/{clip_id}/faces/inspect")
+    async def faces_inspect(clip_id: str):
+        """Detect faces and return box overlays (no H3 repair)."""
+        clip = state.clips.get(clip_id)
+        if not clip or clip.status != "done":
+            raise HTTPException(404, "done clip not found")
+        path = state.output_dir / clip.filename
+        if not path.is_file():
+            raise HTTPException(404, "clip file missing")
+        from h3_facepass import inspect_faces
+        from h3_faces import FaceError
+
+        try:
+            result = await asyncio.to_thread(
+                inspect_faces, path, model_dir=state.engine.model_dir
+            )
+        except FaceError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except Exception as exc:
+            log.exception("faces inspect failed")
+            raise HTTPException(500, f"faces inspect failed: {exc}") from exc
+        return {
+            "ok": True,
+            "clip_id": clip_id,
+            "frames": result.frames,
+            "width": result.width,
+            "height": result.height,
+            "backend": result.backend,
+            "abstain": result.abstain,
+            "overlays": result.overlays,
+            "heights": result.heights,
+            "found_count": sum(1 for ok in result.found if ok),
+        }
+
+    @app.get("/api/clips/{clip_id}/faces/overlay.png")
+    async def faces_overlay_png(clip_id: str, frame: int = 0):
+        """PNG of one frame with face boxes drawn (Inspect faces preview)."""
+        from fastapi.responses import Response
+
+        clip = state.clips.get(clip_id)
+        if not clip or clip.status != "done":
+            raise HTTPException(404, "done clip not found")
+        path = state.output_dir / clip.filename
+        if not path.is_file():
+            raise HTTPException(404, "clip file missing")
+        from h3_facepass import decode_clip_rgb, overlay_png
+        from h3_sam import detect_faces_in_frame
+
+        frames, _, _ = await asyncio.to_thread(decode_clip_rgb, path)
+        if frame < 0 or frame >= len(frames):
+            raise HTTPException(400, f"frame must be 0..{len(frames) - 1}")
+        boxes = await asyncio.to_thread(
+            detect_faces_in_frame, frames[frame], model_dir=state.engine.model_dir
+        )
+        png = await asyncio.to_thread(overlay_png, frames[frame], boxes, label=None)
+        return Response(content=png, media_type="image/png")
+
+    @app.post("/api/clips/{clip_id}/faces")
+    async def faces_pass(clip_id: str, body: dict[str, Any] | None = None):
+        """Run Faces repair on a done clip → sibling *_faces.mp4 (A/B)."""
+        body = body or {}
+        clip = state.clips.get(clip_id)
+        if not clip or clip.status != "done":
+            raise HTTPException(404, "done clip not found")
+        path = state.output_dir / clip.filename
+        if not path.is_file():
+            raise HTTPException(404, "clip file missing")
+        if state._active_run_id is not None:
+            raise HTTPException(409, "engine is busy")
+
+        from h3_facepass import FacesSettings, run_faces_pass
+        from h3_faces import (
+            DEFAULT_FACE_CANVAS,
+            DEFAULT_FACE_DENOISE,
+            FaceError,
+            clamp_face_denoise,
+            face_canvas_for_video,
+        )
+        from h3_paths import console_h3
+
+        # Prefer the clip's own pixels; fall back to a client hint only if unknown.
+        canvas = face_canvas_for_video(
+            clip.width,
+            clip.height,
+            fallback=(
+                int(body["canvas"])
+                if body.get("canvas") is not None
+                else DEFAULT_FACE_CANVAS
+            ),
+        )
+        denoise = clamp_face_denoise(
+            float(
+                body.get("denoise")
+                if body.get("denoise") is not None
+                else DEFAULT_FACE_DENOISE
+            )
+        )
+        seed = int(body.get("seed") if body.get("seed") is not None else (clip.seed or 42))
+        abstain = bool(body.get("abstain", False))
+        confirm = bool(body.get("confirm_boxes", False))
+        confirmed = body.get("boxes")
+        confirmed_boxes = None
+        if confirmed is not None:
+            try:
+                confirmed_boxes = [
+                    (float(b["x"]), float(b["y"]), float(b["w"]), float(b["h"]))
+                    for b in confirmed
+                ]
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HTTPException(400, "boxes must be {x,y,w,h} list") from exc
+
+        if confirm and confirmed_boxes is None:
+            from h3_facepass import inspect_faces
+
+            preview = await asyncio.to_thread(
+                inspect_faces, path, model_dir=state.engine.model_dir, canvas=canvas
+            )
+            return {
+                "ok": True,
+                "needs_confirm": True,
+                "overlays": preview.overlays,
+                "abstain": preview.abstain,
+                "backend": preview.backend,
+                "frames": preview.frames,
+            }
+
+        out_name = f"{Path(clip.filename).stem}_faces.mp4"
+        out_path = state.output_dir / out_name
+        settings = FacesSettings(
+            canvas=canvas, denoise=denoise, seed=seed, abstain=abstain
+        )
+        prompt = str(body.get("prompt") or clip.prompt or "a person speaking, detailed face")
+        gen = clip.generation if isinstance(clip.generation, dict) else {}
+        refs_raw = body.get("refs") if body.get("refs") is not None else gen.get("refs")
+        try:
+            face_refs = parse_refs_payload(refs_raw, validate=False)
+            face_refs = _resolve_refs(state, face_refs)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        face_loras = _loras_from_body(
+            state,
+            {
+                "loras": body.get("loras")
+                if body.get("loras") is not None
+                else (clip.loras or gen.get("loras") or []),
+            },
+        )
+        face_quality = str(
+            body.get("quality") or gen.get("quality") or clip.quality or "close"
+        )
+        face_steps = (
+            int(body["num_steps"]) if body.get("num_steps") is not None else clip.num_steps
+        )
+        face_layers = (
+            int(body["layers"]) if body.get("layers") is not None else clip.layers
+        )
+        face_reuse = int(body["reuse"]) if body.get("reuse") is not None else clip.reuse
+
+        events: list[dict[str, Any]] = []
+
+        def on_progress(phase: str, extra: dict[str, Any]) -> None:
+            events.append({"phase": phase, **extra})
+            console_h3("faces %s %s", phase, extra.get("message") or "")
+
+        async with state._submit_lock:
+            if state._active_run_id is not None:
+                raise HTTPException(409, "engine is busy")
+            state._active_run_id = f"faces:{clip_id}"
+            try:
+                from h3_sam import SamDownloadError, download_sam3, sam3_ready
+
+                if not sam3_ready(state.engine.model_dir):
+                    console_h3("faces downloading SAM 3.1…")
+                    try:
+                        await asyncio.to_thread(download_sam3, state.engine.model_dir)
+                    except SamDownloadError as exc:
+                        raise HTTPException(400, str(exc)) from exc
+                await asyncio.to_thread(
+                    run_faces_pass,
+                    path,
+                    out_path,
+                    prompt=prompt,
+                    engine=state.engine,
+                    settings=settings,
+                    model_dir=state.engine.model_dir,
+                    on_progress=on_progress,
+                    confirmed_boxes=confirmed_boxes,
+                    refs=face_refs,
+                    loras=face_loras,
+                    quality=face_quality,
+                    steps=face_steps,
+                    layers=face_layers,
+                    reuse=face_reuse,
+                )
+            except FaceError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            except Exception as exc:
+                log.exception("faces pass failed")
+                raise HTTPException(500, f"faces pass failed: {exc}") from exc
+            finally:
+                state._active_run_id = None
+
+        twin_id = str(uuid.uuid4())
+        twin = ClipRecord(
+            id=twin_id,
+            prompt=clip.prompt,
+            label="FACES",
+            video_url=state.clip_url(out_name),
+            filename=out_name,
+            chain_id=clip.chain_id,
+            clip_index=clip.clip_index,
+            mode=clip.mode,
+            status=RunStatus.DONE.value,
+            created_at=datetime.now().isoformat(),
+            bytes=out_path.stat().st_size if out_path.is_file() else None,
+            project_id=clip.project_id,
+            width=clip.width,
+            height=clip.height,
+            generation={
+                **(gen or {}),
+                "faces": {
+                    "enabled": True,
+                    "canvas": canvas,
+                    "denoise": denoise,
+                    "seed": seed,
+                    "source_clip_id": clip.id,
+                },
+            },
+            num_frames=clip.num_frames,
+            seed=seed,
+            num_steps=clip.num_steps,
+            layers=clip.layers,
+            reuse=clip.reuse,
+            quality=clip.quality,
+        )
+        state.clips[twin_id] = twin
+        state.save_index()
+        return {
+            "ok": True,
+            "clip": _clip_for_api(state, twin),
+            "events": events[-20:],
+        }
 
     @app.post("/api/clips/{clip_id}/redetail")
     async def redetail_pass(clip_id: str, body: dict[str, Any] | None = None):

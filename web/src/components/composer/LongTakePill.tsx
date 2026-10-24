@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useDismissable } from "../../hooks/useDismissable";
 import type { LongTakeConfigPublic } from "../../types";
 
 export type LongTakePillProps = {
@@ -27,13 +28,22 @@ export function LongTakePill({
   onSeed,
 }: LongTakePillProps) {
   const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
   const canEnable = Boolean(config?.available);
   const title = !config
     ? "Long take"
     : "Long take refine — init-video re-denoise + temporal blend (A/B twin)";
 
+  useDismissable(open, () => setOpen(false), rootRef);
+  useEffect(() => {
+    if (disabled || !canEnable) setOpen(false);
+  }, [disabled, canEnable]);
+
   return (
-    <div className={`faces-pill longtake-pill${enabled ? " is-on" : ""}${open ? " is-open" : ""}`}>
+    <div
+      ref={rootRef}
+      className={`faces-pill longtake-pill${enabled ? " is-on" : ""}${open ? " is-open" : ""}`}
+    >
       <button
         type="button"
         className="faces-pill__main"

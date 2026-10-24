@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CompileToken } from "../../compile";
+import { useDismissable } from "../../hooks/useDismissable";
 
 interface WhatTheModelReadsProps {
   compiledPrompt: string;
@@ -15,13 +16,23 @@ export function WhatTheModelReads({
   disabled,
 }: WhatTheModelReadsProps) {
   const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useDismissable(open, () => setOpen(false), rootRef);
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
   return (
-    <div className={`wtmr${disabled ? " wtmr--disabled" : ""}`}>
+    <div
+      ref={rootRef}
+      className={`wtmr${disabled ? " wtmr--disabled" : ""}`}
+    >
       <button
         type="button"
         className={`wtmr__toggle${open ? " is-open" : ""}`}
         onClick={() => setOpen((v) => !v)}
         disabled={disabled}
+        aria-expanded={open}
       >
         <span className="wtmr__chevron" aria-hidden>
           ▸

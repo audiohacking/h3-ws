@@ -295,14 +295,65 @@ ALLOWED_OUTPUT_SIZES = frozenset(
     (int(p["width"]), int(p["height"])) for p in RESOLUTION_PRESETS
 )
 
+# Continuity H3 ``declare.RULES`` short-edge envelope (UI resolveCanvas).
+NATIVE_SHORT_EDGE = 768
+MIN_SHORT_EDGE = 384  # Continuity H3 declare.RULES
+MAX_SHORT_EDGE = 2048
+MIN_RATIO = 9 / 21
+MAX_RATIO = 21 / 9
+H3_ASPECTS: dict[str, float] = {
+    "16:9": 16 / 9,
+    "21:9": 21 / 9,
+    "3:2": 3 / 2,
+    "4:3": 4 / 3,
+    "5:4": 5 / 4,
+    "1:1": 1.0,
+    "4:5": 4 / 5,
+    "3:4": 3 / 4,
+    "2:3": 2 / 3,
+    "9:16": 9 / 16,
+    "9:21": 9 / 21,
+}
+
+
+def clamp_ratio(ratio: float) -> tuple[float, bool]:
+    r = float(ratio)
+    if r < MIN_RATIO:
+        return MIN_RATIO, True
+    if r > MAX_RATIO:
+        return MAX_RATIO, True
+    return r, False
+
+
+def resolve_canvas(ratio: float, short_edge: int) -> tuple[int, int]:
+    """Continuity ``resolve_canvas`` — aspect + short edge → WxH (×32)."""
+    clamped, _ = clamp_ratio(ratio)
+    edge = max(MIN_SHORT_EDGE, min(MAX_SHORT_EDGE, int(short_edge)))
+    max_pixels = ONE_PASS_MAX_PIXELS * (edge / float(NATIVE_SHORT_EDGE)) ** 2
+    if clamped >= 1.0:
+        width, height = edge * clamped, float(edge)
+    else:
+        width, height = float(edge), edge / clamped
+    if width * height > max_pixels:
+        scale = math.sqrt(max_pixels / (width * height))
+        width, height = width * scale, height * scale
+    width = float(snap_spatial(width))
+    height = float(snap_spatial(height))
+    while width * height > max_pixels and max(width, height) > SPATIAL_ALIGN:
+        if width >= height:
+            width -= SPATIAL_ALIGN
+        else:
+            height -= SPATIAL_ALIGN
+    return int(width), int(height)
+
 
 def require_ui_canvas(width: int, height: int) -> tuple[int, int]:
-    """Accept only documented H3 output canvases (mechanical ×32 cap still applies)."""
-    w, h = validate_canvas(width, height)
-    if (w, h) not in ALLOWED_OUTPUT_SIZES:
-        allowed = ", ".join(f"{a}×{b}" for a, b in sorted(ALLOWED_OUTPUT_SIZES))
-        raise ValueError(f"canvas {w}×{h} is not a documented H3 size ({allowed})")
-    return w, h
+    """Accept Continuity free short-edge canvases (×32, ≤ engine MAX_PIXELS).
+
+    Tagged ``RESOLUTION_PRESETS`` remain the documented defaults / migration
+    targets; the composer short-edge slider is no longer locked to that list.
+    """
+    return validate_canvas(width, height)
 
 
 def sanitize_filename(prompt: str, maxlen: int = 48) -> str:
