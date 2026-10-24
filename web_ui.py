@@ -179,6 +179,9 @@ class RunRecord:
     merged_clip_id: Optional[str] = None
     # Optional Long take refine (default off). Twin clip A/B when enabled.
     longtake: Optional[dict[str, Any]] = None
+    # Independent post-passes (default off) — not chained to each other.
+    redetail: Optional[dict[str, Any]] = None
+    upframe: Optional[dict[str, Any]] = None
 
 
 class AppState:
@@ -1653,6 +1656,236 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     state.engine.clear_preview_latent_dumps()
                     _purge_preview_stem(lt_stem)
 
+            redetail_cfg = run.redetail if isinstance(run.redetail, dict) else None
+            redetail_twin_id: str | None = None
+            if redetail_cfg and redetail_cfg.get("enabled") and dest.is_file():
+                from h3_redetail import (
+                    DEFAULT_REDETAIL_DENOISE,
+                    RedetailError,
+                    RedetailSettings,
+                    clamp_redetail_denoise,
+                    run_redetail,
+                )
+
+                try:
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "redetail_upscale",
+                            "message": "ReDetail · ×2 refine…",
+                            "clip_id": clip.id,
+                        },
+                    )
+                    rd_name = f"{Path(clip.filename).stem}_redetail.mp4"
+                    rd_path = state.output_dir / rd_name
+                    settings_rd = RedetailSettings(
+                        denoise=clamp_redetail_denoise(
+                            float(
+                                redetail_cfg.get("denoise")
+                                if redetail_cfg.get("denoise") is not None
+                                else DEFAULT_REDETAIL_DENOISE
+                            )
+                        ),
+                        seed=int(
+                            redetail_cfg.get("seed")
+                            if redetail_cfg.get("seed") is not None
+                            else (clip.seed or 42)
+                        ),
+                    )
+
+                    def _rd_progress(phase: str, extra: dict[str, Any]) -> None:
+                        log.info("redetail %s clip=%s %s", phase, clip.id, extra.get("message"))
+
+                    await asyncio.to_thread(
+                        run_redetail,
+                        dest,
+                        rd_path,
+                        prompt=clip.prompt or "detailed cinematic shot",
+                        engine=state.engine,
+                        settings=settings_rd,
+                        on_progress=_rd_progress,
+                        refs=req.refs,
+                        loras=req.loras,
+                        quality=req.quality,
+                        steps=req.steps,
+                        layers=req.layers,
+                        reuse=1,
+                    )
+                    if rd_path.is_file():
+                        from h3_media import redetail_output_size
+
+                        twin_id = str(uuid.uuid4())
+                        try:
+                            tw, th = redetail_output_size(
+                                int(clip.width or 512), int(clip.height or 512)
+                            )
+                        except Exception:
+                            tw, th = clip.width, clip.height
+                        twin = ClipRecord(
+                            id=twin_id,
+                            prompt=clip.prompt,
+                            label="REDETAIL",
+                            video_url=state.clip_url(rd_name),
+                            filename=rd_name,
+                            chain_id=clip.chain_id,
+                            clip_index=clip.clip_index,
+                            mode=clip.mode,
+                            status=RunStatus.DONE.value,
+                            created_at=datetime.now().isoformat(),
+                            bytes=rd_path.stat().st_size,
+                            project_id=clip.project_id,
+                            width=tw,
+                            height=th,
+                            generation={
+                                **(clip.generation or {}),
+                                "redetail": {
+                                    "enabled": True,
+                                    "denoise": settings_rd.denoise,
+                                    "seed": settings_rd.seed,
+                                },
+                            },
+                            run_id=run_id,
+                            num_frames=clip.num_frames,
+                            seed=clip.seed,
+                            num_steps=clip.num_steps,
+                            layers=clip.layers,
+                            reuse=clip.reuse,
+                            quality=clip.quality,
+                        )
+                        state.clips[twin_id] = twin
+                        redetail_twin_id = twin_id
+                        await state.emit(
+                            run_id,
+                            {
+                                "type": "progress",
+                                "phase": "redetail_done",
+                                "message": "ReDetail twin ready",
+                                "clip_id": twin_id,
+                                "video_url": twin.video_url,
+                            },
+                        )
+                except RedetailError as exc:
+                    log.warning("ReDetail skipped for %s: %s", clip.id, exc)
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "redetail_skip",
+                            "message": f"ReDetail skipped: {exc}",
+                            "clip_id": clip.id,
+                        },
+                    )
+                except Exception as exc:
+                    log.exception("ReDetail failed for %s", clip.id)
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "redetail_error",
+                            "message": f"ReDetail failed: {exc}",
+                            "clip_id": clip.id,
+                        },
+                    )
+
+            upframe_cfg = run.upframe if isinstance(run.upframe, dict) else None
+            upframe_twin_id: str | None = None
+            if upframe_cfg and upframe_cfg.get("enabled") and dest.is_file():
+                from h3_upframe import (
+                    DEFAULT_MULTIPLIER,
+                    UpframeError,
+                    UpframeSettings,
+                    run_upframe,
+                )
+
+                try:
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "upframe_run",
+                            "message": "Upframe · temporal interpolate…",
+                            "clip_id": clip.id,
+                        },
+                    )
+                    uf_name = f"{Path(clip.filename).stem}_upframe.mp4"
+                    uf_path = state.output_dir / uf_name
+                    await asyncio.to_thread(
+                        run_upframe,
+                        dest,
+                        uf_path,
+                        settings=UpframeSettings(
+                            multiplier=int(
+                                upframe_cfg.get("multiplier") or DEFAULT_MULTIPLIER
+                            )
+                        ),
+                        model_dir=state.engine.model_dir,
+                        require_weights=True,
+                    )
+                    if uf_path.is_file():
+                        twin_id = str(uuid.uuid4())
+                        twin = ClipRecord(
+                            id=twin_id,
+                            prompt=clip.prompt,
+                            label="UPFRAME",
+                            video_url=state.clip_url(uf_name),
+                            filename=uf_name,
+                            chain_id=clip.chain_id,
+                            clip_index=clip.clip_index,
+                            mode=clip.mode,
+                            status=RunStatus.DONE.value,
+                            created_at=datetime.now().isoformat(),
+                            bytes=uf_path.stat().st_size,
+                            project_id=clip.project_id,
+                            generation={
+                                **(clip.generation or {}),
+                                "upframe": {"enabled": True},
+                            },
+                            run_id=run_id,
+                            width=clip.width,
+                            height=clip.height,
+                            num_frames=clip.num_frames,
+                            seed=clip.seed,
+                            num_steps=clip.num_steps,
+                            layers=clip.layers,
+                            reuse=clip.reuse,
+                            quality=clip.quality,
+                        )
+                        state.clips[twin_id] = twin
+                        upframe_twin_id = twin_id
+                        await state.emit(
+                            run_id,
+                            {
+                                "type": "progress",
+                                "phase": "upframe_done",
+                                "message": "Upframe twin ready",
+                                "clip_id": twin_id,
+                                "video_url": twin.video_url,
+                            },
+                        )
+                except UpframeError as exc:
+                    log.warning("Upframe skipped for %s: %s", clip.id, exc)
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "upframe_skip",
+                            "message": f"Upframe skipped: {exc}",
+                            "clip_id": clip.id,
+                        },
+                    )
+                except Exception as exc:
+                    log.exception("Upframe failed for %s", clip.id)
+                    await state.emit(
+                        run_id,
+                        {
+                            "type": "progress",
+                            "phase": "upframe_error",
+                            "message": f"Upframe failed: {exc}",
+                            "clip_id": clip.id,
+                        },
+                    )
+
             clip.status = RunStatus.DONE.value
             clip.elapsed_s = round(time.time() - t0, 2)
             clip.bytes = dest.stat().st_size if dest.is_file() else size
@@ -1675,12 +1908,14 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     "chain_id": clip.chain_id,
                     "longtake": bool(longtake_twin_id),
                     "longtake_twin_id": longtake_twin_id,
+                    "redetail": bool(redetail_twin_id),
+                    "redetail_twin_id": redetail_twin_id,
+                    "upframe": bool(upframe_twin_id),
+                    "upframe_twin_id": upframe_twin_id,
                 },
             )
             _purge_preview_stem(preview_stem)
             done_paths.append(dest)
-            # Post-hoc Lanczos "upscale" retired — creates a timeline twin without
-            # real detail. Latent upscale (Continuity two-pass) is the future path.
             if run.autocontinue and i < len(run.prompts) - 1 and media_available():
                 tmp = mk_scratch_dir("h3_chain_")
                 prev_frame = extract_last_frame(dest, tmp / "last.png")
@@ -1862,6 +2097,41 @@ def create_app(
             "note": (
                 "Opt-in long-take refine: init-video re-denoise + temporal blend. "
                 "Writes a *_longtake.mp4 twin so the baseline stays for A/B."
+            ),
+        }
+
+    def _redetail_public() -> dict[str, Any]:
+        from h3_redetail import (
+            DEFAULT_REDETAIL_DENOISE,
+            MAX_REDETAIL_DENOISE,
+            MIN_REDETAIL_DENOISE,
+            redetail_available,
+        )
+
+        return {
+            "available": redetail_available(),
+            "enabled_default": False,
+            "denoise": DEFAULT_REDETAIL_DENOISE,
+            "denoise_min": MIN_REDETAIL_DENOISE,
+            "denoise_max": MAX_REDETAIL_DENOISE,
+            "note": (
+                "Opt-in ReDetail: ×2 canvas + H3 init-video refine twin (*_redetail.mp4). "
+                "Independent of Upframe. Heavy — default off."
+            ),
+        }
+
+    def _upframe_public() -> dict[str, Any]:
+        from h3_upframe import DEFAULT_MULTIPLIER, film_net_path, upframe_available
+
+        weights = film_net_path(state.engine.model_dir) is not None
+        return {
+            "available": upframe_available(state.engine.model_dir),
+            "enabled_default": False,
+            "multiplier": DEFAULT_MULTIPLIER,
+            "weights": weights,
+            "note": (
+                "Opt-in Upframe: FILM temporal interpolate (*_upframe.mp4). "
+                "Download film_net_fp16 in Models. Independent of ReDetail."
             ),
         }
 
@@ -2057,6 +2327,8 @@ def create_app(
             ),
             "network": network_settings_public(),
             "longtake": _longtake_public(),
+            "redetail": _redetail_public(),
+            "upframe": _upframe_public(),
         }
 
     # ── Models management (status + user-confirmed download) ─────────────────
@@ -2101,6 +2373,14 @@ def create_app(
         tao_path = lora_cached_path(tao_spec) if tao_spec else None
         tao_ok = tao_path is not None and tao_path.is_file()
 
+        from h3_redetail import latent_upscaler_path
+        from h3_upframe import film_net_path
+
+        film = film_net_path(model_dir)
+        film_ok = film is not None and film.is_file()
+        lat = latent_upscaler_path(model_dir)
+        lat_ok = lat is not None and lat.is_file()
+
         components = [
             {
                 "id": "fl2va",
@@ -2136,6 +2416,24 @@ def create_app(
                 "path": str(tao_path) if tao_path else tao_spec,
                 "size_gib": round(_file_gib(tao_path), 2) if tao_path else 2.4,
                 "note": "3-step turbo LoRA (~2.4 GB). Optional — enables Turbo quality.",
+                "essential": False,
+            },
+            {
+                "id": "film_net",
+                "label": "Upframe (FILM)",
+                "present": film_ok,
+                "path": str(film) if film else "models/frame_interpolation/film_net_fp16.safetensors",
+                "size_gib": round(_file_gib(film), 3) if film else 0.066,
+                "note": "FILM frame interpolation (~69 MB). Enables Upframe twins.",
+                "essential": False,
+            },
+            {
+                "id": "latent_upscale",
+                "label": "ReDetail latent ×2",
+                "present": lat_ok,
+                "path": str(lat) if lat else "models/latent_upscale/",
+                "size_gib": round(_file_gib(lat), 2) if lat else 0.0,
+                "note": "Optional learned H3 latent upscaler. ReDetail v1 works without it (pixel bridge).",
                 "essential": False,
             },
         ]
@@ -2282,13 +2580,15 @@ def create_app(
         "taeh3": 22 * 1024**2,      # ~22 MB
         "taomate": 2.4 * 1024**3,   # ~2.4 GB
         "dmad": 1.4 * 1024**3,      # API-compat only (not listed in Models UI)
+        "film_net": 69 * 1024**2,    # ~69 MB FILM
+        "latent_upscale": 500 * 1024**2,  # ~0.5 GB estimate; optional
     }
-    _DOWNLOAD_COMPONENT_HELP = "fl2va, ref2va, taeh3, taomate"
+    _DOWNLOAD_COMPONENT_HELP = "fl2va, ref2va, taeh3, taomate, film_net, latent_upscale"
 
     _COMPONENT_DIR = {"fl2va": "FL2VA", "ref2va": "Ref2VA"}
-    _LIGHT_COMPONENTS = frozenset({"taeh3", "taomate"})
+    _LIGHT_COMPONENTS = frozenset({"taeh3", "taomate", "film_net", "latent_upscale"})
     _ALL_DOWNLOAD_COMPONENTS = frozenset(
-        {"fl2va", "ref2va", "taeh3", "taomate", "dmad"}
+        {"fl2va", "ref2va", "taeh3", "taomate", "dmad", "film_net", "latent_upscale"}
     )
 
     def _sum_hf_local_progress(root: Path) -> tuple[int, int]:
@@ -2327,6 +2627,18 @@ def create_app(
             complete = path.stat().st_size if path.is_file() else 0
             incomplete = tmp.stat().st_size if tmp.is_file() else 0
             return complete, incomplete
+        if component == "film_net":
+            from h3_upframe import film_net_dest, film_net_path
+
+            path = film_net_path(model_dir) or film_net_dest(model_dir)
+            complete = path.stat().st_size if path.is_file() else 0
+            return complete, 0
+        if component == "latent_upscale":
+            from h3_redetail import latent_upscale_dest, latent_upscaler_path
+
+            path = latent_upscaler_path(model_dir) or latent_upscale_dest(model_dir)
+            complete = path.stat().st_size if path.is_file() else 0
+            return complete, 0
         if component in ("taomate", "dmad"):
             from h3_lora import BUILTIN_LORAS, lora_cached_path, lora_download_dir
 
@@ -2407,6 +2719,16 @@ def create_app(
                 if not dmad:
                     raise RuntimeError("DMAD builtin recipe missing")
                 await asyncio.to_thread(ensure_lora, str(dmad["spec"]))
+                _download_state["error"] = None
+            elif component == "film_net":
+                from h3_upframe import download_film_net
+
+                await asyncio.to_thread(download_film_net, model_dir=model_dir)
+                _download_state["error"] = None
+            elif component == "latent_upscale":
+                from h3_redetail import download_latent_upscaler
+
+                await asyncio.to_thread(download_latent_upscaler, model_dir=model_dir)
                 _download_state["error"] = None
             else:
                 cmd = _download_model_cmd("--local-dir", str(model_dir))
@@ -2993,6 +3315,8 @@ def create_app(
         state.touch_project(project_id)
 
         longtake_body = body.get("longtake") if isinstance(body.get("longtake"), dict) else None
+        redetail_body = body.get("redetail") if isinstance(body.get("redetail"), dict) else None
+        upframe_body = body.get("upframe") if isinstance(body.get("upframe"), dict) else None
         run = RunRecord(
             id=run_id,
             status=RunStatus.QUEUED.value,
@@ -3003,6 +3327,8 @@ def create_app(
             autocontinue=autocontinue,
             autoconcat=autoconcat,
             longtake=dict(longtake_body) if longtake_body else None,
+            redetail=dict(redetail_body) if redetail_body else None,
+            upframe=dict(upframe_body) if upframe_body else None,
         )
         state.runs[run_id] = run
         _RUN_BODIES[run_id] = body
@@ -3116,14 +3442,200 @@ def create_app(
 
     @app.post("/api/clips/{clip_id}/upscale")
     async def upscale_clip(clip_id: str, body: dict[str, Any] | None = None):
-        # Lanczos post-process retired: it duplicated timeline clips without
-        # adding real detail. Continuity-style latent upscale is the future path.
         raise HTTPException(
             410,
-            "Pixel upscale is disabled. Use a larger resolution preset "
-            "(e.g. 768×768 or 1344×768) for native megapixel density. "
-            "Latent upscale is not available yet.",
+            "Pixel Lanczos upscale was removed. Use ReDetail "
+            "(POST /api/clips/{id}/redetail) for ×2 H3 refine, or a larger "
+            "one-pass resolution preset.",
         )
+
+    @app.post("/api/clips/{clip_id}/redetail")
+    async def redetail_pass(clip_id: str, body: dict[str, Any] | None = None):
+        """Run ReDetail on a done clip → sibling *_redetail.mp4 (A/B)."""
+        body = body or {}
+        clip = state.clips.get(clip_id)
+        if not clip or clip.status != "done":
+            raise HTTPException(404, "done clip not found")
+        path = state.output_dir / clip.filename
+        if not path.is_file():
+            raise HTTPException(404, "clip file missing")
+        if state._active_run_id is not None:
+            raise HTTPException(409, "engine is busy")
+
+        from h3_redetail import (
+            DEFAULT_REDETAIL_DENOISE,
+            RedetailError,
+            RedetailSettings,
+            clamp_redetail_denoise,
+            run_redetail,
+        )
+        from h3_paths import console_h3
+
+        denoise = clamp_redetail_denoise(
+            float(
+                body.get("denoise")
+                if body.get("denoise") is not None
+                else DEFAULT_REDETAIL_DENOISE
+            )
+        )
+        seed = int(body.get("seed") if body.get("seed") is not None else (clip.seed or 42))
+        out_name = f"{Path(clip.filename).stem}_redetail.mp4"
+        out_path = state.output_dir / out_name
+        settings = RedetailSettings(denoise=denoise, seed=seed)
+        prompt = str(body.get("prompt") or clip.prompt or "detailed cinematic shot")
+        gen = clip.generation if isinstance(clip.generation, dict) else {}
+        refs_raw = body.get("refs") if body.get("refs") is not None else gen.get("refs")
+        try:
+            rd_refs = parse_refs_payload(refs_raw, validate=False)
+            rd_refs = _resolve_refs(state, rd_refs)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        rd_loras = _loras_from_body(
+            state,
+            {
+                "loras": body.get("loras")
+                if body.get("loras") is not None
+                else (clip.loras or gen.get("loras") or []),
+            },
+        )
+
+        async with state._submit_lock:
+            if state._active_run_id is not None:
+                raise HTTPException(409, "engine is busy")
+            state._active_run_id = f"redetail:{clip_id}"
+            try:
+                await asyncio.to_thread(
+                    run_redetail,
+                    path,
+                    out_path,
+                    prompt=prompt,
+                    engine=state.engine,
+                    settings=settings,
+                    on_progress=lambda phase, extra: console_h3(
+                        "redetail %s %s", phase, extra.get("message") or ""
+                    ),
+                    refs=rd_refs,
+                    loras=rd_loras,
+                    quality=str(
+                        body.get("quality") or gen.get("quality") or clip.quality or "fast"
+                    ),
+                    steps=int(body["num_steps"])
+                    if body.get("num_steps") is not None
+                    else clip.num_steps,
+                    layers=int(body["layers"]) if body.get("layers") is not None else clip.layers,
+                    reuse=1,
+                )
+            except RedetailError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            finally:
+                state._active_run_id = None
+
+        from h3_media import redetail_output_size
+
+        try:
+            tw, th = redetail_output_size(int(clip.width or 512), int(clip.height or 512))
+        except Exception:
+            tw, th = clip.width, clip.height
+        twin_id = str(uuid.uuid4())
+        twin = ClipRecord(
+            id=twin_id,
+            prompt=clip.prompt,
+            label="REDETAIL",
+            video_url=state.clip_url(out_name),
+            filename=out_name,
+            chain_id=clip.chain_id,
+            clip_index=clip.clip_index,
+            mode=clip.mode,
+            status=RunStatus.DONE.value,
+            created_at=datetime.now().isoformat(),
+            bytes=out_path.stat().st_size if out_path.is_file() else None,
+            project_id=clip.project_id,
+            width=tw,
+            height=th,
+            generation={
+                **(gen or {}),
+                "redetail": {"enabled": True, "denoise": denoise, "seed": seed},
+            },
+            num_frames=clip.num_frames,
+            seed=clip.seed,
+            num_steps=clip.num_steps,
+            layers=clip.layers,
+            reuse=clip.reuse,
+            quality=clip.quality,
+        )
+        state.clips[twin_id] = twin
+        state.save_index()
+        return {"ok": True, "clip": asdict(twin)}
+
+    @app.post("/api/clips/{clip_id}/upframe")
+    async def upframe_pass(clip_id: str, body: dict[str, Any] | None = None):
+        """Run Upframe (FILM) on a done clip → sibling *_upframe.mp4 (A/B)."""
+        body = body or {}
+        clip = state.clips.get(clip_id)
+        if not clip or clip.status != "done":
+            raise HTTPException(404, "done clip not found")
+        path = state.output_dir / clip.filename
+        if not path.is_file():
+            raise HTTPException(404, "clip file missing")
+        if state._active_run_id is not None:
+            raise HTTPException(409, "engine is busy")
+
+        from h3_upframe import DEFAULT_MULTIPLIER, UpframeError, UpframeSettings, run_upframe
+
+        out_name = f"{Path(clip.filename).stem}_upframe.mp4"
+        out_path = state.output_dir / out_name
+        settings = UpframeSettings(
+            multiplier=int(body.get("multiplier") or DEFAULT_MULTIPLIER)
+        )
+
+        async with state._submit_lock:
+            if state._active_run_id is not None:
+                raise HTTPException(409, "engine is busy")
+            state._active_run_id = f"upframe:{clip_id}"
+            try:
+                await asyncio.to_thread(
+                    run_upframe,
+                    path,
+                    out_path,
+                    settings=settings,
+                    model_dir=state.engine.model_dir,
+                    require_weights=True,
+                )
+            except UpframeError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            finally:
+                state._active_run_id = None
+
+        twin_id = str(uuid.uuid4())
+        twin = ClipRecord(
+            id=twin_id,
+            prompt=clip.prompt,
+            label="UPFRAME",
+            video_url=state.clip_url(out_name),
+            filename=out_name,
+            chain_id=clip.chain_id,
+            clip_index=clip.clip_index,
+            mode=clip.mode,
+            status=RunStatus.DONE.value,
+            created_at=datetime.now().isoformat(),
+            bytes=out_path.stat().st_size if out_path.is_file() else None,
+            project_id=clip.project_id,
+            width=clip.width,
+            height=clip.height,
+            generation={
+                **(clip.generation if isinstance(clip.generation, dict) else {}),
+                "upframe": {"enabled": True, "multiplier": settings.multiplier},
+            },
+            num_frames=clip.num_frames,
+            seed=clip.seed,
+            num_steps=clip.num_steps,
+            layers=clip.layers,
+            reuse=clip.reuse,
+            quality=clip.quality,
+        )
+        state.clips[twin_id] = twin
+        state.save_index()
+        return {"ok": True, "clip": asdict(twin)}
 
     @app.post("/api/clips/{clip_id}/longtake")
     async def longtake_pass(clip_id: str, body: dict[str, Any] | None = None):

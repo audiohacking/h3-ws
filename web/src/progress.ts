@@ -75,13 +75,16 @@ export function applyProgressEvent(
   const explicit =
     typeof msg.message === "string" && msg.message.trim() ? msg.message.trim() : null;
   const isLongtake = typeof phase === "string" && phase.startsWith("longtake_");
-  // Long take progress is composed server-side (label + nested denoise).
+  const isRedetail = typeof phase === "string" && phase.startsWith("redetail_");
+  const isUpframe = typeof phase === "string" && phase.startsWith("upframe_");
+  // Post-pass progress is composed server-side (label + nested denoise).
   // Prefer that message even when model_progress is present for the bar.
-  const message = isLongtake
-    ? explicit ?? prev?.message ?? formatProgressMessage(mp, wall_elapsed)
-    : hasStepData
-      ? formatProgressMessage(mp, wall_elapsed)
-      : explicit ?? prev?.message ?? formatProgressMessage(mp, wall_elapsed);
+  const message =
+    isLongtake || isRedetail || isUpframe
+      ? explicit ?? prev?.message ?? formatProgressMessage(mp, wall_elapsed)
+      : hasStepData
+        ? formatProgressMessage(mp, wall_elapsed)
+        : explicit ?? prev?.message ?? formatProgressMessage(mp, wall_elapsed);
   return {
     phase,
     message,

@@ -67,7 +67,7 @@ Build the engine: `./scripts/build_h3.sh` (needs `third_party/h3.c` sources in-t
 
 ## Frame math
 
-H3 snaps **up** to `5 + 17n` at 24 fps (22, 39, 56, 107, 243, 362, …). Width and height must each be multiples of 32, at least 32, and their product must not exceed 768×1344. The UI offers tagged canvases: 1:1 (256 through 768), exact 16:9 `1024×576` / 9:16 `576×1024`, largest near-16:9 `1248×704` / `704×1248`, 4:5 `768×960` and 5:4 `960×768`, 4:3 / 3:4, and the 7:4 / 4:7 pixel-cap extremes `1344×768` / `768×1344`. H3-Base is a 768p model; 512×512 is the default development size.
+H3 snaps **up** to `5 + 17n` at 24 fps (22, 39, 56, 107, 243, 362, …). Width and height must each be multiples of 32, at least 32. **One-pass / UI** canvases stay within 768×1344; **ReDetail** refine may expand to 1536×2688 (`H3_MAX_PIXELS` / `MAX_PIXELS`). The UI offers tagged canvases: 1:1 (256 through 768), exact 16:9 `1024×576` / 9:16 `576×1024`, largest near-16:9 `1248×704` / `704×1248`, 4:5 `768×960` and 5:4 `960×768`, 4:3 / 3:4, and the 7:4 / 4:7 pixel-cap extremes `1344×768` / `768×1344`. H3-Base is a 768p model; 512×512 is the default development size.
 
 ## Modes (v1)
 
@@ -86,6 +86,8 @@ h3.c defaults are `--steps 20 --layers 50 --reuse 1`. The UI always lets you edi
 `--reuse` and `--core-reuse` are mutually exclusive. Do not combine token-reduction with `--layers 40 --reuse 3`. `--ssd-streaming` saves RAM and makes denoise much slower — leave it off unless the process is killed for memory. **On M5, product default is the close-reference BF16 DiT path** (`--use-slower-bf16-*`, no `--use-int8-row-fc2`, `H3_CPU_SAMPLER=1`) — default int8 melts faces in normal Ref2VA/FL2VA output. Int8/row-FC2 remains opt-in for speed A/B. M3 Ultra paths are unchanged.
 
 **Faces post-pass:** removed (failed Continuity port). Do not re-add UI/API hooks until a clean-slate rewrite.
+
+**ReDetail / Upframe (independent, default off):** Resolution pill offers **one pass** vs **ReDetail** (×2 H3 init-video refine twin `*_redetail.mp4`). **Upframe** is a separate toggle/library action (FILM `film_net_fp16` → `*_upframe.mp4`). Enabling one never implies the other. Download weights in Models (`film_net`, optional `latent_upscale`).
 
 ## LoRA
 

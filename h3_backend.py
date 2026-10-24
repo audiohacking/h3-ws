@@ -20,6 +20,7 @@ from h3_media import (
     probe_duration_seconds,
     require_ui_canvas,
     snap_frames,
+    validate_canvas,
 )
 from h3_paths import (
     console_h3,
@@ -873,6 +874,8 @@ class GenerateRequest:
     denoise_strength: float | None = None
     # Soft hold: per-latent-frame multipliers (length = video_t).
     denoise_video_strengths_file: Path | None = None
+    # ReDetail refine: allow canvases above the one-pass UI allowlist (still ≤ MAX_PIXELS).
+    allow_expanded_canvas: bool = False
 
 
 def uses_ref2va(req: GenerateRequest) -> bool:
@@ -889,7 +892,10 @@ def build_h3_argv(
     model_dir: Path,
     req: GenerateRequest,
 ) -> list[str]:
-    width, height = require_ui_canvas(req.width, req.height)
+    if req.allow_expanded_canvas:
+        width, height = validate_canvas(req.width, req.height)
+    else:
+        width, height = require_ui_canvas(req.width, req.height)
     frames = snap_frames(req.num_frames)
     q = expand_quality(
         req.quality,

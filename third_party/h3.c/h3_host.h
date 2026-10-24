@@ -5,7 +5,8 @@
 #include <stdint.h>
 
 #define H3_CANVAS_MULTIPLE 32
-#define H3_MAX_PIXELS (768 * 1344)
+/* One-pass UI stays ≤768×1344; ReDetail refine may use 2× (e.g. 1536×2688). */
+#define H3_MAX_PIXELS (1536 * 2688)
 #define H3_FPS 24
 #define H3_AUDIO_LATENT_FPS 40
 #define H3_VAE_SPATIAL_RATIO 16

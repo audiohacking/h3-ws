@@ -224,50 +224,59 @@ body {
   background: var(--accent-soft);
 }
 
-.library-delete {
+.library-card-actions {
   position: absolute;
   top: 4px;
   right: 4px;
   z-index: 2;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 3px;
   opacity: 0;
   transition: opacity 0.15s;
+  pointer-events: none;
 }
 
-.library-upscale {
-  position: absolute;
-  top: 4px;
-  right: 28px;
-  z-index: 2;
+.library-card-wrap:hover .library-card-actions,
+.library-card-wrap.active .library-card-actions,
+.library-card-wrap:focus-within .library-card-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.library-action {
   height: 22px;
+  min-width: 22px;
   padding: 0 6px;
   border: none;
   border-radius: 11px;
   background: rgba(0, 0, 0, 0.55);
   color: #fff;
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 700;
   line-height: 22px;
+  letter-spacing: 0.02em;
   cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s;
 }
 
-.library-card-wrap:hover .library-delete,
-.library-card-wrap.active .library-delete,
-.library-card-wrap:focus-within .library-delete,
-.library-card-wrap:hover .library-upscale,
-.library-card-wrap.active .library-upscale,
-.library-card-wrap:focus-within .library-upscale {
-  opacity: 1;
+.library-action:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.library-action--delete {
+  width: 22px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 400;
+}
+
+/* Legacy class names kept so older markup / CSS references still resolve. */
+.library-delete,
+.library-upscale {
+  display: none;
 }
 
 .chain-picker {
@@ -2276,6 +2285,5 @@ body {
   color: var(--muted, #64748b);
 }
 .library-job-actions--done {
-  bottom: 4px;
-  top: auto;
+  display: none;
 }

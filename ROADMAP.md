@@ -29,6 +29,8 @@ Inspiration: [ComfyUI-Continuity](https://github.com/roadmaus/ComfyUI-Continuity
 | **Spectrum** | Skip | External forecast sampler ([ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)); fidelity tradeoffs; no h3.c path. |
 | **Motion fix** | Skip for now | Second pass (slow / re-draw / restore timing) needs latent motion profile + re-sample. |
 | **Long take refine** | **Phase 1 shipped** (opt-in) | Pixel path: `--init-video` denoise ~0.55 + RGB keyframe blend (`h3_longtake.py`). Twin `*_longtake.mp4` for A/B; default **off**. |
+| **ReDetail (higher res)** | **Shipped** (opt-in) | Continuity labels: one pass vs ReDetail. H3 path: sample → ×2 canvas → `--init-video` refine twin (`h3_redetail.py`, `*_redetail.mp4`). Engine cap raised to **1536×2688** for refine only; one-pass UI stay ≤768×1344. Default **off**. Independent of Upframe. |
+| **Upframe** | **Shipped** (opt-in) | FILM `film_net_fp16` temporal interpolate (`h3_upframe.py`, `*_upframe.mp4`). Models download (~69 MB). Default **off**. Independent of ReDetail — never chained as one required path. |
 | **Latent motion-context** | **Deferred** (Phase 2 epic) | True Comfy-style pin/save/load of video+audio latents + head trim in vendored h3.c. Do not block on Phase 1. |
 
 Faces was pulled for a clean-slate rewrite. Spectrum / Tea / block_cache stay skipped. Latent motion-context is a separate h3.c fork epic after Phase 1 validation.
@@ -42,7 +44,7 @@ Upstream: [antirez/h3.c](https://github.com/antirez/h3.c) (`h3-metal`). Weights:
 | Constraint | Rule |
 |------------|------|
 | Output | Joint **video + 32 kHz stereo audio**, 24 fps |
-| Canvas | Width and height multiples of **32**; product ≤ **768×1344** (so exact 768p 16:9 / 9:16 do not fit) |
+| Canvas | Width and height multiples of **32**; one-pass / UI ≤ **768×1344**; ReDetail refine may use up to **1536×2688** (`H3_MAX_PIXELS`) |
 | Temporal shape | Frames snap **up** to `5 + 17n` (22, 39, 56, 107, 243, 362, …) |
 | Checkpoints | **FL2VA** (text / first / last frame) and **Ref2VA** (ordered image/video/audio refs) are **distinct** and **must not mix** in one run |
 | Memory | ~33 GB transformer; ~40 GB peak physical on M5 Max full-residency; `--ssd-streaming` drops tracked DiT storage to ~2 GiB |

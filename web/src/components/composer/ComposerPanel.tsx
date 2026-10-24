@@ -7,6 +7,7 @@ import { ComposerRail } from "./ComposerRail";
 import { AssetCapsules } from "./AssetCapsules";
 import { ConfigRow } from "./ConfigRow";
 import { SamplerRow } from "./SamplerRow";
+import { ResolutionPill, type ResolutionPassMode } from "./ResolutionPill";
 import { WhatTheModelReads } from "./WhatTheModelReads";
 import { SceneQueue } from "./SceneQueue";
 import { MediaPicker } from "./MediaPicker";
@@ -113,6 +114,12 @@ export type ComposerPanelProps = {
   onLongtakeDenoise?: (v: number) => void;
   onLongtakeKeyframes?: (v: string) => void;
   onLongtakeSeed?: (v: number) => void;
+  redetailConfig?: import("../../types").RedetailConfigPublic | null;
+  redetailEnabled?: boolean;
+  onRedetailEnabled?: (v: boolean) => void;
+  upframeConfig?: import("../../types").UpframeConfigPublic | null;
+  upframeEnabled?: boolean;
+  onUpframeEnabled?: (v: boolean) => void;
   clipMultiplier: number;
   onClipMultiplier: (n: number) => void;
   sceneQueue: SceneQueueItem[];
@@ -358,6 +365,17 @@ export function ComposerPanel(props: ComposerPanelProps) {
           onClearEnd={props.onClearEnd}
           engineNote={props.config.engine_ok === false ? (props.config.engine_error ?? undefined) : undefined}
         />
+        <ResolutionPill
+          disabled={locked}
+          resolutionId={props.resolutionId}
+          resolutionPresets={props.config.resolution_presets}
+          onResolutionId={props.onResolutionId}
+          passMode={
+            (props.redetailEnabled ? "redetail" : "one_pass") as ResolutionPassMode
+          }
+          onPassMode={(mode) => props.onRedetailEnabled?.(mode === "redetail")}
+          redetailAvailable={props.redetailConfig?.available !== false}
+        />
         <SamplerRow
           disabled={locked}
           seed={props.seed}
@@ -401,6 +419,9 @@ export function ComposerPanel(props: ComposerPanelProps) {
           onLongtakeDenoise={props.onLongtakeDenoise}
           onLongtakeKeyframes={props.onLongtakeKeyframes}
           onLongtakeSeed={props.onLongtakeSeed}
+          upframeConfig={props.upframeConfig}
+          upframeEnabled={props.upframeEnabled}
+          onUpframeEnabled={props.onUpframeEnabled}
         />
       </div>
       {props.loraActivity && <p className="lora-inline-hint">{props.loraActivity}</p>}

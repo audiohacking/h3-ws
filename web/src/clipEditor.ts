@@ -57,6 +57,10 @@ export interface GenerationSnapshot {
   tokenReduction?: boolean;
   ssdStreaming?: boolean;
   upscale?: boolean;
+  /** Opt-in ReDetail twin (independent of upframe). */
+  redetail?: boolean;
+  /** Opt-in Upframe twin (independent of redetail). */
+  upframe?: boolean;
 }
 
 export interface ClipEditorSnapshot {
@@ -173,6 +177,14 @@ export function generationFromClip(
       tokenReduction: Boolean(g.tokenReduction ?? g.token_reduction),
       ssdStreaming: Boolean(g.ssdStreaming ?? g.ssd_streaming),
       upscale: Boolean(g.upscale),
+      redetail: Boolean(
+        g.redetail === true
+          || (typeof g.redetail === "object" && g.redetail && (g.redetail as { enabled?: boolean }).enabled),
+      ),
+      upframe: Boolean(
+        g.upframe === true
+          || (typeof g.upframe === "object" && g.upframe && (g.upframe as { enabled?: boolean }).enabled),
+      ),
     };
   }
 
@@ -187,6 +199,8 @@ export function generationFromClip(
     endImagePath: null,
     tokenReduction: false,
     ssdStreaming: false,
+    redetail: false,
+    upframe: false,
   };
 }
 
@@ -227,7 +241,7 @@ export function buildGenerationSnapshot(scene: Pick<
   | "clipMultiplier"
   | "tokenReduction"
   | "ssdStreaming"
-> & { upscale?: boolean }): GenerationSnapshot {
+> & { upscale?: boolean; redetail?: boolean; upframe?: boolean }): GenerationSnapshot {
   return {
     prompt: scene.prompt,
     mode: scene.mode,
@@ -254,5 +268,7 @@ export function buildGenerationSnapshot(scene: Pick<
     tokenReduction: scene.tokenReduction,
     ssdStreaming: scene.ssdStreaming,
     upscale: scene.upscale,
+    redetail: scene.redetail,
+    upframe: scene.upframe,
   };
 }

@@ -1,9 +1,11 @@
 import { TurboToggle } from "./TurboToggle";
 import { LongTakePill } from "./LongTakePill";
+import { UpframePill } from "./UpframePill";
 import type {
   LongTakeConfigPublic,
   LoraPreset,
   PillOption,
+  UpframeConfigPublic,
 } from "../../types";
 import type { TurboTier } from "../../config";
 
@@ -53,6 +55,9 @@ type Props = {
   onLongtakeDenoise?: (v: number) => void;
   onLongtakeKeyframes?: (v: string) => void;
   onLongtakeSeed?: (v: number) => void;
+  upframeConfig?: UpframeConfigPublic | null;
+  upframeEnabled?: boolean;
+  onUpframeEnabled?: (v: boolean) => void;
 };
 
 function ParamStepper({
@@ -130,6 +135,9 @@ export function SamplerRow({
   onLongtakeDenoise,
   onLongtakeKeyframes,
   onLongtakeSeed,
+  upframeConfig,
+  upframeEnabled = false,
+  onUpframeEnabled,
 }: Props) {
   const tokenOn = tokenReduction && !tokenReductionLocked;
   const ssdOn = ssdStreaming && !ssdLocked;
@@ -209,6 +217,14 @@ export function SamplerRow({
               onDenoise={onLongtakeDenoise ?? (() => {})}
               onKeyframes={onLongtakeKeyframes ?? (() => {})}
               onSeed={onLongtakeSeed ?? (() => {})}
+            />
+          )}
+          {onUpframeEnabled && (
+            <UpframePill
+              disabled={disabled}
+              config={upframeConfig}
+              enabled={upframeEnabled}
+              onEnabled={onUpframeEnabled}
             />
           )}
         </div>

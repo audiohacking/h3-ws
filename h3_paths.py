@@ -43,6 +43,8 @@ def ensure_writable_tree() -> Path:
         "models/sam3.1",
         "models/vae_approx",
         "models/loras",
+        "models/frame_interpolation",
+        "models/latent_upscale",
         "web_outputs",
         "web_uploads",
         "logs",

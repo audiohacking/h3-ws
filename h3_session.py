@@ -47,7 +47,7 @@ from h3_backend import (
     uses_fl2va_anchors,
     uses_ref2va,
 )
-from h3_media import require_ui_canvas, snap_frames
+from h3_media import require_ui_canvas, snap_frames, validate_canvas
 from h3_paths import console_h3, mk_scratch_dir
 
 log = logging.getLogger("h3-session")
@@ -201,12 +201,18 @@ def clear_directory_contents(path: Path | None) -> None:
             log.debug("cleanup %s: %s", child, exc)
 
 
+def _canvas_for_req(req: GenerateRequest) -> tuple[int, int]:
+    if getattr(req, "allow_expanded_canvas", False):
+        return validate_canvas(req.width, req.height)
+    return require_ui_canvas(req.width, req.height)
+
+
 def session_commands_for_request(req: GenerateRequest) -> list[str]:
     """``!`` commands that align a warm session with this job."""
     if uses_ref2va(req) and uses_fl2va_anchors(req):
         raise ValueError("Ref2VA references cannot be mixed with first/last-frame anchors")
 
-    width, height = require_ui_canvas(req.width, req.height)
+    width, height = _canvas_for_req(req)
     frames = snap_frames(req.num_frames)
     q = expand_quality(
         req.quality,
@@ -284,7 +290,7 @@ def build_session_argv(
     model_dir: Path,
     req: GenerateRequest,
 ) -> list[str]:
-    width, height = require_ui_canvas(req.width, req.height)
+    width, height = _canvas_for_req(req)
     frames = snap_frames(req.num_frames)
     q = expand_quality(
         req.quality,

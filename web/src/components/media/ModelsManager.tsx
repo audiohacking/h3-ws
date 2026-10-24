@@ -51,6 +51,8 @@ const SIZE_HINT: Record<string, string> = {
   ref2va: "~62 GB",
   taeh3: "~22 MB",
   taomate: "~2.4 GB",
+  film_net: "~69 MB",
+  latent_upscale: "optional",
 };
 
 /**

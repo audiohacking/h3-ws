@@ -89,6 +89,8 @@ export interface Config {
   refine?: RefineSettingsPublic;
   network?: NetworkSettingsPublic;
   longtake?: LongTakeConfigPublic;
+  redetail?: RedetailConfigPublic;
+  upframe?: UpframeConfigPublic;
 }
 
 
@@ -101,6 +103,23 @@ export interface LongTakeConfigPublic {
   keyframes: string;
   interpolation?: string;
   note?: string;
+}
+
+export interface RedetailConfigPublic {
+  available: boolean;
+  enabled_default?: boolean;
+  denoise: number;
+  denoise_min: number;
+  denoise_max: number;
+  note?: string;
+}
+
+export interface UpframeConfigPublic {
+  available: boolean;
+  enabled_default?: boolean;
+  multiplier: number;
+  note?: string;
+  weights?: boolean;
 }
 
 export interface RefineSettingsPublic {
@@ -396,6 +415,8 @@ export interface SceneQueueItem {
   autoconcat: boolean;
   tokenReduction: boolean;
   ssdStreaming: boolean;
+  redetail?: boolean;
+  upframe?: boolean;
   status: SceneStatus;
   runId?: string;
   error?: string;

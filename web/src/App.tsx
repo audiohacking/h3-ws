@@ -365,6 +365,9 @@ export default function App() {
   const [longtakeDenoise, setLongtakeDenoise] = useState(0.55);
   const [longtakeKeyframes, setLongtakeKeyframes] = useState("0:0, 22:0, 44:1");
   const [longtakeSeed, setLongtakeSeed] = useState(42);
+  const [redetailEnabled, setRedetailEnabled] = useState(false);
+  const [upframeEnabled, setUpframeEnabled] = useState(false);
+  const [libraryPassBusyId, setLibraryPassBusyId] = useState<string | null>(null);
   const [loraModalOpen, setLoraModalOpen] = useState(false);
   const [sceneQueue, setSceneQueue] = useState<SceneQueueItem[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
@@ -613,6 +616,8 @@ export default function App() {
       setEndImageName(snap.endImagePath ? snap.endImagePath.split("/").pop() ?? "end" : null);
       setTokenReduction(Boolean(snap.tokenReduction));
       setSsdStreaming(Boolean(snap.ssdStreaming));
+      setRedetailEnabled(Boolean(snap.redetail));
+      setUpframeEnabled(Boolean(snap.upframe));
     },
     [config, selectClipId, prompt, refs, imagePath, endImagePath],
   );
@@ -891,6 +896,8 @@ export default function App() {
       autoconcat: clipMultiplier > 1,
       tokenReduction,
       ssdStreaming,
+      redetail: redetailEnabled,
+      upframe: upframeEnabled,
       status: "pending",
       createdAt: new Date().toISOString(),
     };
@@ -928,6 +935,8 @@ export default function App() {
     // autocontinue/autoconcat are derived from clipMultiplier
     setTokenReduction(scene.tokenReduction);
     setSsdStreaming(scene.ssdStreaming);
+    setRedetailEnabled(Boolean(scene.redetail));
+    setUpframeEnabled(Boolean(scene.upframe));
   }
 
   function clearSceneQueue() {
@@ -1256,6 +1265,54 @@ export default function App() {
     );
   }
 
+  async function runLibraryPass(
+    clip: Clip,
+    kind: "redetail" | "upframe" | "longtake",
+  ): Promise<void> {
+    const labels = {
+      redetail: "ReDetail",
+      upframe: "Upframe",
+      longtake: "Long take",
+    } as const;
+    const confirms = {
+      redetail:
+        "Run ReDetail on this clip? Writes a twin *_redetail.mp4 at ×2 canvas (baseline kept). Uses the GPU.",
+      upframe: "Run Upframe on this clip? Writes a twin *_upframe.mp4 (baseline kept).",
+      longtake:
+        "Run Long take refine on this clip? Writes a twin *_longtake.mp4 (baseline kept). Uses the GPU.",
+    } as const;
+    if (!window.confirm(confirms[kind])) return;
+    setLibraryPassBusyId(clip.id);
+    try {
+      const body =
+        kind === "longtake"
+          ? {
+              denoise: longtakeDenoise,
+              keyframes: longtakeKeyframes,
+              seed: longtakeSeed,
+            }
+          : kind === "upframe"
+            ? { multiplier: 2 }
+            : {};
+      const r = await fetch(`${API}/api/clips/${clip.id}/${kind}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(
+          typeof data.detail === "string" ? data.detail : `${labels[kind]} failed`,
+        );
+      }
+      await refreshProjectClips();
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLibraryPassBusyId(null);
+    }
+  }
+
   async function saveCurrentFrame() {
     const video = playerVideoRef.current;
     if (!video || !activeClip) return;
@@ -1521,8 +1578,16 @@ export default function App() {
           if (step != null && total != null && total > 0) {
             setProgress((prev) => {
               const pct = Math.round((100 * step) / total);
-              // Keep Long take window label; only refresh step/pct from preview ticks.
-              if (prev?.phase?.startsWith("longtake_")) {
+              // Keep post-pass window label; only refresh step/pct from preview ticks.
+              const phase = prev?.phase ?? "";
+              if (
+                prev
+                && (
+                  phase.startsWith("longtake_")
+                  || phase.startsWith("redetail_")
+                  || phase.startsWith("upframe_")
+                )
+              ) {
                 return {
                   ...prev,
                   step,
@@ -1678,6 +1743,8 @@ export default function App() {
     imagePath: string | null;
     endImagePath: string | null;
     upscale?: boolean;
+    redetail?: boolean;
+    upframe?: boolean;
     /** User-facing composer state for library restore (kept separate from compiled prompt). */
     generation?: ReturnType<typeof buildGenerationSnapshot>;
   }): Record<string, unknown> {
@@ -1723,6 +1790,12 @@ export default function App() {
         keyframes: longtakeKeyframes,
         seed: longtakeSeed,
       };
+    }
+    if (opts.redetail ?? redetailEnabled) {
+      body.redetail = { enabled: true };
+    }
+    if (opts.upframe ?? upframeEnabled) {
+      body.upframe = { enabled: true, multiplier: 2 };
     }
     if (ref2va) {
       body.refs = opts.refs.map((r) => ({
@@ -1778,7 +1851,14 @@ export default function App() {
         imagePath: scene.imagePath ?? null,
         endImagePath: scene.endImagePath ?? null,
         upscale,
-        generation: buildGenerationSnapshot({ ...scene, upscale }),
+        redetail: scene.redetail ?? redetailEnabled,
+        upframe: scene.upframe ?? upframeEnabled,
+        generation: buildGenerationSnapshot({
+          ...scene,
+          upscale,
+          redetail: scene.redetail ?? redetailEnabled,
+          upframe: scene.upframe ?? upframeEnabled,
+        }),
       }),
       { follow: true },
     );
@@ -1809,6 +1889,8 @@ export default function App() {
           imagePath,
           endImagePath,
           upscale,
+          redetail: redetailEnabled,
+          upframe: upframeEnabled,
           generation: buildGenerationSnapshot({
             prompt,
             mode: compiled.modeHint,
@@ -1831,6 +1913,8 @@ export default function App() {
             tokenReduction,
             ssdStreaming,
             upscale,
+            redetail: redetailEnabled,
+            upframe: upframeEnabled,
           }),
         }),
         { follow },
@@ -2231,6 +2315,12 @@ export default function App() {
               onLongtakeDenoise={setLongtakeDenoise}
               onLongtakeKeyframes={setLongtakeKeyframes}
               onLongtakeSeed={setLongtakeSeed}
+              redetailConfig={config.redetail}
+              redetailEnabled={redetailEnabled}
+              onRedetailEnabled={setRedetailEnabled}
+              upframeConfig={config.upframe}
+              upframeEnabled={upframeEnabled}
+              onUpframeEnabled={setUpframeEnabled}
               sceneQueue={sceneQueue}
               onRemoveScene={removeFromSceneQueue}
               onReorderScenes={reorderSceneQueue}
@@ -2382,56 +2472,68 @@ export default function App() {
                   <span className={`library-label ${clip.label.toLowerCase()}`}>{clip.label}</span>
                   <span className="library-prompt">{clipDisplayPrompt(clip.prompt)}</span>
                 </button>
-                <div className="library-job-actions library-job-actions--done">
+                <div className="library-card-actions" role="group" aria-label="Clip actions">
                   <button
                     type="button"
-                    className="library-job-btn"
-                    title="Refine long take (init-video denoise + temporal blend → *_longtake.mp4 twin)"
-                    disabled={busy}
+                    className="library-action"
+                    title="ReDetail — ×2 H3 refine twin (*_redetail.mp4)"
+                    disabled={
+                      libraryPassBusyId === clip.id
+                      || busy
+                      || config?.redetail?.available === false
+                    }
                     onClick={(e) => {
                       e.stopPropagation();
-                      void (async () => {
-                        if (
-                          !window.confirm(
-                            "Run Long take refine on this clip? Writes a twin *_longtake.mp4 (baseline kept). Uses the GPU.",
-                          )
-                        )
-                          return;
-                        try {
-                          const r = await fetch(`${API}/api/clips/${clip.id}/longtake`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({
-                              denoise: longtakeDenoise,
-                              keyframes: longtakeKeyframes,
-                              seed: longtakeSeed,
-                            }),
-                          });
-                          const data = await r.json();
-                          if (!r.ok) throw new Error(data.detail || "Long take failed");
-                          await refreshProjectClips();
-                          window.alert("Long take refine complete.");
-                        } catch (err) {
-                          window.alert(err instanceof Error ? err.message : String(err));
-                        }
-                      })();
+                      void runLibraryPass(clip, "redetail");
                     }}
                   >
-                    Long take
+                    ×2
+                  </button>
+                  <button
+                    type="button"
+                    className="library-action"
+                    title={
+                      config?.upframe?.available
+                        ? "Upframe — FILM temporal interpolate (*_upframe.mp4)"
+                        : "Upframe — download film_net_fp16 in Models first"
+                    }
+                    disabled={
+                      libraryPassBusyId === clip.id
+                      || busy
+                      || !config?.upframe?.available
+                    }
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void runLibraryPass(clip, "upframe");
+                    }}
+                  >
+                    2ƒ
+                  </button>
+                  <button
+                    type="button"
+                    className="library-action"
+                    title="Long take refine (*_longtake.mp4 twin)"
+                    disabled={libraryPassBusyId === clip.id || busy}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void runLibraryPass(clip, "longtake");
+                    }}
+                  >
+                    LT
+                  </button>
+                  <button
+                    type="button"
+                    className="library-action library-action--delete"
+                    title="Delete"
+                    disabled={(busy && watchLive) || libraryPassBusyId === clip.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void deleteClip(clip);
+                    }}
+                  >
+                    ×
                   </button>
                 </div>
-                <button
-                  type="button"
-                  className="library-delete"
-                  title="Delete"
-                  disabled={busy && watchLive}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void deleteClip(clip);
-                  }}
-                >
-                  ×
-                </button>
               </div>
             ))}
           </div>

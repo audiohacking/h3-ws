@@ -58,8 +58,19 @@ class SnapTests(unittest.TestCase):
 
     def test_validate_canvas_cap(self) -> None:
         validate_canvas(768, 1344)
+        validate_canvas(1536, 2688)
         with self.assertRaises(ValueError):
-            validate_canvas(1344, 1344)
+            validate_canvas(1600, 2688)
+
+    def test_redetail_output_size(self) -> None:
+        from h3_media import ONE_PASS_MAX_PIXELS, redetail_output_size
+
+        w, h = redetail_output_size(512, 512)
+        self.assertEqual((w, h), (1024, 1024))
+        w2, h2 = redetail_output_size(768, 1344)
+        self.assertEqual((w2, h2), (1536, 2688))
+        self.assertLessEqual(w2 * h2, MAX_PIXELS)
+        self.assertEqual(ONE_PASS_MAX_PIXELS, 768 * 1344)
 
     def test_require_ui_canvas_documented_only(self) -> None:
         self.assertEqual(require_ui_canvas(512, 512), (512, 512))

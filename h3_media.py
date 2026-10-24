@@ -19,7 +19,10 @@ log = logging.getLogger("h3")
 FPS = 24
 SPATIAL_ALIGN = 32
 MIN_SPATIAL = 32
-MAX_PIXELS = 768 * 1344  # released 768p-class cap from h3.c
+# One-pass / UI presets: H3-Base 768p-class training envelope.
+ONE_PASS_MAX_PIXELS = 768 * 1344
+# Engine + ReDetail refine may go to 2× of the largest one-pass canvas.
+MAX_PIXELS = 1536 * 2688
 MIN_FRAMES = 22  # 5 + 17*1
 
 
@@ -82,9 +85,16 @@ def validate_canvas(width: int, height: int) -> tuple[int, int]:
     if w * h > MAX_PIXELS:
         raise ValueError(
             f"canvas {w}×{h} ({w * h} px) exceeds H3 limit {MAX_PIXELS} "
-            f"(768×1344)"
+            f"(1536×2688)"
         )
     return w, h
+
+
+def redetail_output_size(width: int, height: int) -> tuple[int, int]:
+    """2× spatial canvas for ReDetail refine, snapped to ×32 under MAX_PIXELS."""
+    w = snap_spatial(int(width) * 2)
+    h = snap_spatial(int(height) * 2)
+    return validate_canvas(w, h)
 
 
 def duration_preset(
