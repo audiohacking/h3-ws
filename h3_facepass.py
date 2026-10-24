@@ -92,38 +92,39 @@ def warp_crop_window(
     canvas_w: int,
     canvas_h: int,
 ) -> np.ndarray:
-    """Bilinear crop+resize for one window → ``[N,H,W,3]`` uint8."""
-    import cv2
+    """Bilinear crop+resize for one window → ``[N,H,W,3]`` uint8.
+
+    Continuity ``facepass._crop``: one ``affine_grid`` + ``grid_sample`` per
+    frame at **sub-pixel** coordinates (``align_corners=False``). Mapping the
+    crop with OpenCV perspective corners at ``(W-1, H-1)`` quantises the box —
+    Continuity calls that the largest source of frame-to-frame jitter once the
+    trajectory is already smoothed.
+    """
+    import torch
+    import torch.nn.functional as F
 
     start, end = span
-    out = np.zeros((end - start, canvas_h, canvas_w, 3), dtype=np.uint8)
-    for i, index in enumerate(range(start, end)):
-        x, y, bw, bh = crops[index]
-        src = np.float32(
-            [
-                [x, y],
-                [x + bw, y],
-                [x + bw, y + bh],
-                [x, y + bh],
-            ]
-        )
-        dst = np.float32(
-            [
-                [0, 0],
-                [canvas_w - 1, 0],
-                [canvas_w - 1, canvas_h - 1],
-                [0, canvas_h - 1],
-            ]
-        )
-        M = cv2.getPerspectiveTransform(src, dst)
-        out[i] = cv2.warpPerspective(
-            frames[index],
-            M,
-            (canvas_w, canvas_h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_REPLICATE,
-        )
-    return out
+    length = end - start
+    source_h, source_w = int(frames.shape[1]), int(frames.shape[2])
+    canvas_w, canvas_h = int(canvas_w), int(canvas_h)
+    block = torch.from_numpy(np.asarray(frames[start:end])).float().div_(255.0)
+    block = block[..., :3].movedim(-1, 1).contiguous()  # [N,3,H,W]
+    theta = torch.zeros((length, 2, 3), dtype=torch.float32)
+    for offset, index in enumerate(range(start, end)):
+        x, y, box_w, box_h = crops[index]
+        theta[offset, 0, 0] = float(box_w) / float(source_w)
+        theta[offset, 0, 2] = (2.0 * float(x) + float(box_w)) / float(source_w) - 1.0
+        theta[offset, 1, 1] = float(box_h) / float(source_h)
+        theta[offset, 1, 2] = (2.0 * float(y) + float(box_h)) / float(source_h) - 1.0
+    grid = F.affine_grid(
+        theta, (length, 3, canvas_h, canvas_w), align_corners=False
+    )
+    # ``border`` = Continuity: off-frame crops get edge replicate, not black.
+    sampled = F.grid_sample(
+        block, grid, mode="bilinear", padding_mode="border", align_corners=False
+    )
+    out = sampled.movedim(1, -1).clamp(0, 1).mul(255).byte().cpu().numpy()
+    return np.ascontiguousarray(out)
 
 
 def write_rgb_mp4(frames: np.ndarray, dest: str | Path, fps: int = FPS) -> Path:
@@ -560,66 +561,73 @@ def composite_window(
     face_rects: Sequence[Box],
     weights: Sequence[float],
 ) -> np.ndarray:
-    """Paste refined crops into base frames (uint8 RGB arrays)."""
-    import cv2
+    """Paste refined crops into base frames (uint8 RGB arrays).
 
-    count = base.shape[0]
-    src_h, src_w = int(base.shape[1]), int(base.shape[2])
+    Continuity ``facepass._composite``: inverse ``affine_grid`` warp of the
+    crop + face mask (``align_corners=False``), colour-match inside the mask,
+    then opacity blend. Must use the same continuous mapping as
+    ``warp_crop_window`` or the paste crawls when crop size changes.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    count = int(base.shape[0])
+    height, width = int(base.shape[1]), int(base.shape[2])
     canvas_h, canvas_w = int(refined.shape[1]), int(refined.shape[2])
-    out = base.astype(np.float32) / 255.0
-    patch = refined.astype(np.float32) / 255.0
 
-    for i in range(count):
-        w = float(weights[i])
-        if w <= 0:
-            continue
-        x, y, bw, bh = crops[i]
-        feather = feather_in_canvas(bh, canvas_h)
-        mask_c = _paste_mask(face_rects[i], canvas_w, canvas_h, feather)
+    base_t = torch.from_numpy(np.asarray(base)).float().div_(255.0)
+    patch = (
+        torch.from_numpy(np.asarray(refined))
+        .float()
+        .div_(255.0)
+        .movedim(-1, 1)
+        .contiguous()
+    )
 
-        src = np.float32(
-            [
-                [0, 0],
-                [canvas_w - 1, 0],
-                [canvas_w - 1, canvas_h - 1],
-                [0, canvas_h - 1],
-            ]
-        )
-        dst = np.float32(
-            [
-                [x, y],
-                [x + bw, y],
-                [x + bw, y + bh],
-                [x, y + bh],
-            ]
-        )
-        M = cv2.getPerspectiveTransform(src, dst)
-        warped = cv2.warpPerspective(
-            patch[i], M, (src_w, src_h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT
-        )
-        mask = cv2.warpPerspective(
-            mask_c, M, (src_w, src_h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT
-        )
-        mask = np.clip(mask, 0.0, 1.0)[..., None]
+    theta = torch.zeros((count, 2, 3), dtype=torch.float32)
+    masks: list[torch.Tensor] = []
+    weight_list: list[float] = []
+    for index in range(count):
+        w = float(weights[index])
+        weight_list.append(w)
+        x, y, box_w, box_h = crops[index]
+        # Continuity inverse: canvas → source (same formulas as facepass.py).
+        theta[index, 0, 0] = float(width) / float(box_w)
+        theta[index, 0, 2] = (float(width) - 2.0 * float(x)) / float(box_w) - 1.0
+        theta[index, 1, 1] = float(height) / float(box_h)
+        theta[index, 1, 2] = (float(height) - 2.0 * float(y)) / float(box_h) - 1.0
+        feather = feather_in_canvas(box_h, canvas_h)
+        mask_np = _paste_mask(face_rects[index], canvas_w, canvas_h, feather)
+        masks.append(torch.from_numpy(mask_np).view(1, 1, canvas_h, canvas_w))
 
-        total = float(mask.sum()) + 1e-6
-        base_i = out[i]
-        base_mean = (base_i * mask).sum(axis=(0, 1), keepdims=True) / total
-        patch_mean = (warped * mask).sum(axis=(0, 1), keepdims=True) / total
-        base_sd = np.sqrt(
-            (((base_i - base_mean) ** 2) * mask).sum(axis=(0, 1), keepdims=True) / total
-        )
-        patch_sd = np.sqrt(
-            (((warped - patch_mean) ** 2) * mask).sum(axis=(0, 1), keepdims=True) / total
-        )
-        base_sd = np.maximum(base_sd, 1e-6)
-        patch_sd = np.maximum(patch_sd, 1e-6)
-        matched = np.clip((warped - patch_mean) * (base_sd / patch_sd) + base_mean, 0.0, 1.0)
+    grid = F.affine_grid(theta, (count, 3, height, width), align_corners=False)
+    warped = F.grid_sample(
+        patch, grid, mode="bilinear", padding_mode="zeros", align_corners=False
+    ).movedim(1, -1)
+    mask = F.grid_sample(
+        torch.cat(masks, dim=0),
+        grid,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=False,
+    ).movedim(1, -1).clamp(0, 1)
 
-        opacity = mask * w
-        out[i] = np.clip((1.0 - opacity) * base_i + opacity * matched, 0.0, 1.0)
+    total = mask.sum(dim=(1, 2), keepdim=True).clamp_min(1e-6)
+    base_mean = (base_t * mask).sum(dim=(1, 2), keepdim=True) / total
+    patch_mean = (warped * mask).sum(dim=(1, 2), keepdim=True) / total
+    base_sd = (
+        (((base_t - base_mean) ** 2) * mask).sum(dim=(1, 2), keepdim=True) / total
+    ).sqrt().clamp_min(1e-6)
+    patch_sd = (
+        (((warped - patch_mean) ** 2) * mask).sum(dim=(1, 2), keepdim=True) / total
+    ).sqrt().clamp_min(1e-6)
+    matched = ((warped - patch_mean) * (base_sd / patch_sd) + base_mean).clamp(0, 1)
 
-    return (out * 255.0).astype(np.uint8)
+    opacity = mask * torch.tensor(
+        weight_list, dtype=torch.float32
+    ).view(-1, 1, 1, 1)
+    out = ((1.0 - opacity) * base_t + opacity * matched).clamp(0, 1)
+    return (out * 255.0).byte().cpu().numpy()
 
 
 def inspect_faces(
