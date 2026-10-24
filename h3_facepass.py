@@ -155,8 +155,9 @@ def mux_window_audio(
     mouth still attends to speech while ``hold_audio`` keeps the waveform.
 
     Video is re-encoded as fixed CFR ``fps`` with stamped ``1/fps`` PTS so
-    h3-av's time-based ``fps=24`` resample stays 1:1 with crop indices
-    (collapsed timelines caused M5 Faces paste desync).
+    h3-av's time-based ``fps=24`` resample stays 1:1 with crop indices.
+    Chip-agnostic (M3 Ultra / M5 / other) — collapsed PTS desync was first
+    reported on M5 but the remux bug is not Metal-class-specific.
     """
     import av
 
@@ -716,6 +717,10 @@ def build_faces_window_request(
         ssd_streaming=False,
         preview_latent_dir=preview_latent_dir,
         token_reduction=False,
+        # Faces windows are always init-video soft-hold: request the close
+        # BF16 stack here; ``H3Engine.generate`` still runs
+        # ``apply_platform_generate_defaults`` so M5 vs M3 auto-select stays
+        # the single source of truth for non-Faces jobs.
         int8_row_fc2=False,
         use_slower_bf16_mlp=True,
         use_slower_bf16_qkv=True,
@@ -811,12 +816,15 @@ def run_faces_pass(
     confidence = paste_weights(found)
     spans = windows(n)
     blend = window_weights(spans)
+    from h3_backend import apple_silicon_class
+
+    chip = apple_silicon_class()
     ref_note = f", {len(refs_list)} ref(s)" if refs_list else ", no refs (t2va)"
     emit(
         "faces_plan",
         message=(
             f"{len(spans)} window(s), canvas {canvas}, denoise ≤ {ceiling:.2f}, "
-            f"{face_mode}{ref_note}"
+            f"{face_mode}{ref_note}, chip={chip}"
         ),
         windows=len(spans),
         canvas=canvas,
@@ -825,6 +833,12 @@ def run_faces_pass(
         refs=len(refs_list),
         face_px_min=float(min(heights)),
         face_px_max=float(max(heights)),
+        chip_class=chip,
+    )
+    log.info(
+        "Faces pass: chip_class=%s (init CFR + round-trip are chip-agnostic; "
+        "DiT BF16/int8 still auto-selected in h3_backend)",
+        chip,
     )
 
     result = frames.copy()

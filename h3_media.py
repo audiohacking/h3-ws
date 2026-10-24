@@ -1241,7 +1241,7 @@ def write_rgb_mp4(frames: Any, dest: str | Path, fps: int = 24) -> Path:
             vf = av.VideoFrame.from_ndarray(np.asarray(frame), format="rgb24")
             # Stamp frame.time_base with the stream's 1/fps — bare pts=index
             # without retagging time_base collapses the timeline under
-            # h3-av's fps=24 resample (Faces init / M5 desync class).
+            # h3-av's fps=24 resample (Faces init sync; all Apple Silicon).
             _stamp_encode_video_pts(vf, int(index), float(fps))
             for packet in stream.encode(vf):
                 out.mux(packet)
