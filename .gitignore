@@ -61,3 +61,5 @@ web/.claude/
 # Local desktop/runtime config (machine-specific paths)
 config.json
 .ckignore
+
+.pyinstaller-cache/
