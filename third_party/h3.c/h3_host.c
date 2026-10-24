@@ -29,6 +29,19 @@ int h3_video_encoder_latent_t(int frame_count) {
     return frame_count > 0 ? (frame_count + 3) / 4 : 0;
 }
 
+int h3_video_dit_encode_latent_t(int frame_count) {
+    /* Mirror comfy/ldm/minimax/vae.py encode_temporal:
+     * clip_length=17, tokens_chunk_size=ceil(17/4)=5, token_drop=3. */
+    if (frame_count < 1) return 0;
+    const int clip_length = 17;
+    const int tokens_per_clip = 5; /* == h3_video_encoder_latent_t(17) */
+    const int token_drop = 3;
+    int chunks = (frame_count + clip_length - 1) / clip_length;
+    int tokens = chunks * tokens_per_clip;
+    if (tokens <= token_drop) return tokens;
+    return tokens - token_drop;
+}
+
 h3_temporal_shape h3_temporal(int requested_frames) {
     h3_temporal_shape result;
     result.frame_count = h3_align_frame_count(requested_frames);

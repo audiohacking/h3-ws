@@ -96,6 +96,10 @@ typedef struct {
 int h3_align_frame_count(int requested);
 int h3_video_latent_t(int frame_count);
 int h3_video_encoder_latent_t(int frame_count);
+/* Continuity/Comfy ``encode_temporal`` packing (17-frame clips, token_drop=3).
+ * For legal ``5+17n`` lengths this equals ``h3_video_latent_t``. Faces
+ * soft-hold must encode to this T — never linear-resample encoder T. */
+int h3_video_dit_encode_latent_t(int frame_count);
 h3_temporal_shape h3_temporal(int requested_frames);
 void h3_latent_canvas(int width, int height, int *latent_w, int *latent_h);
 int h3_adapt_canvas(int width, int height, int *adapted_w, int *adapted_h);

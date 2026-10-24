@@ -861,3 +861,173 @@ void h3_video_latent_free(h3_video_latent *latent) {
     free(latent->values);
     memset(latent, 0, sizeof(*latent));
 }
+
+/* Channel-major RGB [3,T,H,W] → one padded 17-frame clip starting at *start*. */
+static float *extract_dit_clip_pixels(const float *pixels, int frames,
+                                      int height, int width, int start,
+                                      char *error, size_t error_size) {
+    const int clip_length = 17;
+    size_t area = (size_t)height * (size_t)width;
+    if (!pixels || frames < 1 || start < 0 || start >= frames ||
+        area > SIZE_MAX / 3 / (size_t)clip_length ||
+        3 * (size_t)clip_length * area > SIZE_MAX / sizeof(float)) {
+        fail(error, error_size, "invalid DiT temporal clip arguments");
+        return NULL;
+    }
+    float *clip = malloc(3 * (size_t)clip_length * area * sizeof(*clip));
+    if (!clip) {
+        fail(error, error_size, "out of memory building DiT temporal clip");
+        return NULL;
+    }
+    for (int channel = 0; channel < 3; channel++) {
+        for (int t = 0; t < clip_length; t++) {
+            int src_t = start + t;
+            if (src_t >= frames) src_t = frames - 1; /* pad last frame */
+            const float *src =
+                pixels + ((size_t)channel * (size_t)frames + (size_t)src_t) * area;
+            float *dst =
+                clip + ((size_t)channel * (size_t)clip_length + (size_t)t) * area;
+            memcpy(dst, src, area * sizeof(*dst));
+        }
+    }
+    return clip;
+}
+
+int h3_video_vae_encode_dit_temporal(
+    const char *weight_directory, const char *shader_source_path,
+    const float *pixels, int frames, int height, int width,
+    h3_video_encoder_progress progress, void *progress_opaque,
+    h3_video_latent *output, char *error, size_t error_size) {
+    if (error && error_size) error[0] = '\0';
+    if (output) memset(output, 0, sizeof(*output));
+    if (!weight_directory || !*weight_directory || !shader_source_path ||
+        !*shader_source_path || !pixels || !output || frames < 1 || height < 32 ||
+        width < 32 || height % SPATIAL_RATIO || width % SPATIAL_RATIO) {
+        fail(error, error_size, "invalid DiT temporal visual encoder arguments");
+        return 0;
+    }
+
+    const int clip_length = 17;
+    const int token_drop = 3;
+    int chunks = (frames + clip_length - 1) / clip_length;
+    if (chunks < 1) {
+        fail(error, error_size, "DiT temporal encode needs at least one clip");
+        return 0;
+    }
+
+    h3_video_latent *clips = calloc((size_t)chunks, sizeof(*clips));
+    if (!clips) {
+        fail(error, error_size, "out of memory for DiT temporal clips");
+        return 0;
+    }
+
+    int ok = 1;
+    int latent_h = 0, latent_w = 0, tokens_per_clip = 0;
+    for (int index = 0; ok && index < chunks; index++) {
+        int start = index * clip_length;
+        float *clip_pixels = extract_dit_clip_pixels(
+            pixels, frames, height, width, start, error, error_size);
+        if (!clip_pixels) {
+            ok = 0;
+            break;
+        }
+        /* Progress: treat each clip as one "tile" step for Faces UX. */
+        if (progress) progress(index, chunks, progress_opaque);
+        ok = h3_video_vae_encode(
+            weight_directory, shader_source_path, clip_pixels, clip_length,
+            height, width, NULL, NULL, &clips[index], error, error_size);
+        free(clip_pixels);
+        if (!ok) break;
+        if (index == 0) {
+            latent_h = clips[index].height;
+            latent_w = clips[index].width;
+            tokens_per_clip = clips[index].time;
+        } else if (clips[index].height != latent_h ||
+                   clips[index].width != latent_w ||
+                   clips[index].time != tokens_per_clip) {
+            fail(error, error_size,
+                 "DiT temporal clip latent shape mismatch (%dx%dx%d vs %dx%dx%d)",
+                 clips[index].time, clips[index].height, clips[index].width,
+                 tokens_per_clip, latent_h, latent_w);
+            ok = 0;
+            break;
+        }
+    }
+    if (ok && progress) progress(chunks, chunks, progress_opaque);
+
+    int concat_t = 0;
+    if (ok) {
+        if (tokens_per_clip != 5) {
+            /* Encoder contract for 17 frames is (17+3)/4 = 5. */
+            fail(error, error_size,
+                 "DiT temporal clip encoded to %d tokens; expected 5",
+                 tokens_per_clip);
+            ok = 0;
+        } else {
+            concat_t = chunks * tokens_per_clip;
+            if (concat_t <= token_drop) {
+                fail(error, error_size,
+                     "DiT temporal encode produced %d tokens; cannot drop %d",
+                     concat_t, token_drop);
+                ok = 0;
+            }
+        }
+    }
+
+    int keep_t = ok ? concat_t - token_drop : 0;
+    size_t plane = ok ? (size_t)latent_h * (size_t)latent_w : 0;
+    size_t values = ok ? (size_t)LATENT_CHANNELS * (size_t)keep_t * plane : 0;
+    float *out_values = NULL;
+    if (ok) {
+        if (values > SIZE_MAX / sizeof(float) ||
+            !(out_values = malloc(values * sizeof(*out_values)))) {
+            fail(error, error_size, "out of memory assembling DiT temporal latent");
+            ok = 0;
+        }
+    }
+
+    if (ok) {
+        /* Concatenate clips along time, then drop the trailing token_drop
+         * tokens (Comfy encode_temporal). Layout [C,T,H,W]. */
+        for (int c = 0; c < LATENT_CHANNELS; c++) {
+            size_t dst_base = (size_t)c * (size_t)keep_t * plane;
+            size_t written = 0;
+            for (int index = 0; index < chunks; index++) {
+                size_t src_base =
+                    (size_t)c * (size_t)tokens_per_clip * plane;
+                for (int t = 0; t < tokens_per_clip; t++) {
+                    size_t global_t =
+                        (size_t)index * (size_t)tokens_per_clip + (size_t)t;
+                    if (global_t >= (size_t)keep_t) break;
+                    memcpy(out_values + dst_base + written * plane,
+                           clips[index].values + src_base + (size_t)t * plane,
+                           plane * sizeof(*out_values));
+                    written++;
+                }
+            }
+            if (written != (size_t)keep_t) {
+                fail(error, error_size, "DiT temporal concat wrote %zu/%d",
+                     written, keep_t);
+                ok = 0;
+                break;
+            }
+        }
+    }
+
+    for (int index = 0; index < chunks; index++)
+        h3_video_latent_free(&clips[index]);
+    free(clips);
+
+    if (!ok) {
+        free(out_values);
+        h3_video_latent_free(output);
+        return 0;
+    }
+
+    output->time = keep_t;
+    output->height = latent_h;
+    output->width = latent_w;
+    output->values = out_values;
+    memset(&output->gpu_stats, 0, sizeof(output->gpu_stats));
+    return 1;
+}

@@ -41,11 +41,20 @@ static void test_temporal_and_canvas(void) {
     CHECK(h3_video_encoder_latent_t(5) == 2);
     CHECK(h3_video_encoder_latent_t(22) == 6);
     CHECK(h3_video_encoder_latent_t(39) == 10);
+    /* Faces soft-hold packing (Comfy encode_temporal) == DiT video_t. */
+    CHECK(h3_video_dit_encode_latent_t(5) == h3_video_latent_t(5));
+    CHECK(h3_video_dit_encode_latent_t(22) == h3_video_latent_t(22));
+    CHECK(h3_video_dit_encode_latent_t(39) == h3_video_latent_t(39));
+    CHECK(h3_video_dit_encode_latent_t(56) == h3_video_latent_t(56));
+    CHECK(h3_video_dit_encode_latent_t(107) == h3_video_latent_t(107));
+    CHECK(h3_video_dit_encode_latent_t(22) == 7);
+    CHECK(h3_video_dit_encode_latent_t(22) != h3_video_encoder_latent_t(22));
     int width, height;
+    /* H3_MAX_PIXELS allows ReDetail; 16:9@768 short edge is 1376×768. */
     CHECK(h3_adapt_canvas(1920, 1080, &width, &height));
-    CHECK(width == 1344 && height == 768);
+    CHECK(width == 1376 && height == 768);
     CHECK(h3_adapt_canvas(1080, 1920, &width, &height));
-    CHECK(width == 768 && height == 1344);
+    CHECK(width == 768 && height == 1376);
     CHECK(h3_adapt_canvas(864, 480, &width, &height));
     CHECK(width == 1376 && height == 768);
     CHECK(h3_adapt_canvas(32, 32, &width, &height));
@@ -62,7 +71,7 @@ static void test_temporal_and_canvas(void) {
     CHECK(!h3_reference_image_canvas(0, 480, 512, 512, 0,
                                      &width, &height));
     CHECK(h3_reference_video_canvas(1920, 1080, &width, &height));
-    CHECK(width == 1344 && height == 768);
+    CHECK(width == 1376 && height == 768);
     CHECK(h3_reference_video_canvas(640, 360, &width, &height));
     CHECK(width == 640 && height == 352);
     CHECK(!h3_reference_video_canvas(0, 360, &width, &height));

@@ -1836,11 +1836,31 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         }
         h3_video_latent init_latent;
         memset(&init_latent, 0, sizeof(init_latent));
-        if (!h3_video_vae_encode(
+        /* Faces soft-hold (--denoise-video-strengths): Continuity/Comfy
+         * encode_temporal packing so init latent T == DiT video_t. Linear
+         * resample of raw encoder T (22→6 vs 7) smears soft-hold and pastes
+         * as a mashup. Long-take / ReDetail (no strengths file) keep the
+         * historical encode + resample path unchanged. */
+        int faces_soft_hold =
+            (params->denoise_video_strengths_file &&
+             params->denoise_video_strengths_file[0]) ||
+            (params->denoise_video_strengths &&
+             params->denoise_video_strengths_count > 0);
+        int encoded = 0;
+        if (faces_soft_hold) {
+            encoded = h3_video_vae_encode_dit_temporal(
                 vae_path, "h3_shaders.metal", init_pixels, init_frames,
                 render_height, render_width,
                 h3_video_encoder_progress_bridge, &progress,
-                &init_latent, detail, sizeof(detail))) {
+                &init_latent, detail, sizeof(detail));
+        } else {
+            encoded = h3_video_vae_encode(
+                vae_path, "h3_shaders.metal", init_pixels, init_frames,
+                render_height, render_width,
+                h3_video_encoder_progress_bridge, &progress,
+                &init_latent, detail, sizeof(detail));
+        }
+        if (!encoded) {
             free(init_pixels);
             h3_video_latent_free(&init_latent);
             h3_set_error(ctx, "%s", detail);
@@ -1850,6 +1870,15 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         if (init_latent.height != latent_h || init_latent.width != latent_w) {
             h3_video_latent_free(&init_latent);
             h3_set_error(ctx, "init-video VAE latent spatial size mismatch");
+            goto cleanup;
+        }
+        if (faces_soft_hold && init_latent.time != temporal.video_t) {
+            /* Continuity facepass refuses rather than lerp — same contract. */
+            h3_set_error(ctx,
+                "Faces init-video encoded to %d latent frames; DiT wants %d "
+                "(soft-hold will not linear-resample)",
+                init_latent.time, temporal.video_t);
+            h3_video_latent_free(&init_latent);
             goto cleanup;
         }
         float *clean = malloc(video_count * sizeof(*clean));
@@ -1862,9 +1891,12 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             goto cleanup;
         }
         memcpy(noise, video, video_count * sizeof(*noise));
-        if (!h3_resample_latent_time(
-                init_latent.values, init_latent.time, clean, temporal.video_t,
-                24, latent_h, latent_w)) {
+        if (faces_soft_hold) {
+            memcpy(clean, init_latent.values,
+                   video_count * sizeof(*clean));
+        } else if (!h3_resample_latent_time(
+                       init_latent.values, init_latent.time, clean,
+                       temporal.video_t, 24, latent_h, latent_w)) {
             free(clean);
             free(noise);
             h3_video_latent_free(&init_latent);
