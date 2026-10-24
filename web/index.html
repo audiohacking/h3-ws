@@ -13,8 +13,66 @@
       href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&display=swap"
       rel="stylesheet"
     />
+    <!--
+      Splash paints before any module CSS/JS. Kept inline so the first frame
+      is the logo on black — not a blank root. Dismissed from App once boot
+      data (config, library, projects, frames, cast, presets) has settled
+      (min 1s, then fade).
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        min-height: 100%;
+        background: #000;
+      }
+      #app-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 99999;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #000;
+        opacity: 1;
+        transition: opacity 0.45s ease;
+        pointer-events: none;
+      }
+      #app-splash.is-out {
+        opacity: 0;
+      }
+      #app-splash .app-splash__logo {
+        width: min(42vw, 220px);
+        height: auto;
+        display: block;
+        user-select: none;
+        -webkit-user-drag: none;
+        animation: app-splash-in 0.55s ease both;
+      }
+      @keyframes app-splash-in {
+        from {
+          opacity: 0;
+          transform: scale(0.94);
+        }
+        to {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #app-splash {
+          transition-duration: 0.01ms;
+        }
+        #app-splash .app-splash__logo {
+          animation: none;
+        }
+      }
+    </style>
   </head>
   <body>
+    <div id="app-splash" aria-hidden="true">
+      <img class="app-splash__logo" src="/vf.png" alt="" width="440" height="280" />
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -45,6 +45,7 @@ import {
   themeLabel,
   type ThemePreference,
 } from "./theme";
+import { dismissAppSplash } from "./splash";
 import type { CastMediaType, CastMember, CastMedia, Clip, Config, GenerationPreset, LibraryFrame, LoraPreset, NetworkSettingsPublic, PillOption, ProgressState, QualityPreset, ReferenceItem, RefineSettingsPublic, RefKind, RoutingMode, SceneQueueItem, UpdateCheckPublic } from "./types";
 
 const H3_DEFAULT_STEPS = 20;
@@ -536,40 +537,68 @@ export default function App() {
   useEffect(() => {
     // Best-effort warm ask; Generate also requests (needs a user gesture in some WebKits).
     void ensureNotifyPermission();
-    fetchConfig()
-      .then((cfg) => {
-        setConfig(cfg);
-        const qid = coerceBaseQuality(cfg.defaults.quality ?? "fast");
-        setQuality(qid);
-        const preset = cfg.quality_presets.find((p) => p.id === qid);
-        const fields = fieldsFromPreset(preset);
-        setNumSteps(fields.steps);
-        setLayers(fields.layers);
-        setReuse(fields.reuse);
-        setTokenReduction(fields.tokenReduction);
-        setSsdStreaming(false);
-        setLoraPresets(cfg.lora_presets ?? []);
-        setTurboLoraId((prev) => prev ?? pickDefaultTurboId(cfg.lora_presets ?? []));
-        if (cfg.refine) setRefineSettings(cfg.refine);
-        if (cfg.longtake) {
-          setLongtakeDenoise(cfg.longtake.denoise);
-          if (cfg.longtake.keyframes) setLongtakeKeyframes(cfg.longtake.keyframes);
-        }
-        if (cfg.faces) {
-          setFacesDenoise(cfg.faces.denoise);
-        }
-        if (cfg.network) setNetworkSettings(cfg.network);
-        // Fresh install / upgrade with empty weights — open Models immediately.
-        if (cfg.models_ready === false) {
-          setModelsOpen(true);
-          if (cfg.models_note) setError(cfg.models_note);
-        }
-        // Continuity defaults already apply (16:9 · 768 native). Do not stomp
-        // with the old 512×512 tagged preset.
-        const defDur = cfg.duration_presets.find((d) => d.num_frames === cfg.defaults.num_frames);
-        if (defDur) setDurationId(defDur.id);
-      })
-      .catch((e) => setError(String(e)));
+    // Hold splash until config + library + related boot data have settled
+    // (success or failure). Update check is non-blocking.
+    void Promise.allSettled([
+      fetchConfig()
+        .then((cfg) => {
+          setConfig(cfg);
+          const qid = coerceBaseQuality(cfg.defaults.quality ?? "fast");
+          setQuality(qid);
+          const preset = cfg.quality_presets.find((p) => p.id === qid);
+          const fields = fieldsFromPreset(preset);
+          setNumSteps(fields.steps);
+          setLayers(fields.layers);
+          setReuse(fields.reuse);
+          setTokenReduction(fields.tokenReduction);
+          setSsdStreaming(false);
+          setLoraPresets(cfg.lora_presets ?? []);
+          setTurboLoraId((prev) => prev ?? pickDefaultTurboId(cfg.lora_presets ?? []));
+          if (cfg.refine) setRefineSettings(cfg.refine);
+          if (cfg.longtake) {
+            setLongtakeDenoise(cfg.longtake.denoise);
+            if (cfg.longtake.keyframes) setLongtakeKeyframes(cfg.longtake.keyframes);
+          }
+          if (cfg.faces) {
+            setFacesDenoise(cfg.faces.denoise);
+          }
+          if (cfg.network) setNetworkSettings(cfg.network);
+          // Fresh install / upgrade with empty weights — open Models immediately.
+          if (cfg.models_ready === false) {
+            setModelsOpen(true);
+            if (cfg.models_note) setError(cfg.models_note);
+          }
+          // Continuity defaults already apply (16:9 · 768 native). Do not stomp
+          // with the old 512×512 tagged preset.
+          const defDur = cfg.duration_presets.find((d) => d.num_frames === cfg.defaults.num_frames);
+          if (defDur) setDurationId(defDur.id);
+        })
+        .catch((e) => setError(String(e))),
+      fetchClips()
+        .then((c) => {
+          setClips(c);
+          setClipsReady(true);
+        })
+        .catch(() => setClipsReady(true)),
+      fetchProjects()
+        .then((data) => {
+          setProjects(data.projects);
+          setActiveProjectId(data.active_project_id);
+        })
+        .catch(() => undefined),
+      fetchFrames().then(setFrameLibrary).catch(() => undefined),
+      fetchCastMembers().then(setCastMembers).catch(() => undefined),
+      fetchBackendPresets()
+        .then((presets) => {
+          if (presets.length > 0) setGenerationPresets(presets);
+        })
+        .catch(() => undefined),
+    ]).then(() => {
+      // Let React commit library/config state before the fade starts.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => dismissAppSplash());
+      });
+    });
     fetch(`${API}/api/update`)
       .then(async (r) => {
         if (!r.ok) return;
@@ -579,23 +608,6 @@ export default function App() {
       .catch(() => {
         /* offline / rate-limit — ignore */
       });
-    fetchClips()
-      .then((c) => {
-        setClips(c);
-        setClipsReady(true);
-      })
-      .catch(() => setClipsReady(true));
-    fetchProjects()
-      .then((data) => {
-        setProjects(data.projects);
-        setActiveProjectId(data.active_project_id);
-      })
-      .catch(() => undefined);
-    fetchFrames().then(setFrameLibrary).catch(() => undefined);
-    fetchCastMembers().then(setCastMembers).catch(() => undefined);
-    fetchBackendPresets().then((presets) => {
-      if (presets.length > 0) setGenerationPresets(presets);
-    }).catch(() => undefined);
     return () => {
       runEventSourceRef.current?.close();
       revokeBlobVideoUrls(clipsRef.current);
