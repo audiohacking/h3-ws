@@ -51,6 +51,13 @@ type Props = {
   canvas: ResolutionCanvasState;
   onCanvas: (next: Partial<ResolutionCanvasState>) => void;
   redetailAvailable?: boolean;
+  /** H3 ReDetail post-pass denoise (independent of two-pass bicubic refine). */
+  redetailDenoise?: number;
+  redetailSeed?: number;
+  redetailDenoiseMin?: number;
+  redetailDenoiseMax?: number;
+  onRedetailDenoise?: (v: number) => void;
+  onRedetailSeed?: (v: number) => void;
   onClose: () => void;
 };
 
@@ -109,6 +116,12 @@ export function ResolutionPill({
   canvas,
   onCanvas,
   redetailAvailable = true,
+  redetailDenoise = 0.45,
+  redetailSeed = 42,
+  redetailDenoiseMin = 0.1,
+  redetailDenoiseMax = 0.9,
+  onRedetailDenoise,
+  onRedetailSeed,
   onClose,
 }: Props) {
   const popRef = useRef<HTMLDivElement>(null);
@@ -405,6 +418,37 @@ export function ResolutionPill({
             </span>
             <span className="mmc-radio res-pop__radio" aria-hidden />
           </button>
+        ) : null}
+
+        {upscale === "redetail" && redetailAvailable && onRedetailDenoise ? (
+          <>
+            <div className="mmc-refine-row">
+              <span className="mmc-refine-label">refine</span>
+              <StepperPill
+                value={redetailDenoise}
+                min={redetailDenoiseMin}
+                max={redetailDenoiseMax}
+                step={0.05}
+                disabled={disabled}
+                format={(n) => n.toFixed(2)}
+                title="How much of the schedule the ReDetail pass re-runs on the ×2 init-video."
+                onChange={onRedetailDenoise}
+              />
+            </div>
+            {onRedetailSeed ? (
+              <label className="mmc-refine-row" title="Seed for the ReDetail refine pass.">
+                <span className="mmc-refine-label">seed</span>
+                <input
+                  className="mmc-refine-input"
+                  type="number"
+                  min={0}
+                  value={redetailSeed}
+                  disabled={disabled}
+                  onChange={(e) => onRedetailSeed(Number(e.target.value) || 0)}
+                />
+              </label>
+            ) : null}
+          </>
         ) : null}
 
         {showSampledAt ? (

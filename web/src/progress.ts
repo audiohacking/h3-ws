@@ -60,7 +60,7 @@ export function formatProgressMessage(
   return parts.join(" · ");
 }
 
-/** True for twin/post-pass phases that wrap a nested H3 denoise. */
+/** True for in-place post-pass phases that wrap a nested H3 denoise. */
 export function isPostPassPhase(phase: string | undefined | null): boolean {
   if (!phase) return false;
   return (

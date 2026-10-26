@@ -52,15 +52,15 @@ def test_upframe_gate_independent_of_redetail():
 
 
 def test_upframe_available_false_without_weights(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    # Empty models tree → unavailable
+    monkeypatch.setattr("h3_upframe.film_net_path", lambda model_dir=None: None)
     assert upframe_available(tmp_path) is False
 
 
-def test_run_upframe_requires_weights(tmp_path):
+def test_run_upframe_requires_weights(tmp_path, monkeypatch):
     from h3_upframe import run_upframe
 
+    monkeypatch.setattr("h3_upframe.film_net_path", lambda model_dir=None: None)
     src = tmp_path / "clip.mp4"
-    # Minimal invalid path — should fail before decode if weights missing
+    # Fail before decode when weights are missing
     with pytest.raises(UpframeError, match="film_net"):
         run_upframe(src, tmp_path / "out.mp4", model_dir=tmp_path, require_weights=True)

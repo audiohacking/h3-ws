@@ -9,10 +9,12 @@ export type LongTakePillProps = {
   denoise: number;
   keyframes: string;
   seed: number;
+  interpolation: string;
   onEnabled: (v: boolean) => void;
   onDenoise: (v: number) => void;
   onKeyframes: (v: string) => void;
   onSeed: (v: number) => void;
+  onInterpolation: (v: string) => void;
 };
 
 export function LongTakePill({
@@ -22,17 +24,19 @@ export function LongTakePill({
   denoise,
   keyframes,
   seed,
+  interpolation,
   onEnabled,
   onDenoise,
   onKeyframes,
   onSeed,
+  onInterpolation,
 }: LongTakePillProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const canEnable = Boolean(config?.available);
   const title = !config
     ? "Long take"
-    : "Long take refine — init-video re-denoise + temporal blend (A/B twin)";
+    : "Long take refine — new library clip (original kept)";
 
   useDismissable(open, () => setOpen(false), rootRef);
   useEffect(() => {
@@ -101,9 +105,20 @@ export function LongTakePill({
               onChange={(e) => onSeed(Number(e.target.value))}
             />
           </label>
+          <label>
+            Interpolation
+            <select
+              value={interpolation === "smooth" ? "smooth" : "linear"}
+              disabled={disabled}
+              onChange={(e) => onInterpolation(e.target.value)}
+            >
+              <option value="linear">linear</option>
+              <option value="smooth">smooth</option>
+            </select>
+          </label>
           <p className="faces-pill__hint">
             {config?.note ||
-              "Off by default. When on, writes a *_longtake.mp4 twin beside the baseline."}
+              "Off by default. When on, adds a new library clip; the original is kept."}
           </p>
         </div>
       )}

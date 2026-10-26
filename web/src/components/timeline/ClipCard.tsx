@@ -1,3 +1,4 @@
+import { clipDisplayLabel } from "../../clipEditor";
 import type { Clip } from "../../types";
 
 interface ClipCardProps {
@@ -106,7 +107,7 @@ export function ClipCard({
 
       <div className="timeline-clip__info">
         <span className={`timeline-clip__label${clip.label === "MERGED" ? " timeline-clip__label--merged" : ""}`}>
-          {clip.label}
+          {clipDisplayLabel(clip)}
         </span>
         <span className="timeline-clip__prompt" title={clip.prompt}>
           {truncatePrompt(clip.prompt)}

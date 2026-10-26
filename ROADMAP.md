@@ -24,13 +24,13 @@ Inspiration: [ComfyUI-Continuity](https://github.com/roadmaus/ComfyUI-Continuity
 
 | Continuity option | Verdict | Why |
 |-------------------|---------|-----|
-| **Faces** | **Continuity port (branch)** | `MiniMaxH3FacePass` geometry + soft-hold strengths file + SAM 3.1 + `*_faces.mp4` twin. Independent of ReDetail/Upframe. |
+| **Faces** | **Continuity port (branch)** | `MiniMaxH3FacePass` geometry + soft-hold strengths file + SAM 3.1; new standalone library clip (source kept). Independent of ReDetail/Upframe. |
 | **block_cache / Tea / Easy** | Skip | Comfy sampler step-skip plugins. Different from our warm VAE session + `H3_REF_CACHE_DIR` ref-latent disk cache. |
 | **Spectrum** | Skip | External forecast sampler ([ComfyUI-Spectrum-MiniMax-H3](https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3)); fidelity tradeoffs; no h3.c path. |
 | **Motion fix** | Skip for now | Second pass (slow / re-draw / restore timing) needs latent motion profile + re-sample. |
-| **Long take refine** | **Phase 1 shipped** (opt-in) | Pixel path: `--init-video` denoise ~0.55 + RGB keyframe blend (`h3_longtake.py`). Twin `*_longtake.mp4` for A/B; default **off**. |
-| **ReDetail (higher res)** | **Shipped** (opt-in) | Continuity labels: one pass vs ReDetail. H3 path: sample → ×2 canvas → `--init-video` refine twin (`h3_redetail.py`, `*_redetail.mp4`). Engine cap raised to **1536×2688** for refine only; one-pass UI stay ≤768×1344. Default **off**. Independent of Upframe. |
-| **Upframe** | **Shipped** (opt-in) | FILM `film_net_fp16` temporal interpolate (`h3_upframe.py`, `*_upframe.mp4`). Models download (~69 MB). Default **off**. Independent of ReDetail — never chained as one required path. |
+| **Long take refine** | **Phase 1 shipped** (opt-in) | Pixel path: `--init-video` denoise ~0.55 + RGB keyframe blend (`h3_longtake.py`). New standalone library clip; source kept; default **off**. |
+| **ReDetail (higher res)** | **Shipped** (opt-in) | Continuity labels: one pass vs ReDetail. H3 path: sample → ×2 canvas → `--init-video` refine as a new clip (`h3_redetail.py`). Engine cap raised to **1536×2688** for refine only; one-pass UI stay ≤768×1344. Default **off**. Independent of Upframe. |
+| **Upframe** | **Shipped** (opt-in) | FILM `film_net_fp16` temporal interpolate (`h3_upframe.py`) as a new library clip. Models download (~69 MB). Default **off**. Independent of ReDetail — never chained as one required path. |
 | **Latent motion-context** | **Deferred** (Phase 2 epic) | True Comfy-style pin/save/load of video+audio latents + head trim in vendored h3.c. Do not block on Phase 1. |
 
 Faces is the Continuity soft-hold rewrite (`feature/continuity-faces`). Spectrum / Tea / block_cache stay skipped. Latent motion-context is a separate h3.c fork epic after Phase 1 validation.

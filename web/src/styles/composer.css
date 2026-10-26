@@ -1533,6 +1533,18 @@
   font-size: 0.75rem;
 }
 
+.mmc-refine-input {
+  width: 7rem;
+  margin: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: inherit;
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .mmc-refine-flip {
   flex: none;
   width: auto;

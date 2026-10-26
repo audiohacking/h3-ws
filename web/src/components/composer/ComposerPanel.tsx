@@ -106,30 +106,12 @@ export type ComposerPanelProps = {
   onSsdStreaming: (v: boolean) => void;
   upscale?: boolean;
   onUpscale?: (v: boolean) => void;
-  longtakeConfig?: import("../../types").LongTakeConfigPublic | null;
-  longtakeEnabled?: boolean;
-  longtakeDenoise?: number;
-  longtakeKeyframes?: string;
-  longtakeSeed?: number;
-  onLongtakeEnabled?: (v: boolean) => void;
-  onLongtakeDenoise?: (v: number) => void;
-  onLongtakeKeyframes?: (v: string) => void;
-  onLongtakeSeed?: (v: number) => void;
+  /** ReDetail lives on the resolution pill (generate path). Other passes are library-only. */
   redetailConfig?: import("../../types").RedetailConfigPublic | null;
-  redetailEnabled?: boolean;
-  onRedetailEnabled?: (v: boolean) => void;
-  upframeConfig?: import("../../types").UpframeConfigPublic | null;
-  upframeEnabled?: boolean;
-  onUpframeEnabled?: (v: boolean) => void;
-  facesConfig?: import("../../types").FacesConfigPublic | null;
-  facesEnabled?: boolean;
-  facesCanvas?: number;
-  facesDenoise?: number;
-  facesSeed?: number;
-  onFacesEnabled?: (v: boolean) => void;
-  onFacesCanvas?: (v: number) => void;
-  onFacesDenoise?: (v: number) => void;
-  onFacesSeed?: (v: number) => void;
+  redetailDenoise?: number;
+  redetailSeed?: number;
+  onRedetailDenoise?: (v: number) => void;
+  onRedetailSeed?: (v: number) => void;
   clipMultiplier: number;
   onClipMultiplier: (n: number) => void;
   sceneQueue: SceneQueueItem[];
@@ -364,6 +346,12 @@ export function ComposerPanel(props: ComposerPanelProps) {
           canvas={props.resolutionCanvas}
           onCanvas={props.onResolutionCanvas}
           redetailAvailable={props.redetailConfig?.available !== false}
+          redetailDenoise={props.redetailDenoise}
+          redetailSeed={props.redetailSeed}
+          redetailDenoiseMin={props.redetailConfig?.denoise_min}
+          redetailDenoiseMax={props.redetailConfig?.denoise_max}
+          onRedetailDenoise={props.onRedetailDenoise}
+          onRedetailSeed={props.onRedetailSeed}
           refs={refs}
           imageName={props.imageName}
           endImageName={props.endImageName}
@@ -408,27 +396,6 @@ export function ComposerPanel(props: ComposerPanelProps) {
           clipMultiplierMax={props.config.clip_multiplier_max ?? 10}
           showClips={compiled.modeHint !== "ref2va"}
           onClipMultiplier={props.onClipMultiplier}
-          longtakeConfig={props.longtakeConfig}
-          longtakeEnabled={props.longtakeEnabled}
-          longtakeDenoise={props.longtakeDenoise}
-          longtakeKeyframes={props.longtakeKeyframes}
-          longtakeSeed={props.longtakeSeed}
-          onLongtakeEnabled={props.onLongtakeEnabled}
-          onLongtakeDenoise={props.onLongtakeDenoise}
-          onLongtakeKeyframes={props.onLongtakeKeyframes}
-          onLongtakeSeed={props.onLongtakeSeed}
-          upframeConfig={props.upframeConfig}
-          upframeEnabled={props.upframeEnabled}
-          onUpframeEnabled={props.onUpframeEnabled}
-          facesConfig={props.facesConfig}
-          facesEnabled={props.facesEnabled}
-          facesCanvas={props.facesCanvas}
-          facesDenoise={props.facesDenoise}
-          facesSeed={props.facesSeed}
-          onFacesEnabled={props.onFacesEnabled}
-          onFacesCanvas={props.onFacesCanvas}
-          onFacesDenoise={props.onFacesDenoise}
-          onFacesSeed={props.onFacesSeed}
         />
       </div>
       {props.loraActivity && <p className="lora-inline-hint">{props.loraActivity}</p>}

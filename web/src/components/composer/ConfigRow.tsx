@@ -20,6 +20,12 @@ type Props = {
   canvas: ResolutionCanvasState;
   onCanvas: (next: Partial<ResolutionCanvasState>) => void;
   redetailAvailable?: boolean;
+  redetailDenoise?: number;
+  redetailSeed?: number;
+  redetailDenoiseMin?: number;
+  redetailDenoiseMax?: number;
+  onRedetailDenoise?: (v: number) => void;
+  onRedetailSeed?: (v: number) => void;
   refs: ReferenceItem[];
   imageName: string | null;
   endImageName: string | null;
@@ -57,6 +63,12 @@ export function ConfigRow({
   canvas,
   onCanvas,
   redetailAvailable = true,
+  redetailDenoise,
+  redetailSeed,
+  redetailDenoiseMin,
+  redetailDenoiseMax,
+  onRedetailDenoise,
+  onRedetailSeed,
   refs,
   imageName,
   endImageName,
@@ -258,6 +270,12 @@ export function ConfigRow({
             canvas={canvas}
             onCanvas={onCanvas}
             redetailAvailable={redetailAvailable}
+            redetailDenoise={redetailDenoise}
+            redetailSeed={redetailSeed}
+            redetailDenoiseMin={redetailDenoiseMin}
+            redetailDenoiseMax={redetailDenoiseMax}
+            onRedetailDenoise={onRedetailDenoise}
+            onRedetailSeed={onRedetailSeed}
             onClose={() => setResOpen(false)}
           />
         </div>

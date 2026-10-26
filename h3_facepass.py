@@ -801,9 +801,8 @@ def run_faces_pass(
     if not any(found):
         log.info("Faces: no face found — left as it is")
         emit("faces_skip", message="No face found (SAM 3.1) — left as it is")
-        if video_path.resolve() != output_path.resolve():
-            shutil.copy2(video_path, output_path)
-        return output_path
+        # Do not write a byte-identical "FACES" twin into the library.
+        raise FaceError("No face found (SAM 3.1) — nothing to refine")
 
     crops, face_rects = crop_boxes(boxes, found, canvas, canvas)
     heights = face_heights(crops)
@@ -816,9 +815,9 @@ def run_faces_pass(
             "faces_skip",
             message=f"Face already ≥ {settings.abstain_px:.0f}px — left as it is",
         )
-        if video_path.resolve() != output_path.resolve():
-            shutil.copy2(video_path, output_path)
-        return output_path
+        raise FaceError(
+            f"Face already ≥ {settings.abstain_px:.0f}px — nothing to refine"
+        )
 
     curve = strengths(heights)
     confidence = paste_weights(found)

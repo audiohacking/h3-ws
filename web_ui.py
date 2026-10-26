@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
+import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
@@ -177,12 +178,12 @@ class RunRecord:
     autoconcat: bool = False
     merged_url: Optional[str] = None
     merged_clip_id: Optional[str] = None
-    # Optional Long take refine (default off). Twin clip A/B when enabled.
+    # Optional Long take refine (default off) → new standalone library clip.
     longtake: Optional[dict[str, Any]] = None
-    # Independent post-passes (default off) — not chained to each other.
+    # Independent post-passes (default off) — each yields its own library clip.
     redetail: Optional[dict[str, Any]] = None
     upframe: Optional[dict[str, Any]] = None
-    # Continuity Faces twin (*_faces.mp4); keeps baseline for A/B.
+    # Continuity Faces — new standalone clip; source kept.
     faces: Optional[dict[str, Any]] = None
 
 
@@ -219,6 +220,8 @@ class AppState:
         self._worker_task: asyncio.Task[None] | None = None
         self._cancelled_runs: set[str] = set()
         self._active_run_id: str | None = None
+        # Live status for library passes (Upframe / ReDetail / …) — polled by the UI.
+        self._pass_progress: dict[str, Any] | None = None
         self._sigint_count = 0
         self._sigint_last_ts = 0.0
         self._uvicorn_server: Any = None
@@ -228,6 +231,75 @@ class AppState:
         self.projects: dict[str, ProjectRecord] = {}
         self.active_project_id: str | None = None
         self._load_user_data()
+
+    def set_pass_progress(
+        self,
+        phase: str,
+        extra: dict[str, Any] | None = None,
+        *,
+        kind: str | None = None,
+        clip_id: str | None = None,
+    ) -> None:
+        """Publish library-pass progress for the UI poller."""
+        extra = dict(extra or {})
+        msg = str(extra.get("message") or phase)
+        payload: dict[str, Any] = {
+            "idle": False,
+            "phase": phase,
+            "message": msg,
+            "updated_at": time.time(),
+        }
+        if kind:
+            payload["kind"] = kind
+        if clip_id:
+            payload["clip_id"] = clip_id
+        idx = extra.get("index", extra.get("step"))
+        total = extra.get("total")
+        if idx is not None:
+            payload["step"] = idx
+        if total is not None:
+            payload["total"] = total
+        if payload.get("step") is not None and payload.get("total"):
+            try:
+                payload["pct"] = round(
+                    100.0 * float(payload["step"]) / max(1.0, float(payload["total"])),
+                    1,
+                )
+            except (TypeError, ValueError):
+                pass
+        mp = extra.get("model_progress")
+        if isinstance(mp, dict):
+            payload["model_progress"] = mp
+            if mp.get("step") is not None:
+                payload["step"] = mp["step"]
+            if mp.get("total") is not None:
+                payload["total"] = mp["total"]
+            if payload.get("step") is not None and payload.get("total"):
+                try:
+                    payload["pct"] = round(
+                        100.0
+                        * float(payload["step"])
+                        / max(1.0, float(payload["total"])),
+                        1,
+                    )
+                except (TypeError, ValueError):
+                    pass
+            # Prefer a composed message when nested denoise is active.
+            stage = str(mp.get("stage") or "").strip()
+            bits = [msg]
+            if stage and stage.lower() not in msg.lower():
+                bits.append(stage)
+            if mp.get("step") is not None and mp.get("total") is not None:
+                bits.append(f"{mp['step']}/{mp['total']}")
+            eta = mp.get("eta_s")
+            if eta is not None:
+                eta_i = max(0, int(round(float(eta))))
+                bits.append(f"{eta_i // 60:02d}:{eta_i % 60:02d} remaining")
+            payload["message"] = " · ".join(bits)
+        self._pass_progress = payload
+
+    def clear_pass_progress(self) -> None:
+        self._pass_progress = None
 
     # ── User data (presets + cast + projects) persistence ────────────────────
     # Stored separately from the generation index so presets/cast/projects
@@ -519,25 +591,64 @@ class AppState:
         return f"/api/videos/{filename}/thumb"
 
     def delete_clip_record(self, clip_id: str) -> bool:
+        """Remove clip from the index and wipe its media so disk space returns.
+
+        Safe while other jobs run — only this clip's files are touched. Active
+        GPU work for a *different* run is unaffected.
+        """
         clip = self.clips.get(clip_id)
         if not clip:
             return False
-        path = self.output_dir / clip.filename
-        if path.is_file():
-            try:
-                path.unlink()
-            except OSError as exc:
-                log.warning("Could not delete clip file %s: %s", path, exc)
-        poster = video_poster_path(path)
-        if poster.is_file():
-            try:
-                poster.unlink()
-            except OSError:
-                pass
+        filename = str(clip.filename or "").strip()
+        if filename:
+            path = self.output_dir / Path(filename).name
+            if path.is_file():
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    log.warning("Could not delete clip file %s: %s", path, exc)
+            poster = video_poster_path(path)
+            if poster.is_file():
+                try:
+                    poster.unlink()
+                except OSError:
+                    pass
+            # Drop empty thumbs dir noise; ignore if other posters remain.
+            thumbs = poster.parent
+            if thumbs.is_dir() and thumbs.name == ".thumbs":
+                try:
+                    next(thumbs.iterdir())
+                except StopIteration:
+                    try:
+                        thumbs.rmdir()
+                    except OSError:
+                        pass
+        # Live / Faces preview artifacts keyed by clip id.
+        preview_root = self.output_dir / ".preview"
+        if preview_root.is_dir():
+            for entry in list(preview_root.iterdir()):
+                if clip_id not in entry.name:
+                    continue
+                try:
+                    if entry.is_file():
+                        entry.unlink()
+                    elif entry.is_dir():
+                        shutil.rmtree(entry, ignore_errors=True)
+                except OSError as exc:
+                    log.debug("preview wipe %s: %s", entry, exc)
         del self.clips[clip_id]
         for run in list(self.runs.values()):
             if clip_id in run.clip_ids:
                 run.clip_ids = [cid for cid in run.clip_ids if cid != clip_id]
+            if not run.clip_ids and run.status in (
+                RunStatus.QUEUED.value,
+                RunStatus.RUNNING.value,
+            ):
+                # Clip was the only member — request cancel so the worker no-ops.
+                try:
+                    self.request_cancel_run(run.id)
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("cancel after delete %s: %s", run.id, exc)
         return True
 
     def delete_chain(self, chain_id: str) -> int:
@@ -621,6 +732,124 @@ def _purge_preview_stem(stem: Path) -> None:
     for sib in parent.glob(stem.name + ".*"):
         cleanup_preview_artifacts(sib)
     cleanup_preview_artifacts(stem)
+
+
+def _promote_video_over_baseline(baseline: Path, refined: Path) -> Path:
+    """Replace ``baseline`` with ``refined`` (test helper / rare reclaim).
+
+    Product library passes must **not** use this on a user's original — they
+    spawn a new file + ClipRecord via ``_spawn_processed_clip`` instead.
+    """
+    baseline = Path(baseline)
+    refined = Path(refined)
+    if not refined.is_file():
+        raise FileNotFoundError(f"refined video missing: {refined}")
+    if refined.resolve() == baseline.resolve():
+        return baseline
+    tmp = baseline.with_suffix(".promoting.mp4")
+    if tmp.exists():
+        tmp.unlink()
+    refined.replace(tmp)
+    if baseline.is_file():
+        baseline.unlink()
+    tmp.replace(baseline)
+    poster = video_poster_path(baseline)
+    if poster.is_file():
+        try:
+            poster.unlink()
+        except OSError:
+            pass
+    return baseline
+
+
+def _unique_pass_filename(output_dir: Path, source_filename: str, tag: str) -> str:
+    """``stem_tag.mp4``, or ``stem_tag_<hex>.mp4`` if that name already exists."""
+    stem = Path(source_filename).stem
+    candidate = f"{stem}_{tag}.mp4"
+    if not (output_dir / candidate).is_file():
+        return candidate
+    return f"{stem}_{tag}_{uuid.uuid4().hex[:8]}.mp4"
+
+
+_PASS_LABELS = {
+    "upframe": "UPFRAME",
+    "redetail": "REDETAIL",
+    "longtake": "LONGTAKE",
+    "faces": "FACES",
+}
+
+
+def _pass_label_from_patch(generation_patch: dict[str, Any] | None) -> str:
+    if not generation_patch:
+        return "CURRENT"
+    for key, label in _PASS_LABELS.items():
+        if key not in generation_patch:
+            continue
+        val = generation_patch[key]
+        if val is True or (isinstance(val, dict) and val.get("enabled", True)):
+            return label
+    return "CURRENT"
+
+
+def _spawn_processed_clip(
+    state: "AppState",
+    source: "ClipRecord",
+    out_path: Path,
+    *,
+    generation_patch: dict[str, Any] | None = None,
+    label: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    num_frames: int | None = None,
+    seed: int | None = None,
+    run_id: str | None = None,
+) -> "ClipRecord":
+    """Register a new standalone library clip. Source clip/file stay untouched.
+
+    Own ``chain_id`` so the UI never treats this as a parent/child of the source.
+    ``label`` tags the pass (UPFRAME / REDETAIL / …) so cards are not anonymous copies.
+    """
+    new_id = str(uuid.uuid4())
+    filename = out_path.name
+    gen = dict(source.generation or {}) if isinstance(source.generation, dict) else {}
+    if generation_patch:
+        gen.update(generation_patch)
+    gen["source_clip_id"] = source.id
+    tag = (label or _pass_label_from_patch(generation_patch)).strip() or "CURRENT"
+    gen["pass"] = tag.lower()
+    bust = int(time.time() * 1000)
+    size: int | None = None
+    if out_path.is_file():
+        st = out_path.stat()
+        size = st.st_size
+        bust = int(st.st_mtime_ns // 1_000_000)
+    record = ClipRecord(
+        id=new_id,
+        prompt=source.prompt,
+        label=tag,
+        video_url=f"{state.clip_url(filename)}?v={bust}",
+        filename=filename,
+        chain_id=str(uuid.uuid4()),
+        clip_index=0,
+        mode=source.mode,
+        status=RunStatus.DONE.value,
+        created_at=datetime.now().isoformat(),
+        bytes=size,
+        project_id=source.project_id,
+        width=int(width) if width is not None else source.width,
+        height=int(height) if height is not None else source.height,
+        generation=gen,
+        run_id=run_id if run_id is not None else source.run_id,
+        num_frames=int(num_frames) if num_frames is not None else source.num_frames,
+        seed=int(seed) if seed is not None else source.seed,
+        num_steps=source.num_steps,
+        layers=source.layers,
+        reuse=source.reuse,
+        quality=source.quality,
+        loras=list(source.loras) if source.loras else None,
+    )
+    state.clips[new_id] = record
+    return record
 
 
 def _frames_dir(output_dir: Path) -> Path:
@@ -1442,8 +1671,11 @@ async def _execute_run(state: AppState, run_id: str) -> None:
             if i == 0:
                 clip.label = "ORIGINAL" if len(run.prompts) > 1 else "CURRENT"
 
-            longtake_cfg = run.longtake if isinstance(run.longtake, dict) else None
-            longtake_twin_id: str | None = None
+            # Generate-time auto-passes: ReDetail only (resolution mode).
+            # Faces / Upframe / Long take are library actions — spawning them here
+            # littered the library with near-duplicate CURRENT/FACES/… peers.
+            longtake_cfg = None
+            longtake_clip_id: str | None = None
             if longtake_cfg and longtake_cfg.get("enabled") and dest.is_file():
                 from h3_longtake import (
                     DEFAULT_INTERPOLATION,
@@ -1457,6 +1689,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
 
                 lt_watcher: LatentPreviewWatcher | None = None
                 lt_stem = state.output_dir / ".preview" / f"{run_id}_{clip.id}_longtake"
+                lt_name = _unique_pass_filename(state.output_dir, clip.filename, "longtake")
+                lt_path = state.output_dir / lt_name
                 try:
                     await state.emit(
                         run_id,
@@ -1467,8 +1701,6 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                             "clip_id": clip.id,
                         },
                     )
-                    lt_name = f"{Path(clip.filename).stem}_longtake.mp4"
-                    lt_path = state.output_dir / lt_name
                     lt_settings = LongTakeSettings(
                         denoise=clamp_longtake_denoise(
                             float(
@@ -1569,6 +1801,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                             loop,
                         )
 
+                    if lt_path.exists():
+                        lt_path.unlink()
                     await asyncio.to_thread(
                         run_longtake_refine,
                         dest,
@@ -1586,48 +1820,30 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         preview_latent_dir=lt_preview_dir,
                     )
                     if lt_path.is_file():
-                        twin_id = str(uuid.uuid4())
-                        twin = ClipRecord(
-                            id=twin_id,
-                            prompt=f"[LongTake] {clip.prompt}",
-                            label=(clip.label or "CURRENT") + "+LongTake",
-                            video_url=state.clip_url(lt_name),
-                            filename=lt_name,
-                            chain_id=clip.chain_id,
-                            clip_index=clip.clip_index,
-                            mode=clip.mode,
-                            status=RunStatus.DONE.value,
-                            created_at=datetime.now().isoformat(),
-                            num_frames=clip.num_frames,
-                            width=clip.width,
-                            height=clip.height,
-                            seed=lt_settings.seed,
-                            project_id=clip.project_id,
-                            quality=clip.quality,
-                            num_steps=clip.num_steps,
-                            layers=clip.layers,
-                            reuse=clip.reuse,
-                            bytes=lt_path.stat().st_size,
-                            generation={
-                                **(clip.generation or {}),
+                        new_lt = _spawn_processed_clip(
+                            state,
+                            clip,
+                            lt_path,
+                            generation_patch={
                                 "longtake": {
+                                    "enabled": True,
                                     "denoise": lt_settings.denoise,
                                     "keyframes": lt_settings.keyframes,
                                     "seed": lt_settings.seed,
-                                    "source_clip_id": clip.id,
                                 },
                             },
+                            seed=lt_settings.seed,
+                            run_id=run_id,
                         )
-                        state.clips[twin_id] = twin
-                        longtake_twin_id = twin_id
+                        longtake_clip_id = new_lt.id
                         await state.emit(
                             run_id,
                             {
                                 "type": "progress",
                                 "phase": "longtake_done",
-                                "message": "Long take refine complete",
-                                "clip_id": clip.id,
-                                "twin_clip_id": twin_id,
+                                "message": "Long take clip ready",
+                                "clip_id": new_lt.id,
+                                "video_url": new_lt.video_url,
                             },
                         )
                 except LongTakeError as exc:
@@ -1659,7 +1875,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     _purge_preview_stem(lt_stem)
 
             redetail_cfg = run.redetail if isinstance(run.redetail, dict) else None
-            redetail_twin_id: str | None = None
+            redetail_clip_id: str | None = None
             if redetail_cfg and redetail_cfg.get("enabled") and dest.is_file():
                 from h3_redetail import (
                     DEFAULT_REDETAIL_DENOISE,
@@ -1669,6 +1885,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     run_redetail,
                 )
 
+                rd_name = _unique_pass_filename(state.output_dir, clip.filename, "redetail")
+                rd_path = state.output_dir / rd_name
                 try:
                     await state.emit(
                         run_id,
@@ -1679,8 +1897,6 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                             "clip_id": clip.id,
                         },
                     )
-                    rd_name = f"{Path(clip.filename).stem}_redetail.mp4"
-                    rd_path = state.output_dir / rd_name
                     settings_rd = RedetailSettings(
                         denoise=clamp_redetail_denoise(
                             float(
@@ -1697,74 +1913,110 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     )
 
                     def _rd_progress(phase: str, extra: dict[str, Any]) -> None:
-                        log.info("redetail %s clip=%s %s", phase, clip.id, extra.get("message"))
+                        msg = str(extra.get("message") or phase)
+                        mp = extra.get("model_progress")
+                        payload: dict[str, Any] = {
+                            "type": "progress",
+                            "phase": phase,
+                            "message": msg,
+                            "clip_id": clip.id,
+                        }
+                        if isinstance(mp, dict):
+                            payload["model_progress"] = mp
+                            if mp.get("elapsed_s") is not None:
+                                payload["elapsed_s"] = mp.get("elapsed_s")
+                            stage = str(mp.get("stage") or "").strip()
+                            step, total = mp.get("step"), mp.get("total")
+                            bits = [msg]
+                            if stage and stage.lower() not in msg.lower():
+                                bits.append(stage)
+                            if step is not None and total is not None:
+                                bits.append(f"{step}/{total}")
+                            eta = mp.get("eta_s")
+                            if eta is not None:
+                                eta_i = max(0, int(round(float(eta))))
+                                bits.append(
+                                    f"{eta_i // 60:02d}:{eta_i % 60:02d} remaining"
+                                )
+                            elif mp.get("avg_step_s") is not None:
+                                bits.append(f"{mp['avg_step_s']}s/it")
+                            payload["message"] = " · ".join(bits)
+                        log.info(
+                            "redetail %s clip=%s %s", phase, clip.id, payload["message"]
+                        )
+                        state.set_pass_progress(
+                            phase, extra, kind="redetail", clip_id=clip.id
+                        )
+                        asyncio.run_coroutine_threadsafe(
+                            state.emit(run_id, payload),
+                            loop,
+                        )
 
-                    await asyncio.to_thread(
-                        run_redetail,
-                        dest,
-                        rd_path,
-                        prompt=clip.prompt or "detailed cinematic shot",
-                        engine=state.engine,
-                        settings=settings_rd,
-                        on_progress=_rd_progress,
-                        refs=req.refs,
-                        loras=req.loras,
-                        quality=req.quality,
-                        steps=req.steps,
-                        layers=req.layers,
-                        reuse=1,
+                    if rd_path.exists():
+                        rd_path.unlink()
+                    state.set_pass_progress(
+                        "redetail_upscale",
+                        {"message": "ReDetail · ×2 refine…"},
+                        kind="redetail",
+                        clip_id=clip.id,
                     )
+                    try:
+                        await asyncio.to_thread(
+                            run_redetail,
+                            dest,
+                            rd_path,
+                            prompt=clip.prompt or "detailed cinematic shot",
+                            engine=state.engine,
+                            settings=settings_rd,
+                            on_progress=_rd_progress,
+                            refs=req.refs,
+                            loras=req.loras,
+                            quality=req.quality,
+                            steps=req.steps,
+                            layers=req.layers,
+                            reuse=1,
+                        )
+                    finally:
+                        state.clear_pass_progress()
                     if rd_path.is_file():
                         from h3_media import redetail_output_size
 
-                        twin_id = str(uuid.uuid4())
                         try:
                             tw, th = redetail_output_size(
                                 int(clip.width or 512), int(clip.height or 512)
                             )
                         except Exception:
                             tw, th = clip.width, clip.height
-                        twin = ClipRecord(
-                            id=twin_id,
-                            prompt=clip.prompt,
-                            label="REDETAIL",
-                            video_url=state.clip_url(rd_name),
-                            filename=rd_name,
-                            chain_id=clip.chain_id,
-                            clip_index=clip.clip_index,
-                            mode=clip.mode,
-                            status=RunStatus.DONE.value,
-                            created_at=datetime.now().isoformat(),
-                            bytes=rd_path.stat().st_size,
-                            project_id=clip.project_id,
-                            width=tw,
-                            height=th,
-                            generation={
-                                **(clip.generation or {}),
+                        new_rd = _spawn_processed_clip(
+                            state,
+                            clip,
+                            rd_path,
+                            generation_patch={
                                 "redetail": {
                                     "enabled": True,
                                     "denoise": settings_rd.denoise,
                                     "seed": settings_rd.seed,
                                 },
                             },
+                            width=tw,
+                            height=th,
                             run_id=run_id,
-                            num_frames=clip.num_frames,
-                            seed=clip.seed,
-                            num_steps=clip.num_steps,
-                            layers=clip.layers,
-                            reuse=clip.reuse,
-                            quality=clip.quality,
                         )
-                        state.clips[twin_id] = twin
-                        redetail_twin_id = twin_id
+                        # Intermediate sample pass — not the product the user ordered.
+                        clip.label = "BASE"
+                        gen = dict(clip.generation or {}) if isinstance(clip.generation, dict) else {}
+                        gen["superseded_by"] = new_rd.id
+                        gen["pass"] = "base"
+                        clip.generation = gen
+                        redetail_clip_id = new_rd.id
                         await state.emit(
                             run_id,
                             {
                                 "type": "progress",
                                 "phase": "redetail_done",
-                                "message": "ReDetail twin ready",
-                                "clip_id": twin_id,
-                                "video_url": twin.video_url,
+                                "message": "ReDetail clip ready",
+                                "clip_id": new_rd.id,
+                                "video_url": new_rd.video_url,
                             },
                         )
                 except RedetailError as exc:
@@ -1790,8 +2042,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         },
                     )
 
-            upframe_cfg = run.upframe if isinstance(run.upframe, dict) else None
-            upframe_twin_id: str | None = None
+            upframe_cfg = None  # library-only
+            upframe_clip_id: str | None = None
             if upframe_cfg and upframe_cfg.get("enabled") and dest.is_file():
                 from h3_upframe import (
                     DEFAULT_MULTIPLIER,
@@ -1800,6 +2052,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     run_upframe,
                 )
 
+                uf_name = _unique_pass_filename(state.output_dir, clip.filename, "upframe")
+                uf_path = state.output_dir / uf_name
                 try:
                     await state.emit(
                         run_id,
@@ -1810,59 +2064,36 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                             "clip_id": clip.id,
                         },
                     )
-                    uf_name = f"{Path(clip.filename).stem}_upframe.mp4"
-                    uf_path = state.output_dir / uf_name
+                    uf_mult = int(upframe_cfg.get("multiplier") or DEFAULT_MULTIPLIER)
+                    if uf_path.exists():
+                        uf_path.unlink()
                     await asyncio.to_thread(
                         run_upframe,
                         dest,
                         uf_path,
-                        settings=UpframeSettings(
-                            multiplier=int(
-                                upframe_cfg.get("multiplier") or DEFAULT_MULTIPLIER
-                            )
-                        ),
+                        settings=UpframeSettings(multiplier=uf_mult),
                         model_dir=state.engine.model_dir,
                         require_weights=True,
                     )
                     if uf_path.is_file():
-                        twin_id = str(uuid.uuid4())
-                        twin = ClipRecord(
-                            id=twin_id,
-                            prompt=clip.prompt,
-                            label="UPFRAME",
-                            video_url=state.clip_url(uf_name),
-                            filename=uf_name,
-                            chain_id=clip.chain_id,
-                            clip_index=clip.clip_index,
-                            mode=clip.mode,
-                            status=RunStatus.DONE.value,
-                            created_at=datetime.now().isoformat(),
-                            bytes=uf_path.stat().st_size,
-                            project_id=clip.project_id,
-                            generation={
-                                **(clip.generation or {}),
-                                "upframe": {"enabled": True},
+                        new_uf = _spawn_processed_clip(
+                            state,
+                            clip,
+                            uf_path,
+                            generation_patch={
+                                "upframe": {"enabled": True, "multiplier": uf_mult},
                             },
                             run_id=run_id,
-                            width=clip.width,
-                            height=clip.height,
-                            num_frames=clip.num_frames,
-                            seed=clip.seed,
-                            num_steps=clip.num_steps,
-                            layers=clip.layers,
-                            reuse=clip.reuse,
-                            quality=clip.quality,
                         )
-                        state.clips[twin_id] = twin
-                        upframe_twin_id = twin_id
+                        upframe_clip_id = new_uf.id
                         await state.emit(
                             run_id,
                             {
                                 "type": "progress",
                                 "phase": "upframe_done",
-                                "message": "Upframe twin ready",
-                                "clip_id": twin_id,
-                                "video_url": twin.video_url,
+                                "message": "Upframe clip ready",
+                                "clip_id": new_uf.id,
+                                "video_url": new_uf.video_url,
                             },
                         )
                 except UpframeError as exc:
@@ -1888,8 +2119,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         },
                     )
 
-            faces_cfg = run.faces if isinstance(run.faces, dict) else None
-            faces_twin_id: str | None = None
+            faces_cfg = None  # library-only
+            faces_clip_id: str | None = None
             if faces_cfg and faces_cfg.get("enabled") and dest.is_file():
                 from h3_facepass import FacesSettings, run_faces_pass
                 from h3_faces import (
@@ -1902,6 +2133,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
 
                 faces_watcher: LatentPreviewWatcher | None = None
                 faces_stem = state.output_dir / ".preview" / f"{run_id}_{clip.id}_faces"
+                faces_name = _unique_pass_filename(state.output_dir, clip.filename, "faces")
+                faces_path = state.output_dir / faces_name
                 try:
                     await state.emit(
                         run_id,
@@ -1928,8 +2161,6 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                             await asyncio.to_thread(download_sam3, state.engine.model_dir)
                         except SamDownloadError as exc:
                             raise FaceError(str(exc)) from exc
-                    faces_name = f"{Path(clip.filename).stem}_faces.mp4"
-                    faces_path = state.output_dir / faces_name
                     # Faces canvas tracks the shot short edge (not a free dial).
                     face_canvas = face_canvas_for_video(
                         clip.width,
@@ -2053,6 +2284,8 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                             state.emit(run_id, payload), loop
                         )
 
+                    if faces_path.exists():
+                        faces_path.unlink()
                     await asyncio.to_thread(
                         run_faces_pass,
                         dest,
@@ -2071,24 +2304,11 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         preview_latent_dir=faces_preview_dir,
                     )
                     if faces_path.is_file():
-                        twin_id = str(uuid.uuid4())
-                        twin = ClipRecord(
-                            id=twin_id,
-                            prompt=clip.prompt,
-                            label="FACES",
-                            video_url=state.clip_url(faces_name),
-                            filename=faces_name,
-                            chain_id=clip.chain_id,
-                            clip_index=clip.clip_index,
-                            mode=clip.mode,
-                            status=RunStatus.DONE.value,
-                            created_at=datetime.now().isoformat(),
-                            bytes=faces_path.stat().st_size,
-                            project_id=clip.project_id,
-                            width=clip.width,
-                            height=clip.height,
-                            generation={
-                                **(clip.generation or {}),
+                        new_faces = _spawn_processed_clip(
+                            state,
+                            clip,
+                            faces_path,
+                            generation_patch={
                                 "faces": {
                                     "enabled": True,
                                     "canvas": fsettings.canvas,
@@ -2096,24 +2316,18 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                                     "seed": fsettings.seed,
                                 },
                             },
+                            seed=fsettings.seed,
                             run_id=run_id,
-                            num_frames=clip.num_frames,
-                            seed=clip.seed,
-                            num_steps=clip.num_steps,
-                            layers=clip.layers,
-                            reuse=clip.reuse,
-                            quality=clip.quality,
                         )
-                        state.clips[twin_id] = twin
-                        faces_twin_id = twin_id
+                        faces_clip_id = new_faces.id
                         await state.emit(
                             run_id,
                             {
                                 "type": "progress",
                                 "phase": "faces_done",
-                                "message": "Faces twin ready",
-                                "clip_id": twin_id,
-                                "video_url": twin.video_url,
+                                "message": "Faces clip ready",
+                                "clip_id": new_faces.id,
+                                "video_url": new_faces.video_url,
                             },
                         )
                 except FaceError as exc:
@@ -2163,14 +2377,14 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                     "bytes": clip.bytes,
                     "filename": clip.filename,
                     "chain_id": clip.chain_id,
-                    "longtake": bool(longtake_twin_id),
-                    "longtake_twin_id": longtake_twin_id,
-                    "redetail": bool(redetail_twin_id),
-                    "redetail_twin_id": redetail_twin_id,
-                    "upframe": bool(upframe_twin_id),
-                    "upframe_twin_id": upframe_twin_id,
-                    "faces": bool(faces_twin_id),
-                    "faces_twin_id": faces_twin_id,
+                    "longtake": bool(longtake_clip_id),
+                    "longtake_clip_id": longtake_clip_id,
+                    "redetail": bool(redetail_clip_id),
+                    "redetail_clip_id": redetail_clip_id,
+                    "upframe": bool(upframe_clip_id),
+                    "upframe_clip_id": upframe_clip_id,
+                    "faces": bool(faces_clip_id),
+                    "faces_clip_id": faces_clip_id,
                 },
             )
             _purge_preview_stem(preview_stem)
@@ -2362,7 +2576,7 @@ def create_app(
             "interpolation": DEFAULT_INTERPOLATION,
             "note": (
                 "Opt-in long-take refine: init-video re-denoise + temporal blend. "
-                "Writes a *_longtake.mp4 twin so the baseline stays for A/B."
+                "Adds a new library clip; the original is kept."
             ),
         }
 
@@ -2381,8 +2595,8 @@ def create_app(
             "denoise_min": MIN_REDETAIL_DENOISE,
             "denoise_max": MAX_REDETAIL_DENOISE,
             "note": (
-                "Opt-in ReDetail: ×2 canvas + H3 init-video refine twin (*_redetail.mp4). "
-                "Independent of Upframe. Heavy — default off."
+                "Opt-in ReDetail: ×2 canvas + H3 init-video refine as a new library clip. "
+                "Original kept. Independent of Upframe. Heavy — default off."
             ),
         }
 
@@ -2396,8 +2610,9 @@ def create_app(
             "multiplier": DEFAULT_MULTIPLIER,
             "weights": weights,
             "note": (
-                "Opt-in Upframe: FILM temporal interpolate (*_upframe.mp4). "
-                "Download film_net_fp16 in Models. Independent of ReDetail."
+                "Opt-in Upframe: real FILM (torch/MPS) temporal interpolate as a new "
+                "library clip. Original kept. Needs film_net_fp16 in Models. "
+                "Independent of ReDetail."
             ),
         }
 
@@ -2429,7 +2644,8 @@ def create_app(
             "denoise_max": MAX_FACE_DENOISE,
             "abstain_px": ABSTAIN_FACE_PX,
             "note": (
-                "Opt-in Faces twin (*_faces.mp4): Continuity MiniMaxH3FacePass. "
+                "Opt-in Faces (Continuity MiniMaxH3FacePass): face refine as a new "
+                "library clip; the original is kept. "
                 "Face crop canvas matches the shot short edge (384–768). "
                 "SAM 3.1 downloads on first Faces run (~3.3 GB MLX). "
                 "Independent of ReDetail / Upframe."
@@ -2572,6 +2788,14 @@ def create_app(
             media_type="application/zip",
             headers={"Content-Disposition": f'attachment; filename="{name}"'},
         )
+
+    @app.get("/api/pass-progress")
+    async def pass_progress():
+        """Latest library-pass status (Upframe / ReDetail / Faces / Long take)."""
+        cur = state._pass_progress
+        if not cur:
+            return {"idle": True}
+        return cur
 
     @app.get("/api/config")
     async def api_config(request: Request):
@@ -2727,7 +2951,7 @@ def create_app(
                 "present": film_ok,
                 "path": str(film) if film else "models/frame_interpolation/film_net_fp16.safetensors",
                 "size_gib": round(_file_gib(film), 3) if film else 0.066,
-                "note": "FILM frame interpolation (~69 MB). Enables Upframe twins.",
+                "note": "FILM frame interpolation (~69 MB). Enables Upframe.",
                 "essential": False,
             },
             {
@@ -3508,13 +3732,103 @@ def create_app(
         state.save_index()
         return {"ok": True, "deleted": clip_id}
 
+    @app.get("/api/clips/{clip_id}/export")
+    async def export_clip_recipe(clip_id: str):
+        """Download a zip with generation settings + referenced media (+ video)."""
+        from fastapi.responses import Response
+
+        from h3_recipe import build_recipe_zip
+
+        clip = state.clips.get(clip_id)
+        if not clip:
+            raise HTTPException(404, "Clip not found")
+        payload = await asyncio.to_thread(
+            build_recipe_zip,
+            clip=clip,
+            generation=clip.generation if isinstance(clip.generation, dict) else None,
+            output_dir=state.output_dir,
+            upload_dir=state.upload_dir,
+            frames_dir=_frames_dir(state.output_dir),
+            include_video=True,
+        )
+        stem = Path(clip.filename or clip_id).stem or clip_id
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in stem)[:48]
+        name = f"h3-recipe-{safe or clip_id[:8]}.zip"
+        return Response(
+            payload,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
+
+    @app.post("/api/clips/import")
+    async def import_clip_recipe(request: Request):
+        """Import a recipe zip into the active project library."""
+        from h3_recipe import import_recipe_zip
+
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None:
+            raise HTTPException(400, "file is required")
+        read = getattr(upload, "read", None)
+        if read is None:
+            raise HTTPException(400, "file is required")
+        raw = await read()
+        if not raw:
+            raise HTTPException(400, "empty archive")
+
+        fields = set(ClipRecord.__dataclass_fields__.keys())
+
+        def make_clip(**kwargs: Any) -> ClipRecord:
+            filtered = {k: v for k, v in kwargs.items() if k in fields}
+            clip = ClipRecord(**filtered)
+            if clip.filename:
+                clip.video_url = state.clip_url(clip.filename)
+                clip.bytes = (
+                    (state.output_dir / clip.filename).stat().st_size
+                    if (state.output_dir / clip.filename).is_file()
+                    else clip.bytes
+                )
+            state.clips[clip.id] = clip
+            return clip
+
+        try:
+            result = await asyncio.to_thread(
+                import_recipe_zip,
+                raw,
+                output_dir=state.output_dir,
+                upload_dir=state.upload_dir,
+                project_id=state.active_project_id,
+                make_clip=make_clip,
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(400, "not a valid zip archive") from exc
+
+        clip = result["clip"]
+        state.save_index()
+        state.touch_project(state.active_project_id)
+        # Best-effort poster so the library thumb isn't black.
+        if clip.filename:
+            video_path = state.output_dir / clip.filename
+            if video_path.is_file():
+                try:
+                    await asyncio.to_thread(ensure_video_poster, video_path)
+                except Exception:  # noqa: BLE001
+                    pass
+        return {
+            "ok": True,
+            "clip": _clip_for_api(state, clip),
+            "generation": result.get("generation"),
+            "had_video": bool(result.get("had_video")),
+        }
+
     @app.delete("/api/chains/{chain_id}")
     async def delete_chain(chain_id: str):
         count = state.delete_chain(chain_id)
         if count == 0:
             raise HTTPException(404, "Chain not found")
         return {"ok": True, "deleted": count, "chain_id": chain_id}
-
     @app.post("/api/runs/{run_id}/cancel")
     async def cancel_run(run_id: str):
         if run_id not in state.runs:
@@ -3858,7 +4172,7 @@ def create_app(
 
     @app.post("/api/clips/{clip_id}/faces")
     async def faces_pass(clip_id: str, body: dict[str, Any] | None = None):
-        """Run Faces repair on a done clip → sibling *_faces.mp4 (A/B)."""
+        """Run Faces on a done clip → new standalone library clip (source kept)."""
         body = body or {}
         clip = state.clips.get(clip_id)
         if not clip or clip.status != "done":
@@ -3879,7 +4193,6 @@ def create_app(
         )
         from h3_paths import console_h3
 
-        # Prefer the clip's own pixels; fall back to a client hint only if unknown.
         canvas = face_canvas_for_video(
             clip.width,
             clip.height,
@@ -3925,7 +4238,7 @@ def create_app(
                 "frames": preview.frames,
             }
 
-        out_name = f"{Path(clip.filename).stem}_faces.mp4"
+        out_name = _unique_pass_filename(state.output_dir, clip.filename, "faces")
         out_path = state.output_dir / out_name
         settings = FacesSettings(
             canvas=canvas, denoise=denoise, seed=seed, abstain=abstain
@@ -3962,20 +4275,35 @@ def create_app(
         def on_progress(phase: str, extra: dict[str, Any]) -> None:
             events.append({"phase": phase, **extra})
             console_h3("faces %s %s", phase, extra.get("message") or "")
+            state.set_pass_progress(phase, extra, kind="faces", clip_id=clip_id)
 
         async with state._submit_lock:
             if state._active_run_id is not None:
                 raise HTTPException(409, "engine is busy")
             state._active_run_id = f"faces:{clip_id}"
+            state.set_pass_progress(
+                "faces_detect",
+                {"message": "Faces…"},
+                kind="faces",
+                clip_id=clip_id,
+            )
             try:
                 from h3_sam import SamDownloadError, download_sam3, sam3_ready
 
                 if not sam3_ready(state.engine.model_dir):
                     console_h3("faces downloading SAM 3.1…")
+                    state.set_pass_progress(
+                        "faces_detect",
+                        {"message": "Downloading SAM 3.1…"},
+                        kind="faces",
+                        clip_id=clip_id,
+                    )
                     try:
                         await asyncio.to_thread(download_sam3, state.engine.model_dir)
                     except SamDownloadError as exc:
                         raise HTTPException(400, str(exc)) from exc
+                if out_path.exists():
+                    out_path.unlink()
                 await asyncio.to_thread(
                     run_faces_pass,
                     path,
@@ -3993,6 +4321,8 @@ def create_app(
                     layers=face_layers,
                     reuse=face_reuse,
                 )
+                if not out_path.is_file():
+                    raise FaceError("Faces output missing")
             except FaceError as exc:
                 raise HTTPException(400, str(exc)) from exc
             except Exception as exc:
@@ -4000,51 +4330,37 @@ def create_app(
                 raise HTTPException(500, f"faces pass failed: {exc}") from exc
             finally:
                 state._active_run_id = None
+                state.clear_pass_progress()
 
-        twin_id = str(uuid.uuid4())
-        twin = ClipRecord(
-            id=twin_id,
-            prompt=clip.prompt,
-            label="FACES",
-            video_url=state.clip_url(out_name),
-            filename=out_name,
-            chain_id=clip.chain_id,
-            clip_index=clip.clip_index,
-            mode=clip.mode,
-            status=RunStatus.DONE.value,
-            created_at=datetime.now().isoformat(),
-            bytes=out_path.stat().st_size if out_path.is_file() else None,
-            project_id=clip.project_id,
-            width=clip.width,
-            height=clip.height,
-            generation={
-                **(gen or {}),
+        new_clip = _spawn_processed_clip(
+            state,
+            clip,
+            out_path,
+            generation_patch={
                 "faces": {
                     "enabled": True,
                     "canvas": canvas,
                     "denoise": denoise,
                     "seed": seed,
-                    "source_clip_id": clip.id,
                 },
             },
-            num_frames=clip.num_frames,
             seed=seed,
-            num_steps=clip.num_steps,
-            layers=clip.layers,
-            reuse=clip.reuse,
-            quality=clip.quality,
         )
-        state.clips[twin_id] = twin
+        if out_path.is_file() and media_available():
+            try:
+                await asyncio.to_thread(ensure_video_poster, out_path)
+            except Exception:  # noqa: BLE001
+                pass
         state.save_index()
         return {
             "ok": True,
-            "clip": _clip_for_api(state, twin),
+            "clip": _clip_for_api(state, new_clip),
             "events": events[-20:],
         }
 
     @app.post("/api/clips/{clip_id}/redetail")
     async def redetail_pass(clip_id: str, body: dict[str, Any] | None = None):
-        """Run ReDetail on a done clip → sibling *_redetail.mp4 (A/B)."""
+        """Run ReDetail on a done clip → new standalone library clip (source kept)."""
         body = body or {}
         clip = state.clips.get(clip_id)
         if not clip or clip.status != "done":
@@ -4072,7 +4388,7 @@ def create_app(
             )
         )
         seed = int(body.get("seed") if body.get("seed") is not None else (clip.seed or 42))
-        out_name = f"{Path(clip.filename).stem}_redetail.mp4"
+        out_name = _unique_pass_filename(state.output_dir, clip.filename, "redetail")
         out_path = state.output_dir / out_name
         settings = RedetailSettings(denoise=denoise, seed=seed)
         prompt = str(body.get("prompt") or clip.prompt or "detailed cinematic shot")
@@ -4092,11 +4408,23 @@ def create_app(
             },
         )
 
+        def on_rd_progress(phase: str, extra: dict[str, Any]) -> None:
+            console_h3("redetail %s %s", phase, extra.get("message") or "")
+            state.set_pass_progress(phase, extra, kind="redetail", clip_id=clip_id)
+
         async with state._submit_lock:
             if state._active_run_id is not None:
                 raise HTTPException(409, "engine is busy")
             state._active_run_id = f"redetail:{clip_id}"
+            state.set_pass_progress(
+                "redetail_upscale",
+                {"message": "ReDetail · ×2 refine…"},
+                kind="redetail",
+                clip_id=clip_id,
+            )
             try:
+                if out_path.exists():
+                    out_path.unlink()
                 await asyncio.to_thread(
                     run_redetail,
                     path,
@@ -4104,9 +4432,7 @@ def create_app(
                     prompt=prompt,
                     engine=state.engine,
                     settings=settings,
-                    on_progress=lambda phase, extra: console_h3(
-                        "redetail %s %s", phase, extra.get("message") or ""
-                    ),
+                    on_progress=on_rd_progress,
                     refs=rd_refs,
                     loras=rd_loras,
                     quality=str(
@@ -4118,10 +4444,13 @@ def create_app(
                     layers=int(body["layers"]) if body.get("layers") is not None else clip.layers,
                     reuse=1,
                 )
+                if not out_path.is_file():
+                    raise RedetailError("ReDetail output missing")
             except RedetailError as exc:
                 raise HTTPException(400, str(exc)) from exc
             finally:
                 state._active_run_id = None
+                state.clear_pass_progress()
 
         from h3_media import redetail_output_size
 
@@ -4129,40 +4458,27 @@ def create_app(
             tw, th = redetail_output_size(int(clip.width or 512), int(clip.height or 512))
         except Exception:
             tw, th = clip.width, clip.height
-        twin_id = str(uuid.uuid4())
-        twin = ClipRecord(
-            id=twin_id,
-            prompt=clip.prompt,
-            label="REDETAIL",
-            video_url=state.clip_url(out_name),
-            filename=out_name,
-            chain_id=clip.chain_id,
-            clip_index=clip.clip_index,
-            mode=clip.mode,
-            status=RunStatus.DONE.value,
-            created_at=datetime.now().isoformat(),
-            bytes=out_path.stat().st_size if out_path.is_file() else None,
-            project_id=clip.project_id,
-            width=tw,
-            height=th,
-            generation={
-                **(gen or {}),
+        new_clip = _spawn_processed_clip(
+            state,
+            clip,
+            out_path,
+            generation_patch={
                 "redetail": {"enabled": True, "denoise": denoise, "seed": seed},
             },
-            num_frames=clip.num_frames,
-            seed=clip.seed,
-            num_steps=clip.num_steps,
-            layers=clip.layers,
-            reuse=clip.reuse,
-            quality=clip.quality,
+            width=tw,
+            height=th,
         )
-        state.clips[twin_id] = twin
+        if out_path.is_file() and media_available():
+            try:
+                await asyncio.to_thread(ensure_video_poster, out_path)
+            except Exception:  # noqa: BLE001
+                pass
         state.save_index()
-        return {"ok": True, "clip": asdict(twin)}
+        return {"ok": True, "clip": _clip_for_api(state, new_clip)}
 
     @app.post("/api/clips/{clip_id}/upframe")
     async def upframe_pass(clip_id: str, body: dict[str, Any] | None = None):
-        """Run Upframe (FILM) on a done clip → sibling *_upframe.mp4 (A/B)."""
+        """Run Upframe (FILM) on a done clip → new standalone library clip (source kept)."""
         body = body or {}
         clip = state.clips.get(clip_id)
         if not clip or clip.status != "done":
@@ -4175,17 +4491,31 @@ def create_app(
 
         from h3_upframe import DEFAULT_MULTIPLIER, UpframeError, UpframeSettings, run_upframe
 
-        out_name = f"{Path(clip.filename).stem}_upframe.mp4"
+        out_name = _unique_pass_filename(state.output_dir, clip.filename, "upframe")
         out_path = state.output_dir / out_name
         settings = UpframeSettings(
             multiplier=int(body.get("multiplier") or DEFAULT_MULTIPLIER)
         )
 
+        def on_uf_progress(phase: str, extra: dict[str, Any]) -> None:
+            from h3_paths import console_h3
+
+            console_h3("upframe %s %s", phase, extra.get("message") or "")
+            state.set_pass_progress(phase, extra, kind="upframe", clip_id=clip_id)
+
         async with state._submit_lock:
             if state._active_run_id is not None:
                 raise HTTPException(409, "engine is busy")
             state._active_run_id = f"upframe:{clip_id}"
+            state.set_pass_progress(
+                "upframe_run",
+                {"message": f"Upframe · ×{settings.multiplier}…"},
+                kind="upframe",
+                clip_id=clip_id,
+            )
             try:
+                if out_path.exists():
+                    out_path.unlink()
                 await asyncio.to_thread(
                     run_upframe,
                     path,
@@ -4193,46 +4523,35 @@ def create_app(
                     settings=settings,
                     model_dir=state.engine.model_dir,
                     require_weights=True,
+                    on_progress=on_uf_progress,
                 )
+                if not out_path.is_file():
+                    raise UpframeError("Upframe output missing")
             except UpframeError as exc:
                 raise HTTPException(400, str(exc)) from exc
             finally:
                 state._active_run_id = None
+                state.clear_pass_progress()
 
-        twin_id = str(uuid.uuid4())
-        twin = ClipRecord(
-            id=twin_id,
-            prompt=clip.prompt,
-            label="UPFRAME",
-            video_url=state.clip_url(out_name),
-            filename=out_name,
-            chain_id=clip.chain_id,
-            clip_index=clip.clip_index,
-            mode=clip.mode,
-            status=RunStatus.DONE.value,
-            created_at=datetime.now().isoformat(),
-            bytes=out_path.stat().st_size if out_path.is_file() else None,
-            project_id=clip.project_id,
-            width=clip.width,
-            height=clip.height,
-            generation={
-                **(clip.generation if isinstance(clip.generation, dict) else {}),
+        new_clip = _spawn_processed_clip(
+            state,
+            clip,
+            out_path,
+            generation_patch={
                 "upframe": {"enabled": True, "multiplier": settings.multiplier},
             },
-            num_frames=clip.num_frames,
-            seed=clip.seed,
-            num_steps=clip.num_steps,
-            layers=clip.layers,
-            reuse=clip.reuse,
-            quality=clip.quality,
         )
-        state.clips[twin_id] = twin
+        if out_path.is_file() and media_available():
+            try:
+                await asyncio.to_thread(ensure_video_poster, out_path)
+            except Exception:  # noqa: BLE001
+                pass
         state.save_index()
-        return {"ok": True, "clip": asdict(twin)}
+        return {"ok": True, "clip": _clip_for_api(state, new_clip)}
 
     @app.post("/api/clips/{clip_id}/longtake")
     async def longtake_pass(clip_id: str, body: dict[str, Any] | None = None):
-        """Run Long take refine on a done clip → sibling *_longtake.mp4 (A/B)."""
+        """Run Long take on a done clip → new standalone library clip (source kept)."""
         body = body or {}
         clip = state.clips.get(clip_id)
         if not clip or clip.status != "done":
@@ -4264,7 +4583,7 @@ def create_app(
         seed = int(body.get("seed") if body.get("seed") is not None else (clip.seed or 42))
         keyframes = str(body.get("keyframes") or DEFAULT_KEYFRAMES)
         interpolation = str(body.get("interpolation") or DEFAULT_INTERPOLATION)
-        out_name = f"{Path(clip.filename).stem}_longtake.mp4"
+        out_name = _unique_pass_filename(state.output_dir, clip.filename, "longtake")
         out_path = state.output_dir / out_name
         settings = LongTakeSettings(
             denoise=denoise,
@@ -4305,12 +4624,21 @@ def create_app(
         def on_progress(phase: str, extra: dict[str, Any]) -> None:
             events.append({"phase": phase, **extra})
             console_h3("longtake %s %s", phase, extra.get("message") or "")
+            state.set_pass_progress(phase, extra, kind="longtake", clip_id=clip_id)
 
         async with state._submit_lock:
             if state._active_run_id is not None:
                 raise HTTPException(409, "engine is busy")
             state._active_run_id = f"longtake:{clip_id}"
+            state.set_pass_progress(
+                "longtake_refine",
+                {"message": "Long take refine…"},
+                kind="longtake",
+                clip_id=clip_id,
+            )
             try:
+                if out_path.exists():
+                    out_path.unlink()
                 await asyncio.to_thread(
                     run_longtake_refine,
                     path,
@@ -4326,6 +4654,8 @@ def create_app(
                     layers=lt_layers,
                     reuse=lt_reuse,
                 )
+                if not out_path.is_file():
+                    raise LongTakeError("Long take output missing")
             except LongTakeError as exc:
                 raise HTTPException(400, str(exc)) from exc
             except Exception as exc:
@@ -4333,41 +4663,27 @@ def create_app(
                 raise HTTPException(500, f"longtake pass failed: {exc}") from exc
             finally:
                 state._active_run_id = None
+                state.clear_pass_progress()
 
-        new_id = str(uuid.uuid4())
-        ts = datetime.now().isoformat()
-        new_clip = ClipRecord(
-            id=new_id,
-            prompt=f"[LongTake] {clip.prompt}",
-            label="LongTake",
-            video_url=state.clip_url(out_name),
-            filename=out_name,
-            chain_id=clip.chain_id,
-            clip_index=clip.clip_index,
-            mode=clip.mode,
-            status=RunStatus.DONE.value,
-            created_at=ts,
-            num_frames=clip.num_frames,
-            width=clip.width,
-            height=clip.height,
-            seed=seed,
-            project_id=clip.project_id,
-            quality=clip.quality,
-            num_steps=clip.num_steps,
-            layers=clip.layers,
-            reuse=clip.reuse,
-            bytes=out_path.stat().st_size if out_path.is_file() else None,
-            generation={
-                **(clip.generation or {}),
+        new_clip = _spawn_processed_clip(
+            state,
+            clip,
+            out_path,
+            generation_patch={
                 "longtake": {
+                    "enabled": True,
                     "denoise": denoise,
                     "keyframes": keyframes,
                     "seed": seed,
-                    "source_clip_id": clip.id,
                 },
             },
+            seed=seed,
         )
-        state.clips[new_id] = new_clip
+        if out_path.is_file() and media_available():
+            try:
+                await asyncio.to_thread(ensure_video_poster, out_path)
+            except Exception:  # noqa: BLE001
+                pass
         state.save_index()
         return {
             "ok": True,

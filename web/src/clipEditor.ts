@@ -11,6 +11,43 @@ export function clipDisplayPrompt(prompt: string): string {
   return prompt.replace(/\s*\(×\d+ merged\)\s*$/i, "").trim();
 }
 
+const PASS_LABELS = ["UPFRAME", "REDETAIL", "LONGTAKE", "FACES", "BASE"] as const;
+
+function generationPassEnabled(gen: Record<string, unknown> | null | undefined, key: string): boolean {
+  if (!gen) return false;
+  const v = gen[key];
+  if (v === true) return true;
+  if (v && typeof v === "object" && (v as { enabled?: boolean }).enabled) return true;
+  return false;
+}
+
+/** Library badge for processed clips (Upframe / ReDetail / …), including older CURRENT-labeled ones. */
+export function clipDisplayLabel(clip: Clip): string {
+  const raw = (clip.label || "").trim();
+  const upper = raw.toUpperCase().replace(/\s+/g, "");
+  if ((PASS_LABELS as readonly string[]).includes(upper)) return upper;
+  if (upper === "LONGTAKE" || raw.toUpperCase() === "LONG TAKE") return "LONGTAKE";
+
+  const g = clip.generation;
+  if (g && typeof g === "object") {
+    const pass = typeof g.pass === "string" ? g.pass.trim().toUpperCase() : "";
+    if ((PASS_LABELS as readonly string[]).includes(pass)) return pass;
+    if (generationPassEnabled(g, "upframe")) return "UPFRAME";
+    if (generationPassEnabled(g, "redetail")) return "REDETAIL";
+    if (generationPassEnabled(g, "longtake")) return "LONGTAKE";
+    if (generationPassEnabled(g, "faces")) return "FACES";
+  }
+
+  // Filename suffix from prior builds (stem_upframe.mp4).
+  const name = (clip.filename || "").toLowerCase();
+  if (name.includes("_upframe")) return "UPFRAME";
+  if (name.includes("_redetail")) return "REDETAIL";
+  if (name.includes("_longtake")) return "LONGTAKE";
+  if (name.includes("_faces")) return "FACES";
+
+  return raw || "CURRENT";
+}
+
 export function resolutionIdForClip(clip: Clip, config: Config | null): string {
   if (!clip.width || !clip.height) return "512x512";
   const presets = config?.resolution_presets ?? [];
@@ -57,12 +94,35 @@ export interface GenerationSnapshot {
   tokenReduction?: boolean;
   ssdStreaming?: boolean;
   upscale?: boolean;
-  /** Opt-in ReDetail twin (independent of upframe). */
+  /** Opt-in ReDetail → new library clip (independent of upframe). */
   redetail?: boolean;
-  /** Opt-in Upframe twin (independent of redetail). */
+  redetailDenoise?: number;
+  redetailSeed?: number;
+  /** Opt-in Upframe → new library clip (independent of redetail). */
   upframe?: boolean;
-  /** Opt-in Faces twin (independent of redetail / upframe). */
+  upframeMultiplier?: number;
+  /** Opt-in long-take refine → new library clip. */
+  longtake?: boolean;
+  longtakeDenoise?: number;
+  longtakeKeyframes?: string;
+  longtakeSeed?: number;
+  longtakeInterpolation?: string;
+  /** Opt-in Faces refine → new standalone library clip (source kept). */
   faces?: boolean;
+  facesDenoise?: number;
+  facesSeed?: number;
+  facesCanvas?: number;
+}
+
+function passObj(raw: unknown): Record<string, unknown> | null {
+  if (raw && typeof raw === "object") return raw as Record<string, unknown>;
+  return null;
+}
+
+function passEnabledFlag(raw: unknown): boolean {
+  if (raw === true) return true;
+  const o = passObj(raw);
+  return Boolean(o && o.enabled);
 }
 
 export interface ClipEditorSnapshot {
@@ -179,18 +239,60 @@ export function generationFromClip(
       tokenReduction: Boolean(g.tokenReduction ?? g.token_reduction),
       ssdStreaming: Boolean(g.ssdStreaming ?? g.ssd_streaming),
       upscale: Boolean(g.upscale),
-      redetail: Boolean(
-        g.redetail === true
-          || (typeof g.redetail === "object" && g.redetail && (g.redetail as { enabled?: boolean }).enabled),
-      ),
-      upframe: Boolean(
-        g.upframe === true
-          || (typeof g.upframe === "object" && g.upframe && (g.upframe as { enabled?: boolean }).enabled),
-      ),
-      faces: Boolean(
-        g.faces === true
-          || (typeof g.faces === "object" && g.faces && (g.faces as { enabled?: boolean }).enabled),
-      ),
+      redetail: passEnabledFlag(g.redetail),
+      redetailDenoise: (() => {
+        const o = passObj(g.redetail);
+        const n = Number(o?.denoise ?? g.redetailDenoise ?? g.redetail_denoise);
+        return Number.isFinite(n) ? n : undefined;
+      })(),
+      redetailSeed: (() => {
+        const o = passObj(g.redetail);
+        const n = Number(o?.seed ?? g.redetailSeed ?? g.redetail_seed);
+        return Number.isFinite(n) ? n : undefined;
+      })(),
+      upframe: passEnabledFlag(g.upframe),
+      upframeMultiplier: (() => {
+        const o = passObj(g.upframe);
+        const n = Number(o?.multiplier ?? g.upframeMultiplier ?? g.upframe_multiplier);
+        return Number.isFinite(n) && n >= 2 ? Math.round(n) : undefined;
+      })(),
+      longtake: passEnabledFlag(g.longtake),
+      longtakeDenoise: (() => {
+        const o = passObj(g.longtake);
+        const n = Number(o?.denoise ?? g.longtakeDenoise ?? g.longtake_denoise);
+        return Number.isFinite(n) ? n : undefined;
+      })(),
+      longtakeKeyframes: (() => {
+        const o = passObj(g.longtake);
+        const s = o?.keyframes ?? g.longtakeKeyframes ?? g.longtake_keyframes;
+        return typeof s === "string" && s.trim() ? s : undefined;
+      })(),
+      longtakeSeed: (() => {
+        const o = passObj(g.longtake);
+        const n = Number(o?.seed ?? g.longtakeSeed ?? g.longtake_seed);
+        return Number.isFinite(n) ? n : undefined;
+      })(),
+      longtakeInterpolation: (() => {
+        const o = passObj(g.longtake);
+        const s = o?.interpolation ?? g.longtakeInterpolation ?? g.longtake_interpolation;
+        return typeof s === "string" && s.trim() ? s : undefined;
+      })(),
+      faces: passEnabledFlag(g.faces),
+      facesDenoise: (() => {
+        const o = passObj(g.faces);
+        const n = Number(o?.denoise ?? g.facesDenoise ?? g.faces_denoise);
+        return Number.isFinite(n) ? n : undefined;
+      })(),
+      facesSeed: (() => {
+        const o = passObj(g.faces);
+        const n = Number(o?.seed ?? g.facesSeed ?? g.faces_seed);
+        return Number.isFinite(n) ? n : undefined;
+      })(),
+      facesCanvas: (() => {
+        const o = passObj(g.faces);
+        const n = Number(o?.canvas ?? g.facesCanvas ?? g.faces_canvas);
+        return Number.isFinite(n) ? n : undefined;
+      })(),
     };
   }
 
@@ -207,6 +309,7 @@ export function generationFromClip(
     ssdStreaming: false,
     redetail: false,
     upframe: false,
+    longtake: false,
     faces: false,
   };
 }
@@ -248,7 +351,21 @@ export function buildGenerationSnapshot(scene: Pick<
   | "clipMultiplier"
   | "tokenReduction"
   | "ssdStreaming"
-> & { upscale?: boolean; redetail?: boolean; upframe?: boolean; faces?: boolean }): GenerationSnapshot {
+  | "longtake"
+  | "longtakeDenoise"
+  | "longtakeKeyframes"
+  | "longtakeSeed"
+  | "longtakeInterpolation"
+  | "redetail"
+  | "redetailDenoise"
+  | "redetailSeed"
+  | "upframe"
+  | "upframeMultiplier"
+  | "faces"
+  | "facesDenoise"
+  | "facesSeed"
+  | "facesCanvas"
+> & { upscale?: boolean }): GenerationSnapshot {
   return {
     prompt: scene.prompt,
     mode: scene.mode,
@@ -276,7 +393,18 @@ export function buildGenerationSnapshot(scene: Pick<
     ssdStreaming: scene.ssdStreaming,
     upscale: scene.upscale,
     redetail: scene.redetail,
+    redetailDenoise: scene.redetailDenoise,
+    redetailSeed: scene.redetailSeed,
     upframe: scene.upframe,
+    upframeMultiplier: scene.upframeMultiplier,
+    longtake: scene.longtake,
+    longtakeDenoise: scene.longtakeDenoise,
+    longtakeKeyframes: scene.longtakeKeyframes,
+    longtakeSeed: scene.longtakeSeed,
+    longtakeInterpolation: scene.longtakeInterpolation,
     faces: scene.faces,
+    facesDenoise: scene.facesDenoise,
+    facesSeed: scene.facesSeed,
+    facesCanvas: scene.facesCanvas,
   };
 }

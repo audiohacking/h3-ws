@@ -2,7 +2,7 @@
 
 v1 uses a high-quality pixel bridge into ``--init-video`` at 2× canvas (learned
 latent ×2 weights are optional under ``models/latent_upscale/`` for a later
-swap). Opt-in only; writes a ``*_redetail.mp4`` twin beside the baseline.
+swap). Opt-in only; caller writes a new output file (source kept).
 """
 
 from __future__ import annotations
@@ -175,22 +175,36 @@ def run_redetail(
         if on_progress:
             on_progress(phase, extra)
 
-    emit("redetail_upscale", message="ReDetail · scaling to ×2 canvas…")
+    emit("redetail_upscale", message="ReDetail · decoding source…")
     frames, width, height = decode_clip_rgb(video_path)
     n = int(frames.shape[0])
     out_w, out_h = redetail_output_size(width, height)
+    emit(
+        "redetail_upscale",
+        message=f"ReDetail · scaling {width}×{height} → {out_w}×{out_h}…",
+        index=0,
+        total=2,
+    )
     up = _upscale_rgb(frames, out_w, out_h)
 
     work = Path(tempfile.mkdtemp(prefix="h3_redetail_"))
     try:
         init_mp4 = work / "init_x2.mp4"
         refined_mp4 = work / "refined_x2.mp4"
+        emit(
+            "redetail_upscale",
+            message=f"ReDetail · writing ×2 init ({out_w}×{out_h})…",
+            index=1,
+            total=2,
+        )
         write_rgb_mp4(up, init_mp4, fps=FPS)
 
         refine_steps = int(steps) if steps is not None else 8
         emit(
             "redetail_refine",
             message=f"ReDetail · refine {out_w}×{out_h} · denoise {denoise:.2f}",
+            index=0,
+            total=refine_steps,
         )
 
         req = GenerateRequest(
@@ -221,11 +235,17 @@ def run_redetail(
         )
 
         def _refine_progress(mp: dict[str, Any]) -> None:
-            emit(
-                "redetail_refine",
-                message=f"ReDetail · refine {out_w}×{out_h} · denoise {denoise:.2f}",
-                model_progress=mp,
-            )
+            # Nested H3 denoise — surface step/total so the UI bar can move.
+            extra: dict[str, Any] = {
+                "message": f"ReDetail · refine {out_w}×{out_h} · denoise {denoise:.2f}",
+                "model_progress": mp,
+            }
+            if isinstance(mp, dict):
+                if mp.get("step") is not None:
+                    extra["index"] = mp["step"]
+                if mp.get("total") is not None:
+                    extra["total"] = mp["total"]
+            emit("redetail_refine", **extra)
 
         engine.generate(req, on_progress=_refine_progress)
 

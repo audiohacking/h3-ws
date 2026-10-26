@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { buildGenerationSnapshot, clipDisplayPrompt, composerIsEmpty, generationFromClip } from "./clipEditor";
+import {
+  buildGenerationSnapshot,
+  clipDisplayLabel,
+  clipDisplayPrompt,
+  composerIsEmpty,
+  generationFromClip,
+} from "./clipEditor";
 import { applyProgressEvent, isPostPassPhase } from "./progress";
 import { captureVideoFrame, formatVideoTime } from "./frameCapture";
 import { refsAreValid } from "./components/composer/RefListEnhanced";
@@ -25,6 +31,11 @@ import { isTurboPreset, pickDefaultTurboId, recipeScaleForTurbo } from "./compon
 import { FeaturesPopup } from "./components/composer/FeaturesPopup";
 import { DebugModal } from "./components/DebugModal";
 import { RefinePanel } from "./components/composer/RefinePanel";
+import {
+  LibraryPassPanel,
+  type LibraryPassKind,
+  type LibraryPassParams,
+} from "./components/library/LibraryPassPanel";
 import { ProjectSwitcher, type Project } from "./components/ProjectSwitcher";
 import { compilePrompt, handleForRef } from "./compile";
 import {
@@ -191,9 +202,15 @@ function preserveBlobVideoUrls(prev: Clip[], incoming: Clip[]): Clip[] {
 }
 
 function mergeClips(prev: Clip[], incoming: Clip[]): Clip[] {
-  const byId = new Map(prev.map((c) => [c.id, c]));
-  for (const c of incoming) byId.set(c.id, c);
-  return Array.from(byId.values());
+  // Server list is membership truth — deleted clips must not linger from `prev`.
+  // Keep local-only queued/running cards that may not be in the fetch yet.
+  const incomingIds = new Set(incoming.map((c) => c.id));
+  const localPending = prev.filter(
+    (c) =>
+      !incomingIds.has(c.id)
+      && (c.status === "queued" || c.status === "running"),
+  );
+  return [...preserveBlobVideoUrls(prev, incoming), ...localPending];
 }
 
 function replaceChainClips(prev: Clip[], chainId: string, chainClips: Clip[]): Clip[] {
@@ -405,6 +422,7 @@ export default function App() {
   const [longtakeDenoise, setLongtakeDenoise] = useState(0.55);
   const [longtakeKeyframes, setLongtakeKeyframes] = useState("0:0, 22:0, 44:1");
   const [longtakeSeed, setLongtakeSeed] = useState(42);
+  const [longtakeInterpolation, setLongtakeInterpolation] = useState("linear");
   const redetailEnabled = resolutionCanvas.upscale === "redetail";
   const setRedetailEnabled = useCallback((on: boolean) => {
     setResolutionCanvas((prev) => ({
@@ -412,13 +430,21 @@ export default function App() {
       upscale: on ? "redetail" : "two_pass",
     }));
   }, []);
+  const [redetailDenoise, setRedetailDenoise] = useState(0.45);
+  const [redetailSeed, setRedetailSeed] = useState(42);
   const [upframeEnabled, setUpframeEnabled] = useState(false);
+  const [upframeMultiplier, setUpframeMultiplier] = useState(2);
   const [facesEnabled, setFacesEnabled] = useState(false);
   /** Derived from shot short edge — not an independent dial. */
   const facesCanvas = faceCanvasForVideo(resolutionCanvas.shortEdge);
   const [facesDenoise, setFacesDenoise] = useState(0.45);
   const [facesSeed, setFacesSeed] = useState(42);
   const [libraryPassBusyId, setLibraryPassBusyId] = useState<string | null>(null);
+  const [libraryPassBusyKind, setLibraryPassBusyKind] = useState<LibraryPassKind | null>(null);
+  const [libraryPassRequest, setLibraryPassRequest] = useState<{
+    clip: Clip;
+    kind: LibraryPassKind;
+  } | null>(null);
   const [loraModalOpen, setLoraModalOpen] = useState(false);
   const [sceneQueue, setSceneQueue] = useState<SceneQueueItem[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
@@ -453,8 +479,13 @@ export default function App() {
   const [refineOriginal, setRefineOriginal] = useState("");
   const playerVideoRef = useRef<HTMLVideoElement>(null);
   const runEventSourceRef = useRef<EventSource | null>(null);
+  const recipeImportRef = useRef<HTMLInputElement>(null);
   const clipsRef = useRef<Clip[]>([]);
   clipsRef.current = clips;
+  /** True when the composer holds work that has never completed a generate
+   *  (protect from accidental library overwrite). Cleared after a successful
+   *  run or when loading a library recipe that is already persisted. */
+  const composerUnexecutedRef = useRef(false);
 
   const inProgressClips = useMemo(
     () =>
@@ -465,14 +496,26 @@ export default function App() {
     [clips],
   );
   const pipelineActive = busy || inProgressClips.length > 0;
-  const libraryClips = useMemo(
-    () =>
-      clips
-        .filter((c) => c.status === "done" && c.video_url)
-        .slice()
-        .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")),
-    [clips],
-  );
+  const libraryClips = useMemo(() => {
+    const done = clips.filter(
+      (c) =>
+        c.status === "done"
+        && (Boolean(c.video_url) || Boolean(c.generation)),
+    );
+    // Hide generate-time BASE intermediates once a refine pass superseded them.
+    // Library-run passes keep both cards (source stays CURRENT / unlabeled).
+    const visible = done.filter((c) => {
+      const gen = c.generation;
+      if (!gen || typeof gen !== "object") return true;
+      const g = gen as Record<string, unknown>;
+      if (!g.superseded_by) return true;
+      const label = clipDisplayLabel(c);
+      return label !== "BASE" && label !== "CURRENT";
+    });
+    return visible
+      .slice()
+      .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  }, [clips]);
   const framesNewest = useMemo(
     () => [...frameLibrary].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")),
     [frameLibrary],
@@ -558,6 +601,15 @@ export default function App() {
           if (cfg.longtake) {
             setLongtakeDenoise(cfg.longtake.denoise);
             if (cfg.longtake.keyframes) setLongtakeKeyframes(cfg.longtake.keyframes);
+            if (cfg.longtake.interpolation) {
+              setLongtakeInterpolation(
+                cfg.longtake.interpolation === "smooth" ? "smooth" : "linear",
+              );
+            }
+          }
+          if (cfg.redetail?.denoise != null) setRedetailDenoise(cfg.redetail.denoise);
+          if (cfg.upframe?.multiplier != null) {
+            setUpframeMultiplier(Math.max(2, Math.round(cfg.upframe.multiplier)));
           }
           if (cfg.faces) {
             setFacesDenoise(cfg.faces.denoise);
@@ -629,9 +681,11 @@ export default function App() {
         return;
       }
       const occupied = !composerIsEmpty({ prompt, refs, imagePath, endImagePath });
-      if (occupied) {
+      // Only protect drafts that have never finished a generate — executed
+      // prompts already live in the library as recipes.
+      if (occupied && composerUnexecutedRef.current) {
         const ok = window.confirm(
-          "Replace the current composer with this clip’s settings (prompt, references, mode, sampler)?",
+          "Replace the current unsent prompt with this clip’s settings? Your draft has not been generated yet.",
         );
         if (!ok) {
           // Still select for playback without stomping the composer.
@@ -675,11 +729,60 @@ export default function App() {
       setTokenReduction(Boolean(snap.tokenReduction));
       setSsdStreaming(Boolean(snap.ssdStreaming));
       setRedetailEnabled(Boolean(snap.redetail));
+      if (snap.redetailDenoise != null) setRedetailDenoise(snap.redetailDenoise);
+      if (snap.redetailSeed != null) setRedetailSeed(snap.redetailSeed);
       setUpframeEnabled(Boolean(snap.upframe));
+      if (snap.upframeMultiplier != null) setUpframeMultiplier(snap.upframeMultiplier);
+      setLongtakeEnabled(Boolean(snap.longtake));
+      if (snap.longtakeDenoise != null) setLongtakeDenoise(snap.longtakeDenoise);
+      if (snap.longtakeKeyframes) setLongtakeKeyframes(snap.longtakeKeyframes);
+      if (snap.longtakeSeed != null) setLongtakeSeed(snap.longtakeSeed);
+      if (snap.longtakeInterpolation) {
+        setLongtakeInterpolation(
+          snap.longtakeInterpolation === "smooth" ? "smooth" : "linear",
+        );
+      }
       setFacesEnabled(Boolean(snap.faces));
+      if (snap.facesDenoise != null) setFacesDenoise(snap.facesDenoise);
+      if (snap.facesSeed != null) setFacesSeed(snap.facesSeed);
+      composerUnexecutedRef.current = false;
     },
-    [config, selectClipId, prompt, refs, imagePath, endImagePath],
+    [config, selectClipId, prompt, refs, imagePath, endImagePath, applyResolutionId, setRedetailEnabled],
   );
+
+  // Nested ReDetail / Faces / … also publish /api/pass-progress — poll while busy
+  // so the player overlay keeps moving even if an SSE tick is sparse.
+  useEffect(() => {
+    if (!busy && !libraryPassBusyId) return;
+    const id = window.setInterval(() => {
+      void fetch(`${API}/api/pass-progress`)
+        .then((r) => r.json())
+        .then((d: {
+          idle?: boolean;
+          message?: string;
+          phase?: string;
+          step?: number;
+          total?: number;
+          pct?: number;
+        }) => {
+          if (d.idle || !d.message) return;
+          setProgress((prev) =>
+            applyProgressEvent(prev, {
+              type: "progress",
+              phase: d.phase || prev?.phase || "redetail_refine",
+              message: d.message,
+              step: d.step,
+              total: d.total,
+              pct: d.pct,
+            }),
+          );
+        })
+        .catch(() => {
+          /* ignore */
+        });
+    }, 500);
+    return () => window.clearInterval(id);
+  }, [busy, libraryPassBusyId]);
 
   // Hydrate composer from `?id=` once clips+config are ready; ignore missing ids.
   useEffect(() => {
@@ -955,9 +1058,20 @@ export default function App() {
       autoconcat: clipMultiplier > 1,
       tokenReduction,
       ssdStreaming,
+      longtake: longtakeEnabled,
+      longtakeDenoise,
+      longtakeKeyframes,
+      longtakeSeed,
+      longtakeInterpolation,
       redetail: redetailEnabled,
+      redetailDenoise,
+      redetailSeed,
       upframe: upframeEnabled,
+      upframeMultiplier,
       faces: facesEnabled,
+      facesDenoise,
+      facesSeed,
+      facesCanvas,
       status: "pending",
       createdAt: new Date().toISOString(),
     };
@@ -995,9 +1109,23 @@ export default function App() {
     // autocontinue/autoconcat are derived from clipMultiplier
     setTokenReduction(scene.tokenReduction);
     setSsdStreaming(scene.ssdStreaming);
+    setLongtakeEnabled(Boolean(scene.longtake));
+    if (scene.longtakeDenoise != null) setLongtakeDenoise(scene.longtakeDenoise);
+    if (scene.longtakeKeyframes) setLongtakeKeyframes(scene.longtakeKeyframes);
+    if (scene.longtakeSeed != null) setLongtakeSeed(scene.longtakeSeed);
+    if (scene.longtakeInterpolation) {
+      setLongtakeInterpolation(
+        scene.longtakeInterpolation === "smooth" ? "smooth" : "linear",
+      );
+    }
     setRedetailEnabled(Boolean(scene.redetail));
+    if (scene.redetailDenoise != null) setRedetailDenoise(scene.redetailDenoise);
+    if (scene.redetailSeed != null) setRedetailSeed(scene.redetailSeed);
     setUpframeEnabled(Boolean(scene.upframe));
+    if (scene.upframeMultiplier != null) setUpframeMultiplier(scene.upframeMultiplier);
     setFacesEnabled(Boolean(scene.faces));
+    if (scene.facesDenoise != null) setFacesDenoise(scene.facesDenoise);
+    if (scene.facesSeed != null) setFacesSeed(scene.facesSeed);
   }
 
   function clearSceneQueue() {
@@ -1315,20 +1443,139 @@ export default function App() {
   }
 
   async function deleteClip(clip: Clip) {
-    await fetch(`${API}/api/clips/${clip.id}`, { method: "DELETE" });
-    setClips((prev) => {
+    const preview = clipDisplayPrompt(clip.prompt).slice(0, 80) || clip.label || clip.filename;
+    if (
+      !window.confirm(
+        `Delete this video permanently?\n\n${preview}\n\nFiles are wiped from disk. This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    // Cancel this clip's run if it is still queued/running so the worker
+    // does not recreate state; other jobs keep going.
+    if (
+      (clip.status === "queued" || clip.status === "running")
+      && clip.run_id
+    ) {
+      try {
+        await cancelRun(clip.run_id);
+      } catch {
+        /* still attempt delete */
+      }
+    }
+    try {
+      const r = await fetch(`${API}/api/clips/${clip.id}`, { method: "DELETE" });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        setError(
+          typeof data.detail === "string" ? data.detail : "Could not delete clip",
+        );
+        return;
+      }
       revokeClipBlob(clip);
-      return prev.filter((c) => c.id !== clip.id);
-    });
-    if (selectedClipId === clip.id) selectClipId(null);
-    setRefs((prev) =>
-      prev.filter((r) => r.path !== clip.path && r.path !== clip.filename && !r.path.endsWith(`/${clip.filename}`)),
-    );
+      setClips((prev) => prev.filter((c) => c.id !== clip.id));
+      if (selectedClipId === clip.id) selectClipId(null);
+      setRefs((prev) =>
+        prev.filter(
+          (r) =>
+            r.path !== clip.path
+            && r.path !== clip.filename
+            && !r.path.endsWith(`/${clip.filename}`),
+        ),
+      );
+      // Resync — mergeClips drops server-deleted ids so cards cannot resurrect.
+      await refreshProjectClips();
+    } catch (err) {
+      setError(String(err));
+    }
   }
 
-  async function runLibraryPass(
+  async function exportClipRecipe(clip: Clip) {
+    try {
+      const r = await fetch(`${API}/api/clips/${clip.id}/export`);
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        throw new Error(
+          typeof data.detail === "string" ? data.detail : "Export failed",
+        );
+      }
+      const blob = await r.blob();
+      const stem = (clip.filename || clip.id).replace(/\.[^.]+$/, "") || clip.id;
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `h3-recipe-${stem.slice(0, 48)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(a.href);
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function importClipRecipe(file: File) {
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const r = await fetch(`${API}/api/clips/import`, { method: "POST", body: fd });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        throw new Error(
+          typeof data.detail === "string" ? data.detail : "Import failed",
+        );
+      }
+      await refreshProjectClips();
+      const imported = data.clip as Clip | undefined;
+      if (imported?.id) {
+        applyClipSelection(imported);
+      }
+    } catch (err) {
+      setError(String(err));
+    }
+  }
+
+  async function openLibraryPass(clip: Clip, kind: LibraryPassKind): Promise<void> {
+    const labels = {
+      redetail: "ReDetail",
+      upframe: "Upframe",
+      longtake: "Long take",
+      faces: "Faces",
+    } as const;
+    if (!clip.video_url) {
+      setError(`${labels[kind]} needs a finished video on this clip.`);
+      return;
+    }
+    if (libraryPassBusyId) {
+      setError(`${labels[libraryPassBusyKind ?? kind]} is already running.`);
+      return;
+    }
+
+    let cfg = config;
+    try {
+      cfg = await fetchConfig();
+      setConfig(cfg);
+    } catch {
+      /* keep cached config */
+    }
+
+    if (kind === "upframe" && cfg?.upframe?.available !== true) {
+      setError("Upframe needs FILM weights (film_net_fp16, ~69 MB). Open Models to download.");
+      openModels();
+      return;
+    }
+    if (kind === "redetail" && cfg?.redetail?.available === false) {
+      setError("ReDetail is not available in this build (engine/media helpers missing).");
+      return;
+    }
+
+    setError(null);
+    setLibraryPassRequest({ clip, kind });
+  }
+
+  async function executeLibraryPass(
     clip: Clip,
-    kind: "redetail" | "upframe" | "longtake" | "faces",
+    kind: LibraryPassKind,
+    params: LibraryPassParams,
   ): Promise<void> {
     const labels = {
       redetail: "ReDetail",
@@ -1336,34 +1583,83 @@ export default function App() {
       longtake: "Long take",
       faces: "Faces",
     } as const;
-    const confirms = {
-      redetail:
-        "Run ReDetail on this clip? Writes a twin *_redetail.mp4 at ×2 canvas (baseline kept). Uses the GPU.",
-      upframe: "Run Upframe on this clip? Writes a twin *_upframe.mp4 (baseline kept).",
-      longtake:
-        "Run Long take refine on this clip? Writes a twin *_longtake.mp4 (baseline kept). Uses the GPU.",
-      faces:
-        "Run Faces on this clip? Writes a twin *_faces.mp4 (baseline kept). SAM 3.1 downloads if needed. Uses the GPU.",
-    } as const;
-    if (!window.confirm(confirms[kind])) return;
+    const startedAt = Date.now();
+    const formatElapsed = (ms: number) => {
+      const s = Math.max(0, Math.floor(ms / 1000));
+      return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+    };
+    // Keep the source clip on the player under a progress overlay.
+    selectClipId(clip.id);
+    setChainId(clip.chain_id);
+    setWatchLive(false);
     setLibraryPassBusyId(clip.id);
+    setLibraryPassBusyKind(kind);
+    setProgress({
+      phase: `${kind}_run`,
+      message: `${labels[kind]}…`,
+    });
+    setBusy(true);
+    setError(null);
+
+    const tickElapsed = window.setInterval(() => {
+      setProgress((prev) => {
+        const base = (prev?.message || `${labels[kind]}…`).replace(/\s·\s\d+:\d{2}$/, "");
+        return {
+          phase: prev?.phase ?? `${kind}_run`,
+          message: `${base} · ${formatElapsed(Date.now() - startedAt)}`,
+          step: prev?.step,
+          total: prev?.total,
+          pct: prev?.pct,
+        };
+      });
+    }, 1000);
+
+    const pollProgress = window.setInterval(() => {
+      void fetch(`${API}/api/pass-progress`)
+        .then((r) => r.json())
+        .then((d: {
+          idle?: boolean;
+          message?: string;
+          phase?: string;
+          step?: number;
+          total?: number;
+          pct?: number;
+        }) => {
+          if (d.idle || !d.message) return;
+          setProgress({
+            phase: d.phase || `${kind}_run`,
+            message: `${d.message} · ${formatElapsed(Date.now() - startedAt)}`,
+            step: d.step,
+            total: d.total,
+            pct: d.pct,
+          });
+        })
+        .catch(() => {
+          /* ignore poll errors */
+        });
+    }, 400);
+
     try {
       const body =
         kind === "longtake"
           ? {
-              denoise: longtakeDenoise,
-              keyframes: longtakeKeyframes,
-              seed: longtakeSeed,
+              denoise: params.denoise ?? longtakeDenoise,
+              keyframes: params.keyframes ?? longtakeKeyframes,
+              seed: params.seed ?? longtakeSeed,
+              interpolation: params.interpolation ?? longtakeInterpolation,
             }
           : kind === "upframe"
-            ? { multiplier: 2 }
+            ? { multiplier: params.multiplier ?? upframeMultiplier }
             : kind === "faces"
               ? {
-                  canvas: facesCanvas,
-                  denoise: facesDenoise,
-                  seed: facesSeed,
+                  canvas: params.canvas ?? facesCanvas,
+                  denoise: params.denoise ?? facesDenoise,
+                  seed: params.seed ?? facesSeed,
                 }
-              : {};
+              : {
+                  denoise: params.denoise ?? redetailDenoise,
+                  seed: params.seed ?? redetailSeed,
+                };
       const r = await fetch(`${API}/api/clips/${clip.id}/${kind}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1371,15 +1667,39 @@ export default function App() {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
-        throw new Error(
-          typeof data.detail === "string" ? data.detail : `${labels[kind]} failed`,
-        );
+        const detail =
+          typeof data.detail === "string" ? data.detail : `${labels[kind]} failed`;
+        if (r.status === 409) {
+          throw new Error(
+            `${detail} Wait for the current generation to finish (or cancel it), then try again.`,
+          );
+        }
+        if (kind === "upframe" && /film_net|FILM|weights/i.test(detail)) {
+          setError(detail);
+          openModels();
+          return;
+        }
+        throw new Error(detail);
       }
+      setLibraryPassRequest(null);
       await refreshProjectClips();
+      const created = data.clip as Clip | undefined;
+      if (created?.id) {
+        // Playback only — do not stomp the composer / spawn another confirm.
+        selectClipId(created.id);
+        setChainId(created.chain_id);
+        setWatchLive(false);
+      }
     } catch (err) {
-      window.alert(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : String(err));
     } finally {
+      window.clearInterval(tickElapsed);
+      window.clearInterval(pollProgress);
       setLibraryPassBusyId(null);
+      setLibraryPassBusyKind(null);
+      setBusy(false);
+      setProgress(null);
+      setWatchLive(false);
     }
   }
 
@@ -1406,6 +1726,7 @@ export default function App() {
 
   function handleRefsChange(next: ReferenceItem[]) {
     setRefs(next);
+    composerUnexecutedRef.current = true;
     if (next.length === 0) return;
     setImagePath(null);
     setImageName(null);
@@ -1609,7 +1930,10 @@ export default function App() {
             if (err && err !== "Cancelled") {
               reject(new Error(err));
             } else {
-              if (!err) notifyGenerationReady();
+              if (!err) {
+                composerUnexecutedRef.current = false;
+                notifyGenerationReady();
+              }
               resolve();
             }
             void subscribeRun(nextJob.run_id, nextJob.chain_id);
@@ -1625,7 +1949,11 @@ export default function App() {
           if (err && err !== "Cancelled") {
             reject(new Error(err));
           } else {
-            if (!err) notifyGenerationReady();
+            if (!err) {
+              // Successful generate — recipe is now in the library.
+              composerUnexecutedRef.current = false;
+              notifyGenerationReady();
+            }
             resolve();
           }
         })();
@@ -1687,13 +2015,27 @@ export default function App() {
           setLivePreviewUrl(null);
           setLivePreviewMime("image/webp");
           const clipId = String(msg.clip_id ?? "");
+          // Pass clips use their own chain_id — prefer the refine id from the event.
+          const preferPass =
+            String(msg.faces_clip_id || "") ||
+            String(msg.upframe_clip_id || "") ||
+            String(msg.redetail_clip_id || "") ||
+            String(msg.longtake_clip_id || "") ||
+            "";
           fetchClips(runChainId).then((chainClips) => {
             setClips((prev) => replaceChainClips(prev, runChainId, chainClips));
+          });
+          void fetchClips().then((all) => {
+            setClips((prev) => mergeClips(prev, all));
             if (watchLiveRef.current) {
-              selectClipId(pickPlaybackClip(chainClips, runChainId) ?? clipId ?? null);
+              selectClipId(
+                preferPass ||
+                  pickPlaybackClip(all, runChainId) ||
+                  clipId ||
+                  null,
+              );
             }
           });
-          void fetchClips().then((all) => setClips((prev) => mergeClips(prev, all)));
         }
         if (msg.type === "run_cancelled") {
           setProgress({ phase: "cancelled", message: String(msg.message || "Cancelled") });
@@ -1806,8 +2148,19 @@ export default function App() {
     endImagePath: string | null;
     upscale?: boolean;
     redetail?: boolean;
+    redetailDenoise?: number;
+    redetailSeed?: number;
     upframe?: boolean;
+    upframeMultiplier?: number;
+    longtake?: boolean;
+    longtakeDenoise?: number;
+    longtakeKeyframes?: string;
+    longtakeSeed?: number;
+    longtakeInterpolation?: string;
     faces?: boolean;
+    facesDenoise?: number;
+    facesSeed?: number;
+    facesCanvas?: number;
     /** User-facing composer state for library restore (kept separate from compiled prompt). */
     generation?: ReturnType<typeof buildGenerationSnapshot>;
   }): Record<string, unknown> {
@@ -1855,26 +2208,12 @@ export default function App() {
     if (res?.render_width) body.render_width = res.render_width;
     if (res?.render_height) body.render_height = res.render_height;
     if (opts.seed.trim() !== "") body.seed = Number(opts.seed);
-    if (longtakeEnabled) {
-      body.longtake = {
-        enabled: true,
-        denoise: longtakeDenoise,
-        keyframes: longtakeKeyframes,
-        seed: longtakeSeed,
-      };
-    }
+    // Faces / Upframe / Long take are library-only — never auto-spawn on Generate.
     if (opts.redetail ?? redetailEnabled) {
-      body.redetail = { enabled: true };
-    }
-    if (opts.upframe ?? upframeEnabled) {
-      body.upframe = { enabled: true, multiplier: 2 };
-    }
-    if (opts.faces ?? facesEnabled) {
-      body.faces = {
+      body.redetail = {
         enabled: true,
-        canvas: facesCanvas,
-        denoise: facesDenoise,
-        seed: facesSeed,
+        denoise: opts.redetailDenoise ?? redetailDenoise,
+        seed: opts.redetailSeed ?? redetailSeed,
       };
     }
     if (ref2va) {
@@ -1932,14 +2271,36 @@ export default function App() {
         endImagePath: scene.endImagePath ?? null,
         upscale,
         redetail: scene.redetail ?? redetailEnabled,
+        redetailDenoise: scene.redetailDenoise ?? redetailDenoise,
+        redetailSeed: scene.redetailSeed ?? redetailSeed,
         upframe: scene.upframe ?? upframeEnabled,
+        upframeMultiplier: scene.upframeMultiplier ?? upframeMultiplier,
+        longtake: scene.longtake ?? longtakeEnabled,
+        longtakeDenoise: scene.longtakeDenoise ?? longtakeDenoise,
+        longtakeKeyframes: scene.longtakeKeyframes ?? longtakeKeyframes,
+        longtakeSeed: scene.longtakeSeed ?? longtakeSeed,
+        longtakeInterpolation: scene.longtakeInterpolation ?? longtakeInterpolation,
         faces: scene.faces ?? facesEnabled,
+        facesDenoise: scene.facesDenoise ?? facesDenoise,
+        facesSeed: scene.facesSeed ?? facesSeed,
+        facesCanvas: scene.facesCanvas ?? facesCanvas,
         generation: buildGenerationSnapshot({
           ...scene,
           upscale,
           redetail: scene.redetail ?? redetailEnabled,
+          redetailDenoise: scene.redetailDenoise ?? redetailDenoise,
+          redetailSeed: scene.redetailSeed ?? redetailSeed,
           upframe: scene.upframe ?? upframeEnabled,
+          upframeMultiplier: scene.upframeMultiplier ?? upframeMultiplier,
+          longtake: scene.longtake ?? longtakeEnabled,
+          longtakeDenoise: scene.longtakeDenoise ?? longtakeDenoise,
+          longtakeKeyframes: scene.longtakeKeyframes ?? longtakeKeyframes,
+          longtakeSeed: scene.longtakeSeed ?? longtakeSeed,
+          longtakeInterpolation: scene.longtakeInterpolation ?? longtakeInterpolation,
           faces: scene.faces ?? facesEnabled,
+          facesDenoise: scene.facesDenoise ?? facesDenoise,
+          facesSeed: scene.facesSeed ?? facesSeed,
+          facesCanvas: scene.facesCanvas ?? facesCanvas,
         }),
       }),
       { follow: true },
@@ -1972,8 +2333,19 @@ export default function App() {
           endImagePath,
           upscale,
           redetail: redetailEnabled,
+          redetailDenoise,
+          redetailSeed,
           upframe: upframeEnabled,
+          upframeMultiplier,
+          longtake: longtakeEnabled,
+          longtakeDenoise,
+          longtakeKeyframes,
+          longtakeSeed,
+          longtakeInterpolation,
           faces: facesEnabled,
+          facesDenoise,
+          facesSeed,
+          facesCanvas,
           generation: buildGenerationSnapshot({
             prompt,
             mode: compiled.modeHint,
@@ -1997,8 +2369,19 @@ export default function App() {
             ssdStreaming,
             upscale,
             redetail: redetailEnabled,
+            redetailDenoise,
+            redetailSeed,
             upframe: upframeEnabled,
+            upframeMultiplier,
+            longtake: longtakeEnabled,
+            longtakeDenoise,
+            longtakeKeyframes,
+            longtakeSeed,
+            longtakeInterpolation,
             faces: facesEnabled,
+            facesDenoise,
+            facesSeed,
+            facesCanvas,
           }),
         }),
         { follow },
@@ -2137,7 +2520,7 @@ export default function App() {
         <div className="app-main">
           <section className="player-section">
             <div className="player-wrap">
-              {watchLive && busy && livePreviewUrl ? (
+              {watchLive && busy && livePreviewUrl && !libraryPassBusyId ? (
                 livePreviewMime.startsWith("video/") ? (
                   <video
                     key={livePreviewUrl}
@@ -2158,26 +2541,26 @@ export default function App() {
                     alt="Denoise preview"
                   />
                 )
-              ) : activeClip?.video_url && !watchLive ? (
+              ) : activeClip?.video_url && (!watchLive || Boolean(libraryPassBusyId)) ? (
                 <video
                   key={activeClip.id}
                   ref={playerVideoRef}
                   className="player"
                   src={activeClip.video_url}
                   poster={activeClip.thumb_url || undefined}
-                  controls
+                  controls={!libraryPassBusyId}
                   loop
                   playsInline
                   preload="auto"
                 />
               ) : (
                 <div className="player placeholder">
-                  {watchLive || busy
+                  {watchLive || busy || libraryPassBusyId
                     ? progress?.message ?? "Generating…"
                     : "Your video will appear here"}
                 </div>
               )}
-              {watchLive && busy && (
+              {((watchLive && busy) || Boolean(libraryPassBusyId)) && (
                 <div className="progress-overlay">
                   <div className="progress-bar">
                     {progress?.pct != null ? (
@@ -2188,7 +2571,7 @@ export default function App() {
                   </div>
                   <div className="progress-overlay-row">
                     <span>{progress?.message ?? "Working…"}</span>
-                    {activeRunId && progress?.phase !== "cancelled" && (
+                    {activeRunId && !libraryPassBusyId && progress?.phase !== "cancelled" && (
                       <button type="button" className="btn-cancel" onClick={() => void cancelActiveRun()}>
                         Cancel
                       </button>
@@ -2196,7 +2579,7 @@ export default function App() {
                   </div>
                 </div>
               )}
-              {activeClip?.video_url && !watchLive && !busy && (
+              {activeClip?.video_url && !watchLive && !busy && !libraryPassBusyId && (
                 <button
                   type="button"
                   className="player-capture-btn"
@@ -2254,7 +2637,7 @@ export default function App() {
                     >
                       {chainParts.map((c) => (
                         <option key={c.id} value={c.id}>
-                          {c.label}
+                          {clipDisplayLabel(c)}
                           {c.num_frames ? ` · ${formatDuration(c.num_frames, config?.defaults.fps ?? 24)}` : ""}
                         </option>
                       ))}
@@ -2271,7 +2654,10 @@ export default function App() {
               pipelineActive={pipelineActive}
               canSubmit={canSubmit}
               prompt={prompt}
-              onPromptChange={setPrompt}
+              onPromptChange={(value) => {
+                setPrompt(value);
+                composerUnexecutedRef.current = Boolean(value.trim());
+              }}
               onGenerate={() => void handleGenerate()}
               compiled={compiled}
               refs={routing === "fl2va" ? [] : refs}
@@ -2287,6 +2673,7 @@ export default function App() {
                 setEndImagePath(null);
                 setEndImageName(null);
                 setSelectedCastIds([]);
+                composerUnexecutedRef.current = false;
               }}
               onOpenLora={() => setLoraModalOpen(true)}
               onRefine={() => void runRefine()}
@@ -2387,48 +2774,11 @@ export default function App() {
               onSsdStreaming={setSsdStreaming}
               clipMultiplier={clipMultiplier}
               onClipMultiplier={setClipMultiplier}
-              longtakeConfig={config.longtake}
-              longtakeEnabled={longtakeEnabled}
-              longtakeDenoise={longtakeDenoise}
-              longtakeKeyframes={longtakeKeyframes}
-              longtakeSeed={longtakeSeed}
-              onLongtakeEnabled={setLongtakeEnabled}
-              onLongtakeDenoise={setLongtakeDenoise}
-              onLongtakeKeyframes={setLongtakeKeyframes}
-              onLongtakeSeed={setLongtakeSeed}
               redetailConfig={config.redetail}
-              redetailEnabled={redetailEnabled}
-              onRedetailEnabled={setRedetailEnabled}
-              upframeConfig={config.upframe}
-              upframeEnabled={upframeEnabled}
-              onUpframeEnabled={setUpframeEnabled}
-              facesConfig={config.faces}
-              facesEnabled={facesEnabled}
-              facesCanvas={facesCanvas}
-              facesDenoise={facesDenoise}
-              facesSeed={facesSeed}
-              onFacesEnabled={(v) => {
-                setFacesEnabled(v);
-                if (v && config?.faces && !config.faces.sam3_ready) {
-                  const es = new EventSource(
-                    `${API}/api/models/download/stream?component=sam3`,
-                  );
-                  const stop = () => {
-                    try {
-                      es.close();
-                    } catch {
-                      /* ignore */
-                    }
-                    void fetchConfig().then((cfg) => setConfig(cfg));
-                  };
-                  es.addEventListener("complete", stop);
-                  es.addEventListener("error", (ev) => {
-                    if (ev instanceof MessageEvent) stop();
-                  });
-                }
-              }}
-              onFacesDenoise={setFacesDenoise}
-              onFacesSeed={setFacesSeed}
+              redetailDenoise={redetailDenoise}
+              redetailSeed={redetailSeed}
+              onRedetailDenoise={setRedetailDenoise}
+              onRedetailSeed={setRedetailSeed}
               sceneQueue={sceneQueue}
               onRemoveScene={removeFromSceneQueue}
               onReorderScenes={reorderSceneQueue}
@@ -2534,26 +2884,47 @@ export default function App() {
             </div>
           )}
 
-          <button
-            type="button"
-            className="library-header library-header--toggle"
-            onClick={() => setLibraryOpen((v) => !v)}
-            aria-expanded={libraryOpen}
-          >
-            <span className="library-title">Library</span>
-            <span className="library-header__meta">
-              <span className="library-count">{libraryClips.length}</span>
-              <span className={`library-chevron${libraryOpen ? " is-open" : ""}`} aria-hidden>
-                ▾
+          <div className="library-header-row">
+            <button
+              type="button"
+              className="library-header library-header--toggle"
+              onClick={() => setLibraryOpen((v) => !v)}
+              aria-expanded={libraryOpen}
+            >
+              <span className="library-title">Library</span>
+              <span className="library-header__meta">
+                <span className="library-count">{libraryClips.length}</span>
+                <span className={`library-chevron${libraryOpen ? " is-open" : ""}`} aria-hidden>
+                  ▾
+                </span>
               </span>
-            </span>
-          </button>
+            </button>
+            <button
+              type="button"
+              className="library-header-action"
+              title="Import a recipe zip (prompt, settings, references)"
+              onClick={() => recipeImportRef.current?.click()}
+            >
+              Import
+            </button>
+            <input
+              ref={recipeImportRef}
+              type="file"
+              accept=".zip,application/zip"
+              hidden
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                e.target.value = "";
+                if (file) void importClipRecipe(file);
+              }}
+            />
+          </div>
           {libraryOpen && (
           <div className="library-grid">
             {libraryClips.map((clip) => (
               <div
                 key={clip.id}
-                className={`library-card-wrap ${activeClip?.id === clip.id && !watchLive ? "active" : ""}`}
+                className={`library-card-wrap${activeClip?.id === clip.id && !watchLive ? " active" : ""}${libraryPassBusyId === clip.id ? " is-pass-busy" : ""}`}
               >
                 <button
                   type="button"
@@ -2576,43 +2947,64 @@ export default function App() {
                       playsInline
                       preload="metadata"
                     />
-                  ) : null}
-                  <span className={`library-label ${clip.label.toLowerCase()}`}>{clip.label}</span>
+                  ) : (
+                    <div className="library-thumb library-thumb--recipe">Recipe</div>
+                  )}
+                  <span className={`library-label ${clipDisplayLabel(clip).toLowerCase()}`}>
+                    {clipDisplayLabel(clip)}
+                    {clip.width && clip.height ? (
+                      <span className="library-label__size">
+                        {" "}
+                        {clip.width}×{clip.height}
+                      </span>
+                    ) : null}
+                  </span>
                   <span className="library-prompt">{clipDisplayPrompt(clip.prompt)}</span>
+                  {libraryPassBusyId === clip.id && (
+                    <span className="library-pass-badge" aria-live="polite">
+                      {libraryPassBusyKind
+                        ? `${libraryPassBusyKind === "upframe" ? "UPFRAME" : libraryPassBusyKind === "redetail" ? "REDETAIL" : libraryPassBusyKind === "longtake" ? "LONGTAKE" : "FACES"}…`
+                        : "Working…"}
+                    </span>
+                  )}
                 </button>
                 <div className="library-card-actions" role="group" aria-label="Clip actions">
                   <button
                     type="button"
-                    className="library-action"
-                    title="ReDetail — ×2 H3 refine twin (*_redetail.mp4)"
-                    disabled={
-                      libraryPassBusyId === clip.id
-                      || busy
-                      || config?.redetail?.available === false
+                    className={`library-action${config?.redetail?.available === false ? " library-action--needs-setup" : ""}`}
+                    title={
+                      !clip.video_url
+                        ? "ReDetail — needs a finished video"
+                        : config?.redetail?.available === false
+                          ? "ReDetail unavailable in this build"
+                          : libraryPassBusyId === clip.id
+                            ? "Busy on this clip…"
+                            : "ReDetail — ×2 refine as a new card (this clip stays)"
                     }
+                    disabled={libraryPassBusyId === clip.id || !clip.video_url}
                     onClick={(e) => {
                       e.stopPropagation();
-                      void runLibraryPass(clip, "redetail");
+                      void openLibraryPass(clip, "redetail");
                     }}
                   >
                     ×2
                   </button>
                   <button
                     type="button"
-                    className="library-action"
+                    className={`library-action${config?.upframe?.available !== true ? " library-action--needs-setup" : ""}`}
                     title={
-                      config?.upframe?.available
-                        ? "Upframe — FILM temporal interpolate (*_upframe.mp4)"
-                        : "Upframe — download film_net_fp16 in Models first"
+                      !clip.video_url
+                        ? "Upframe — needs a finished video"
+                        : config?.upframe?.available !== true
+                          ? "Upframe — click to download film_net_fp16 in Models (~69 MB)"
+                          : libraryPassBusyId === clip.id
+                            ? "Busy on this clip…"
+                            : "Upframe — FILM interpolate → new library clip (original kept)"
                     }
-                    disabled={
-                      libraryPassBusyId === clip.id
-                      || busy
-                      || !config?.upframe?.available
-                    }
+                    disabled={libraryPassBusyId === clip.id || !clip.video_url}
                     onClick={(e) => {
                       e.stopPropagation();
-                      void runLibraryPass(clip, "upframe");
+                      void openLibraryPass(clip, "upframe");
                     }}
                   >
                     2ƒ
@@ -2620,11 +3012,17 @@ export default function App() {
                   <button
                     type="button"
                     className="library-action"
-                    title="Long take refine (*_longtake.mp4 twin)"
-                    disabled={libraryPassBusyId === clip.id || busy}
+                    title={
+                      !clip.video_url
+                        ? "Long take — needs a finished video"
+                        : libraryPassBusyId === clip.id
+                          ? "Busy on this clip…"
+                          : "Long take refine → new library clip (original kept)"
+                    }
+                    disabled={libraryPassBusyId === clip.id || !clip.video_url}
                     onClick={(e) => {
                       e.stopPropagation();
-                      void runLibraryPass(clip, "longtake");
+                      void openLibraryPass(clip, "longtake");
                     }}
                   >
                     LT
@@ -2633,23 +3031,36 @@ export default function App() {
                     type="button"
                     className="library-action"
                     title={
-                      config?.faces?.sam3_ready
-                        ? "Faces — Continuity face refine twin (*_faces.mp4)"
-                        : "Faces — SAM 3.1 downloads automatically if needed"
+                      !clip.video_url
+                        ? "Faces — needs a finished video"
+                        : config?.faces?.sam3_ready
+                          ? "Faces — new library clip (original kept)"
+                          : "Faces — SAM 3.1 downloads automatically if needed"
                     }
-                    disabled={libraryPassBusyId === clip.id || busy}
+                    disabled={libraryPassBusyId === clip.id || !clip.video_url}
                     onClick={(e) => {
                       e.stopPropagation();
-                      void runLibraryPass(clip, "faces");
+                      void openLibraryPass(clip, "faces");
                     }}
                   >
                     Face
                   </button>
                   <button
                     type="button"
+                    className="library-action"
+                    title="Export recipe zip (prompt, settings, refs, video)"
+                    disabled={libraryPassBusyId === clip.id}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void exportClipRecipe(clip);
+                    }}
+                  >
+                    Zip
+                  </button>
+                  <button
+                    type="button"
                     className="library-action library-action--delete"
-                    title="Delete"
-                    disabled={(busy && watchLive) || libraryPassBusyId === clip.id}
+                    title="Delete permanently (reclaims disk)"
                     onClick={(e) => {
                       e.stopPropagation();
                       void deleteClip(clip);
@@ -2734,6 +3145,54 @@ export default function App() {
           </div>
         </aside>
       </div>
+
+      {libraryPassRequest && (
+        <LibraryPassPanel
+          key={`${libraryPassRequest.clip.id}:${libraryPassRequest.kind}`}
+          clip={libraryPassRequest.clip}
+          kind={libraryPassRequest.kind}
+          config={config}
+          busy={libraryPassBusyId === libraryPassRequest.clip.id}
+          statusMessage={
+            libraryPassBusyId === libraryPassRequest.clip.id
+              ? progress?.message
+              : null
+          }
+          statusPct={
+            libraryPassBusyId === libraryPassRequest.clip.id
+              ? progress?.pct ?? null
+              : null
+          }
+          defaults={
+            libraryPassRequest.kind === "upframe"
+              ? { multiplier: upframeMultiplier }
+              : libraryPassRequest.kind === "redetail"
+                ? { denoise: redetailDenoise, seed: redetailSeed }
+                : libraryPassRequest.kind === "longtake"
+                  ? {
+                      denoise: longtakeDenoise,
+                      keyframes: longtakeKeyframes,
+                      seed: longtakeSeed,
+                      interpolation: longtakeInterpolation,
+                    }
+                  : {
+                      denoise: facesDenoise,
+                      seed: facesSeed,
+                    }
+          }
+          onClose={() => {
+            if (libraryPassBusyId) return;
+            setLibraryPassRequest(null);
+          }}
+          onRun={(params) => {
+            void executeLibraryPass(
+              libraryPassRequest.clip,
+              libraryPassRequest.kind,
+              params,
+            );
+          }}
+        />
+      )}
 
       {/* Models panel */}
       {FEATURES.MODELS_PAGE && modelsOpen && (

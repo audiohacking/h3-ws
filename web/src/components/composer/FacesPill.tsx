@@ -35,7 +35,7 @@ export function FacesPill({
     ? "Faces"
     : !samReady
       ? "Faces — SAM 3.1 downloads automatically when you generate"
-      : "Face refine — SAM detect, re-draw with your Ref2VA refs";
+      : "Face refine — new library clip (original kept)";
 
   useDismissable(open, () => setOpen(false), rootRef);
   useEffect(() => {
