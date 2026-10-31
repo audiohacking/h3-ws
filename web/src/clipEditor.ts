@@ -13,32 +13,37 @@ export function clipDisplayPrompt(prompt: string): string {
 
 const PASS_LABELS = ["UPFRAME", "REDETAIL", "LONGTAKE", "FACES", "BASE"] as const;
 
-function generationPassEnabled(gen: Record<string, unknown> | null | undefined, key: string): boolean {
-  if (!gen) return false;
-  const v = gen[key];
-  if (v === true) return true;
-  if (v && typeof v === "object" && (v as { enabled?: boolean }).enabled) return true;
-  return false;
-}
-
-/** Library badge for processed clips (Upframe / ReDetail / …), including older CURRENT-labeled ones. */
+/**
+ * Library badge for processed clips (Upframe / ReDetail / …).
+ *
+ * Trust the stored ``label`` / ``generation.pass`` / filename suffix only.
+ * Do NOT read ``generation.faces`` / ``redetail`` / … booleans — those mean
+ * "armed on this generate", not "this card is the pass output", and were
+ * mislabeling real CURRENT clips as FACES/REDETAIL.
+ */
 export function clipDisplayLabel(clip: Clip): string {
   const raw = (clip.label || "").trim();
   const upper = raw.toUpperCase().replace(/\s+/g, "");
   if ((PASS_LABELS as readonly string[]).includes(upper)) return upper;
   if (upper === "LONGTAKE" || raw.toUpperCase() === "LONG TAKE") return "LONGTAKE";
+  // Explicit product labels win over any generation blob.
+  if (
+    upper === "CURRENT"
+    || upper === "ORIGINAL"
+    || upper === "MERGED"
+    || upper === "QUEUE"
+    || /^CLIP\d+$/.test(upper)
+  ) {
+    return upper || "CURRENT";
+  }
 
   const g = clip.generation;
   if (g && typeof g === "object") {
     const pass = typeof g.pass === "string" ? g.pass.trim().toUpperCase() : "";
     if ((PASS_LABELS as readonly string[]).includes(pass)) return pass;
-    if (generationPassEnabled(g, "upframe")) return "UPFRAME";
-    if (generationPassEnabled(g, "redetail")) return "REDETAIL";
-    if (generationPassEnabled(g, "longtake")) return "LONGTAKE";
-    if (generationPassEnabled(g, "faces")) return "FACES";
   }
 
-  // Filename suffix from prior builds (stem_upframe.mp4).
+  // Filename suffix from pass spawns (stem_upframe.mp4).
   const name = (clip.filename || "").toLowerCase();
   if (name.includes("_upframe")) return "UPFRAME";
   if (name.includes("_redetail")) return "REDETAIL";

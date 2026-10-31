@@ -496,26 +496,18 @@ export default function App() {
     [clips],
   );
   const pipelineActive = busy || inProgressClips.length > 0;
-  const libraryClips = useMemo(() => {
-    const done = clips.filter(
-      (c) =>
-        c.status === "done"
-        && (Boolean(c.video_url) || Boolean(c.generation)),
-    );
-    // Hide generate-time BASE intermediates once a refine pass superseded them.
-    // Library-run passes keep both cards (source stays CURRENT / unlabeled).
-    const visible = done.filter((c) => {
-      const gen = c.generation;
-      if (!gen || typeof gen !== "object") return true;
-      const g = gen as Record<string, unknown>;
-      if (!g.superseded_by) return true;
-      const label = clipDisplayLabel(c);
-      return label !== "BASE" && label !== "CURRENT";
-    });
-    return visible
-      .slice()
-      .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
-  }, [clips]);
+  const libraryClips = useMemo(
+    () =>
+      clips
+        .filter(
+          (c) =>
+            c.status === "done"
+            && (Boolean(c.video_url) || Boolean(c.generation)),
+        )
+        .slice()
+        .sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")),
+    [clips],
+  );
   const framesNewest = useMemo(
     () => [...frameLibrary].sort((a, b) => (b.created_at || "").localeCompare(a.created_at || "")),
     [frameLibrary],
@@ -2208,12 +2200,34 @@ export default function App() {
     if (res?.render_width) body.render_width = res.render_width;
     if (res?.render_height) body.render_height = res.render_height;
     if (opts.seed.trim() !== "") body.seed = Number(opts.seed);
-    // Faces / Upframe / Long take are library-only — never auto-spawn on Generate.
+    if (opts.longtake ?? longtakeEnabled) {
+      body.longtake = {
+        enabled: true,
+        denoise: opts.longtakeDenoise ?? longtakeDenoise,
+        keyframes: opts.longtakeKeyframes ?? longtakeKeyframes,
+        seed: opts.longtakeSeed ?? longtakeSeed,
+        interpolation: opts.longtakeInterpolation ?? longtakeInterpolation,
+      };
+    }
     if (opts.redetail ?? redetailEnabled) {
       body.redetail = {
         enabled: true,
         denoise: opts.redetailDenoise ?? redetailDenoise,
         seed: opts.redetailSeed ?? redetailSeed,
+      };
+    }
+    if (opts.upframe ?? upframeEnabled) {
+      body.upframe = {
+        enabled: true,
+        multiplier: Math.max(2, Math.round(opts.upframeMultiplier ?? upframeMultiplier)),
+      };
+    }
+    if (opts.faces ?? facesEnabled) {
+      body.faces = {
+        enabled: true,
+        canvas: opts.facesCanvas ?? facesCanvas,
+        denoise: opts.facesDenoise ?? facesDenoise,
+        seed: opts.facesSeed ?? facesSeed,
       };
     }
     if (ref2va) {
@@ -2774,11 +2788,60 @@ export default function App() {
               onSsdStreaming={setSsdStreaming}
               clipMultiplier={clipMultiplier}
               onClipMultiplier={setClipMultiplier}
+              longtakeConfig={config.longtake}
+              longtakeEnabled={longtakeEnabled}
+              longtakeDenoise={longtakeDenoise}
+              longtakeKeyframes={longtakeKeyframes}
+              longtakeSeed={longtakeSeed}
+              longtakeInterpolation={longtakeInterpolation}
+              onLongtakeEnabled={setLongtakeEnabled}
+              onLongtakeDenoise={setLongtakeDenoise}
+              onLongtakeKeyframes={setLongtakeKeyframes}
+              onLongtakeSeed={setLongtakeSeed}
+              onLongtakeInterpolation={setLongtakeInterpolation}
               redetailConfig={config.redetail}
               redetailDenoise={redetailDenoise}
               redetailSeed={redetailSeed}
               onRedetailDenoise={setRedetailDenoise}
               onRedetailSeed={setRedetailSeed}
+              upframeConfig={config.upframe}
+              upframeEnabled={upframeEnabled}
+              upframeMultiplier={upframeMultiplier}
+              onUpframeEnabled={setUpframeEnabled}
+              onUpframeMultiplier={setUpframeMultiplier}
+              onUpframeNeedWeights={() => {
+                window.alert(
+                  "Upframe needs FILM weights (film_net_fp16, ~69 MB). Opening Models…",
+                );
+                openModels();
+              }}
+              facesConfig={config.faces}
+              facesEnabled={facesEnabled}
+              facesCanvas={facesCanvas}
+              facesDenoise={facesDenoise}
+              facesSeed={facesSeed}
+              onFacesEnabled={(v) => {
+                setFacesEnabled(v);
+                if (v && config?.faces && !config.faces.sam3_ready) {
+                  const es = new EventSource(
+                    `${API}/api/models/download/stream?component=sam3`,
+                  );
+                  const stop = () => {
+                    try {
+                      es.close();
+                    } catch {
+                      /* ignore */
+                    }
+                    void fetchConfig().then((cfg) => setConfig(cfg));
+                  };
+                  es.addEventListener("complete", stop);
+                  es.addEventListener("error", (ev) => {
+                    if (ev instanceof MessageEvent) stop();
+                  });
+                }
+              }}
+              onFacesDenoise={setFacesDenoise}
+              onFacesSeed={setFacesSeed}
               sceneQueue={sceneQueue}
               onRemoveScene={removeFromSceneQueue}
               onReorderScenes={reorderSceneQueue}

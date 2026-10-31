@@ -1,5 +1,14 @@
 import { TurboToggle } from "./TurboToggle";
-import type { LoraPreset, PillOption } from "../../types";
+import { FacesPill } from "./FacesPill";
+import { LongTakePill } from "./LongTakePill";
+import { UpframePill } from "./UpframePill";
+import type {
+  FacesConfigPublic,
+  LongTakeConfigPublic,
+  LoraPreset,
+  PillOption,
+  UpframeConfigPublic,
+} from "../../types";
 import type { TurboTier } from "../../config";
 
 type Props = {
@@ -39,6 +48,32 @@ type Props = {
   /** Lanczos post-upscale — disabled until latent upscale lands. Kept optional for API stability. */
   upscale?: boolean;
   onUpscale?: (v: boolean) => void;
+  facesConfig?: FacesConfigPublic | null;
+  facesEnabled?: boolean;
+  facesCanvas?: number;
+  facesDenoise?: number;
+  facesSeed?: number;
+  onFacesEnabled?: (v: boolean) => void;
+  onFacesCanvas?: (v: number) => void;
+  onFacesDenoise?: (v: number) => void;
+  onFacesSeed?: (v: number) => void;
+  longtakeConfig?: LongTakeConfigPublic | null;
+  longtakeEnabled?: boolean;
+  longtakeDenoise?: number;
+  longtakeKeyframes?: string;
+  longtakeSeed?: number;
+  longtakeInterpolation?: string;
+  onLongtakeEnabled?: (v: boolean) => void;
+  onLongtakeDenoise?: (v: number) => void;
+  onLongtakeKeyframes?: (v: string) => void;
+  onLongtakeSeed?: (v: number) => void;
+  onLongtakeInterpolation?: (v: string) => void;
+  upframeConfig?: UpframeConfigPublic | null;
+  upframeEnabled?: boolean;
+  upframeMultiplier?: number;
+  onUpframeEnabled?: (v: boolean) => void;
+  onUpframeMultiplier?: (v: number) => void;
+  onUpframeNeedWeights?: () => void;
 };
 
 function ParamStepper({
@@ -107,6 +142,32 @@ export function SamplerRow({
   clipMultiplierMax,
   showClips,
   onClipMultiplier,
+  facesConfig,
+  facesEnabled = false,
+  facesCanvas = 512,
+  facesDenoise = 0.45,
+  facesSeed = 42,
+  onFacesEnabled,
+  onFacesCanvas,
+  onFacesDenoise,
+  onFacesSeed,
+  longtakeConfig,
+  longtakeEnabled = false,
+  longtakeDenoise = 0.55,
+  longtakeKeyframes = "0:0, 22:0, 44:1",
+  longtakeSeed = 42,
+  longtakeInterpolation = "linear",
+  onLongtakeEnabled,
+  onLongtakeDenoise,
+  onLongtakeKeyframes,
+  onLongtakeSeed,
+  onLongtakeInterpolation,
+  upframeConfig,
+  upframeEnabled = false,
+  upframeMultiplier = 2,
+  onUpframeEnabled,
+  onUpframeMultiplier,
+  onUpframeNeedWeights,
 }: Props) {
   const tokenOn = tokenReduction && !tokenReductionLocked;
   const ssdOn = ssdStreaming && !ssdLocked;
@@ -174,6 +235,47 @@ export function SamplerRow({
             disabled={disabled || loraBusy}
             loading={turboLoading}
           />
+          {onFacesEnabled && (
+            <FacesPill
+              disabled={disabled}
+              config={facesConfig}
+              enabled={facesEnabled}
+              canvas={facesCanvas}
+              denoise={facesDenoise}
+              seed={facesSeed}
+              onEnabled={onFacesEnabled}
+              onCanvas={onFacesCanvas ?? (() => {})}
+              onDenoise={onFacesDenoise ?? (() => {})}
+              onSeed={onFacesSeed ?? (() => {})}
+            />
+          )}
+          {onLongtakeEnabled && (
+            <LongTakePill
+              disabled={disabled}
+              config={longtakeConfig}
+              enabled={longtakeEnabled}
+              denoise={longtakeDenoise}
+              keyframes={longtakeKeyframes}
+              seed={longtakeSeed}
+              interpolation={longtakeInterpolation}
+              onEnabled={onLongtakeEnabled}
+              onDenoise={onLongtakeDenoise ?? (() => {})}
+              onKeyframes={onLongtakeKeyframes ?? (() => {})}
+              onSeed={onLongtakeSeed ?? (() => {})}
+              onInterpolation={onLongtakeInterpolation ?? (() => {})}
+            />
+          )}
+          {onUpframeEnabled && (
+            <UpframePill
+              disabled={disabled}
+              config={upframeConfig}
+              enabled={upframeEnabled}
+              multiplier={upframeMultiplier}
+              onEnabled={onUpframeEnabled}
+              onMultiplier={onUpframeMultiplier ?? (() => {})}
+              onNeedWeights={onUpframeNeedWeights}
+            />
+          )}
         </div>
       </div>
       <div className="config-card__row">

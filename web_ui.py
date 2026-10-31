@@ -1671,10 +1671,10 @@ async def _execute_run(state: AppState, run_id: str) -> None:
             if i == 0:
                 clip.label = "ORIGINAL" if len(run.prompts) > 1 else "CURRENT"
 
-            # Generate-time auto-passes: ReDetail only (resolution mode).
-            # Faces / Upframe / Long take are library actions — spawning them here
-            # littered the library with near-duplicate CURRENT/FACES/… peers.
-            longtake_cfg = None
+            # Opt-in generate-time passes (also available as library actions).
+            # Each successful pass spawns a tagged sibling; source stays.
+            # Faces no-op (no face / abstain) raises and does not spawn a twin.
+            longtake_cfg = run.longtake if isinstance(run.longtake, dict) else None
             longtake_clip_id: str | None = None
             if longtake_cfg and longtake_cfg.get("enabled") and dest.is_file():
                 from h3_longtake import (
@@ -2042,7 +2042,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         },
                     )
 
-            upframe_cfg = None  # library-only
+            upframe_cfg = run.upframe if isinstance(run.upframe, dict) else None
             upframe_clip_id: str | None = None
             if upframe_cfg and upframe_cfg.get("enabled") and dest.is_file():
                 from h3_upframe import (
@@ -2119,7 +2119,7 @@ async def _execute_run(state: AppState, run_id: str) -> None:
                         },
                     )
 
-            faces_cfg = None  # library-only
+            faces_cfg = run.faces if isinstance(run.faces, dict) else None
             faces_clip_id: str | None = None
             if faces_cfg and faces_cfg.get("enabled") and dest.is_file():
                 from h3_facepass import FacesSettings, run_faces_pass

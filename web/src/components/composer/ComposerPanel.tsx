@@ -106,12 +106,38 @@ export type ComposerPanelProps = {
   onSsdStreaming: (v: boolean) => void;
   upscale?: boolean;
   onUpscale?: (v: boolean) => void;
-  /** ReDetail lives on the resolution pill (generate path). Other passes are library-only. */
+  longtakeConfig?: import("../../types").LongTakeConfigPublic | null;
+  longtakeEnabled?: boolean;
+  longtakeDenoise?: number;
+  longtakeKeyframes?: string;
+  longtakeSeed?: number;
+  longtakeInterpolation?: string;
+  onLongtakeEnabled?: (v: boolean) => void;
+  onLongtakeDenoise?: (v: number) => void;
+  onLongtakeKeyframes?: (v: string) => void;
+  onLongtakeSeed?: (v: number) => void;
+  onLongtakeInterpolation?: (v: string) => void;
+  /** ReDetail also lives on the resolution pill. */
   redetailConfig?: import("../../types").RedetailConfigPublic | null;
   redetailDenoise?: number;
   redetailSeed?: number;
   onRedetailDenoise?: (v: number) => void;
   onRedetailSeed?: (v: number) => void;
+  upframeConfig?: import("../../types").UpframeConfigPublic | null;
+  upframeEnabled?: boolean;
+  upframeMultiplier?: number;
+  onUpframeEnabled?: (v: boolean) => void;
+  onUpframeMultiplier?: (v: number) => void;
+  onUpframeNeedWeights?: () => void;
+  facesConfig?: import("../../types").FacesConfigPublic | null;
+  facesEnabled?: boolean;
+  facesCanvas?: number;
+  facesDenoise?: number;
+  facesSeed?: number;
+  onFacesEnabled?: (v: boolean) => void;
+  onFacesCanvas?: (v: number) => void;
+  onFacesDenoise?: (v: number) => void;
+  onFacesSeed?: (v: number) => void;
   clipMultiplier: number;
   onClipMultiplier: (n: number) => void;
   sceneQueue: SceneQueueItem[];
@@ -396,6 +422,32 @@ export function ComposerPanel(props: ComposerPanelProps) {
           clipMultiplierMax={props.config.clip_multiplier_max ?? 10}
           showClips={compiled.modeHint !== "ref2va"}
           onClipMultiplier={props.onClipMultiplier}
+          longtakeConfig={props.longtakeConfig}
+          longtakeEnabled={props.longtakeEnabled}
+          longtakeDenoise={props.longtakeDenoise}
+          longtakeKeyframes={props.longtakeKeyframes}
+          longtakeSeed={props.longtakeSeed}
+          longtakeInterpolation={props.longtakeInterpolation}
+          onLongtakeEnabled={props.onLongtakeEnabled}
+          onLongtakeDenoise={props.onLongtakeDenoise}
+          onLongtakeKeyframes={props.onLongtakeKeyframes}
+          onLongtakeSeed={props.onLongtakeSeed}
+          onLongtakeInterpolation={props.onLongtakeInterpolation}
+          upframeConfig={props.upframeConfig}
+          upframeEnabled={props.upframeEnabled}
+          upframeMultiplier={props.upframeMultiplier}
+          onUpframeEnabled={props.onUpframeEnabled}
+          onUpframeMultiplier={props.onUpframeMultiplier}
+          onUpframeNeedWeights={props.onUpframeNeedWeights}
+          facesConfig={props.facesConfig}
+          facesEnabled={props.facesEnabled}
+          facesCanvas={props.facesCanvas}
+          facesDenoise={props.facesDenoise}
+          facesSeed={props.facesSeed}
+          onFacesEnabled={props.onFacesEnabled}
+          onFacesCanvas={props.onFacesCanvas}
+          onFacesDenoise={props.onFacesDenoise}
+          onFacesSeed={props.onFacesSeed}
         />
       </div>
       {props.loraActivity && <p className="lora-inline-hint">{props.loraActivity}</p>}

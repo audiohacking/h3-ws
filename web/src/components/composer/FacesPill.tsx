@@ -34,8 +34,8 @@ export function FacesPill({
   const title = !config
     ? "Faces"
     : !samReady
-      ? "Faces — SAM 3.1 downloads automatically when you generate"
-      : "Face refine — new library clip (original kept)";
+      ? "Faces — SAM 3.1 downloads automatically on first Faces run"
+      : "Face refine — new library clip after generate (original kept); also on library cards";
 
   useDismissable(open, () => setOpen(false), rootRef);
   useEffect(() => {
