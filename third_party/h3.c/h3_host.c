@@ -177,6 +177,37 @@ int h3_serving_schedule_build(int evaluations, h3_sigma_schedule *schedule) {
     return 1;
 }
 
+int h3_knot_schedule_build(const int *knots, int knot_count,
+                           h3_sigma_schedule *schedule) {
+    if (!schedule || !knots || knot_count < 3 ||
+        knot_count - 1 > H3_MAX_STEPS) {
+        return 0;
+    }
+    if (knots[0] != 1000 || knots[knot_count - 1] != 0) return 0;
+    for (int index = 1; index < knot_count; index++) {
+        if (knots[index] < 0 || knots[index] > 1000) return 0;
+        if (knots[index] >= knots[index - 1]) return 0;
+    }
+    memset(schedule, 0, sizeof(*schedule));
+    int steps = knot_count - 1;
+    schedule->steps = steps;
+    for (int index = 0; index < steps; index++) {
+        float base = (float)knots[index] / 1000.0f;
+        schedule->video[index] = (float)H3_VIDEO_SIGMA_SHIFT * base /
+            (1.0f + ((float)H3_VIDEO_SIGMA_SHIFT - 1.0f) * base);
+        schedule->audio[index] = (float)H3_AUDIO_SIGMA_SHIFT * base /
+            (1.0f + ((float)H3_AUDIO_SIGMA_SHIFT - 1.0f) * base);
+    }
+    schedule->video[steps] = 0.0f;
+    schedule->audio[steps] = 0.0f;
+    return 1;
+}
+
+int h3_pika_flex_schedule_build(h3_sigma_schedule *schedule) {
+    static const int knots[] = {1000, 750, 500, 250, 100, 40, 0};
+    return h3_knot_schedule_build(knots, 7, schedule);
+}
+
 typedef struct {
     h3_layout *layout;
     size_t position_capacity;

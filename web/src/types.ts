@@ -13,6 +13,8 @@ export interface LoraPreset {
   steps?: number;
   layers?: number;
   reuse?: number;
+  /** Named h3.c schedule (e.g. pika-flex). */
+  schedule?: string | null;
   guidance?: string | null;
   path?: string;
   /** Hugging Face model card — prompting / strength notes for this adapter. */

@@ -1675,9 +1675,33 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         goto cleanup;
     }
     h3_sigma_schedule sigmas;
-    if (!h3_serving_schedule_build(params->steps, &sigmas)) {
-        h3_set_error(ctx, "cannot construct the requested sigma schedule");
-        goto cleanup;
+    {
+        const char *schedule_name = params->schedule;
+        int schedule_ok = 0;
+        if (schedule_name && schedule_name[0] &&
+            strcmp(schedule_name, "serving") != 0) {
+            if (!strcmp(schedule_name, "pika-flex") ||
+                !strcmp(schedule_name, "pika_flex")) {
+                schedule_ok = h3_pika_flex_schedule_build(&sigmas);
+                if (schedule_ok && params->steps != sigmas.steps) {
+                    fprintf(stderr,
+                            "h3: schedule pika-flex uses %d steps "
+                            "(ignoring --steps %d)\n",
+                            sigmas.steps, params->steps);
+                }
+            } else {
+                h3_set_error(ctx, "unknown --schedule '%s' "
+                             "(try serving or pika-flex)",
+                             schedule_name);
+                goto cleanup;
+            }
+        } else {
+            schedule_ok = h3_serving_schedule_build(params->steps, &sigmas);
+        }
+        if (!schedule_ok) {
+            h3_set_error(ctx, "cannot construct the requested sigma schedule");
+            goto cleanup;
+        }
     }
     float spatial_rope_scale = !params->use_reference_rope &&
         render_width == 256 && render_height == 256 ? 0.5f : 1.0f;

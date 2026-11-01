@@ -12,9 +12,10 @@ export function isTurboPreset(p: LoraPreset): boolean {
   const hay = `${p.id} ${p.label} ${p.spec}`.toLowerCase();
   if (/\b(taomate|dmad|fasth3)\b/.test(hay)) return true;
   if (/tutu|20to8[_-]?nfe/.test(hay)) return true;
+  if (/pika[_-]?h3[_-]?flex|pika-labs.*flex/.test(hay)) return true;
   // H3/MiniMax distill packs (LightX2V, *turbo*, *8step*, …) — require h3|minimax.
   if (
-    /(?:lightx2v|[_-]turbo[_-]|\bdmd\b|8step|3step|4step).*(?:h3|minimax)|(?:h3|minimax).*(?:lightx2v|[_-]turbo[_-]|dmd|8step|3step|4step|nfe)/.test(
+    /(?:lightx2v|[_-]turbo[_-]|\bdmd\b|8step|3step|4step|6step).*(?:h3|minimax)|(?:h3|minimax).*(?:lightx2v|[_-]turbo[_-]|dmd|8step|3step|4step|6step|nfe)/.test(
       hay,
     )
   ) {
@@ -34,6 +35,23 @@ export function pickDefaultTurboId(presets: LoraPreset[]): string | null {
   return ranked[0]?.id ?? null;
 }
 
+/** FL2VA/T2VA ↔ Ref2VA turbo pairs (Pika Flex, LightX2V). */
+export const TURBO_MODE_PAIRS: ReadonlyArray<readonly [string, string]> = [
+  ["pika_h3_flex_fl2va", "pika_h3_flex_ref2va"],
+  ["lightx2v_fl2v_turbo_8step", "lightx2v_ref2v_turbo_8step"],
+];
+
+/** Swap a paired turbo id to match generate mode; unpaired ids pass through. */
+export function turboIdForMode(presetId: string, modeHint: string): string {
+  const wantRef = modeHint === "ref2va";
+  for (const [flId, refId] of TURBO_MODE_PAIRS) {
+    if (presetId === flId || presetId === refId) {
+      return wantRef ? refId : flId;
+    }
+  }
+  return presetId;
+}
+
 /**
  * Published recipe strength for a turbo adapter. Prefer `default_scale` from the
  * API; fall back to Continuity / HF card defaults so a stale catalog (e.g. old
@@ -45,6 +63,7 @@ export function recipeScaleForTurbo(p: LoraPreset): number {
   }
   const hay = `${p.id} ${p.label} ${p.spec}`.toLowerCase();
   if (/\bdmad\b/.test(hay) && !/8step/.test(hay)) return 1.0;
+  if (/pika[_-]?h3[_-]?flex|pika-labs.*flex/.test(hay)) return 1.0;
   if (
     /(?:lightx2v|ref2v_turbo|fl2v_turbo|[_-]turbo[_-].*8step|8step.*turbo)/.test(hay) &&
     /(?:h3|minimax)/.test(hay)

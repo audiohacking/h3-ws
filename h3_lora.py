@@ -50,13 +50,32 @@ LIGHTX2V_GUIDANCE = (
     "Do not turn this down to 0.6 unless you are A/B testing."
 )
 
+# Pinned Comfy BF16 Flex pack (native qkv_proj). Diffusers tree is not for h3.c.
+PIKA_FLEX_REPO = "Pika-Labs/Pika-H3-Flex"
+PIKA_FLEX_REVISION = "3ff166447d5edb1406107ab8370c42000ce173e4"
+PIKA_FLEX_FL2VA_FILE = "comfy/loras/pika_h3_flex_fl2va_comfy_bf16.safetensors"
+PIKA_FLEX_REF2VA_FILE = "comfy/loras/pika_h3_flex_ref2va_comfy_bf16.safetensors"
+PIKA_FLEX_GUIDANCE = (
+    "Pika H3 Flex 6-NFE turbo (Comfy BF16). Strength 1.0 — missing alpha "
+    "defaults to rank so fuse scale*(alpha/rank) is unit at 1.0. Preset starts "
+    "at 6 steps with the pika-flex knot schedule (1000/750/500/250/100/40/0). "
+    "Ref2VA ↔ FL2VA/T2VA swap automatically from generate mode. "
+    "TaoMate remains the Continuity Turbo default until bake-off."
+)
+
+# Mode-aware turbo pairs: (fl_id, ref_id). Frontend/backend swap by mode.
+TURBO_MODE_PAIRS: tuple[tuple[str, str], ...] = (
+    ("pika_h3_flex_fl2va", "pika_h3_flex_ref2va"),
+    ("lightx2v_fl2v_turbo_8step", "lightx2v_ref2v_turbo_8step"),
+)
+
 
 def _hf_card(repo: str) -> str:
     return f"https://huggingface.co/{repo}"
 
 
-def _hf_resolve(repo: str, filename: str) -> str:
-    return f"https://huggingface.co/{repo}/resolve/main/{filename}"
+def _hf_resolve(repo: str, filename: str, revision: str = "main") -> str:
+    return f"https://huggingface.co/{repo}/resolve/{revision}/{filename}"
 
 
 def _recipe(
@@ -72,12 +91,14 @@ def _recipe(
     steps: int | None = None,
     layers: int | None = None,
     reuse: int | None = None,
+    schedule: str | None = None,
+    revision: str = "main",
 ) -> dict[str, Any]:
     """One downloadable LoRA preset with HF model-card link for prompting notes."""
     entry: dict[str, Any] = {
         "id": id,
         "label": label,
-        "spec": _hf_resolve(repo, filename),
+        "spec": _hf_resolve(repo, filename, revision=revision),
         "scale": scale,
         # Immutable recipe strength — UI may edit `scale`; Turbo select resets from this.
         "default_scale": scale,
@@ -92,6 +113,8 @@ def _recipe(
         entry["layers"] = layers
     if reuse is not None:
         entry["reuse"] = reuse
+    if schedule:
+        entry["schedule"] = schedule
     return entry
 
 
@@ -137,6 +160,16 @@ _DISK_LORA_HINTS: tuple[dict[str, Any], ...] = (
         "turbo": True,
         "category": "turbo",
         "card_url": _hf_card(LIGHTX2V_REPO),
+    },
+    {
+        "match": re.compile(r"pika[_-]?h3[_-]?flex|pika-labs.*flex", re.I),
+        "scale": 1.0,
+        "steps": 6,
+        "schedule": "pika-flex",
+        "guidance": PIKA_FLEX_GUIDANCE,
+        "turbo": True,
+        "category": "turbo",
+        "card_url": _hf_card(PIKA_FLEX_REPO),
     },
     {
         "match": re.compile(r"(?:fasth3|3step|3[_-]?nfe).*(?:h3|minimax)|(?:h3|minimax).*(?:fasth3|3step|3[_-]?nfe)", re.I),
@@ -372,6 +405,36 @@ BUILTIN_LORAS: list[dict[str, Any]] = [
         layers=50,
         reuse=1,
         guidance=LIGHTX2V_GUIDANCE,
+        category="turbo",
+        turbo=True,
+    ),
+    _recipe(
+        id="pika_h3_flex_fl2va",
+        label="Pika H3 Flex FL2VA 6-step",
+        repo=PIKA_FLEX_REPO,
+        filename=PIKA_FLEX_FL2VA_FILE,
+        revision=PIKA_FLEX_REVISION,
+        scale=1.0,
+        steps=6,
+        layers=50,
+        reuse=1,
+        schedule="pika-flex",
+        guidance=PIKA_FLEX_GUIDANCE,
+        category="turbo",
+        turbo=True,
+    ),
+    _recipe(
+        id="pika_h3_flex_ref2va",
+        label="Pika H3 Flex Ref2VA 6-step",
+        repo=PIKA_FLEX_REPO,
+        filename=PIKA_FLEX_REF2VA_FILE,
+        revision=PIKA_FLEX_REVISION,
+        scale=1.0,
+        steps=6,
+        layers=50,
+        reuse=1,
+        schedule="pika-flex",
+        guidance=PIKA_FLEX_GUIDANCE,
         category="turbo",
         turbo=True,
     ),
@@ -624,7 +687,7 @@ def lora_cache_dir() -> Path:
 
 # Hub repo names that look like LoRA / turbo adapters (not the base MiniMax tree).
 _HF_LORA_REPO_RE = re.compile(
-    r"lora|turbo|tutu|taomate|dmad|nfe|distill|fasth3|lightx|20to8|3step|4step|8step|"
+    r"lora|turbo|tutu|taomate|dmad|nfe|distill|fasth3|lightx|pika|flex|20to8|3step|4step|6step|8step|"
     r"equi360|vr180|wushu|camera.?motion|spatial|vh5tape|studio.?1939|realism|"
     r"character.?swap|crossview|anime.?motion|pixel|sketch",
     re.I,
@@ -1048,12 +1111,17 @@ def _entry_for_lora_path(path: Path, *, root: Path | None = None, source: str = 
     category = hint.get("category") or (builtin or {}).get("category")
     if category:
         entry["category"] = category
+    schedule = hint.get("schedule") or (builtin or {}).get("schedule")
+    if schedule:
+        entry["schedule"] = str(schedule)
     if hint.get("turbo") or (builtin or {}).get("turbo"):
         entry["turbo"] = True
         entry["layers"] = int((builtin or {}).get("layers") or 50)
         entry["reuse"] = int((builtin or {}).get("reuse") or 1)
         if hint.get("steps") is None and builtin and builtin.get("steps") is not None:
             entry["steps"] = int(builtin["steps"])
+        if not entry.get("schedule") and builtin and builtin.get("schedule"):
+            entry["schedule"] = str(builtin["schedule"])
     return entry
 
 
@@ -1273,3 +1341,113 @@ def parse_lora_specs(raw: Any, catalog: list[dict[str, Any]] | None = None) -> l
             continue
         out.append((spec, max(0.0, float(scale))))
     return out
+
+
+def turbo_pair_mate(preset_id: str, *, want_ref2va: bool) -> str:
+    """Return the mode-matched turbo id (FL↔Ref) for known pairs; else unchanged."""
+    pid = str(preset_id or "").strip()
+    if not pid:
+        return pid
+    for fl_id, ref_id in TURBO_MODE_PAIRS:
+        if pid == fl_id:
+            return ref_id if want_ref2va else fl_id
+        if pid == ref_id:
+            return ref_id if want_ref2va else fl_id
+    return pid
+
+
+def rewrite_lora_items_for_mode(
+    raw: Any,
+    mode: str,
+    catalog: list[dict[str, Any]] | None = None,
+) -> Any:
+    """Swap Flex/LightX2V FL↔Ref recipe ids (and matching leaf specs) for ``mode``."""
+    if raw is None:
+        return raw
+    want_ref = str(mode or "").strip().lower() == "ref2va"
+    catalog = catalog or []
+    by_id = {str(p.get("id")): p for p in catalog}
+    leaf_to_id: dict[str, str] = {}
+    for item in catalog:
+        lid = str(item.get("id") or "")
+        if not lid:
+            continue
+        spec = normalize_lora_spec(str(item.get("spec") or ""))
+        if spec:
+            leaf_to_id[Path(spec).name.lower()] = lid
+        path = item.get("path")
+        if path:
+            leaf_to_id[Path(str(path)).name.lower()] = lid
+
+    def rewrite_one(item: Any) -> Any:
+        if not isinstance(item, dict):
+            return item
+        out = dict(item)
+        lid = str(out.get("id") or "").strip()
+        if not lid:
+            spec = normalize_lora_spec(str(out.get("spec") or out.get("path") or ""))
+            if spec:
+                lid = leaf_to_id.get(Path(spec).name.lower(), "")
+        if not lid:
+            return out
+        mate = turbo_pair_mate(lid, want_ref2va=want_ref)
+        if mate == lid or mate not in by_id:
+            return out
+        mate_entry = by_id[mate]
+        out["id"] = mate
+        out["spec"] = str(mate_entry.get("spec") or out.get("spec") or "")
+        if mate_entry.get("path"):
+            out["path"] = mate_entry["path"]
+        if "scale" not in out and mate_entry.get("scale") is not None:
+            out["scale"] = mate_entry["scale"]
+        return out
+
+    if isinstance(raw, dict):
+        return rewrite_one(raw)
+    if isinstance(raw, list):
+        return [rewrite_one(item) for item in raw]
+    return raw
+
+
+def schedule_for_lora_specs(
+    specs: list[tuple[str, float]],
+    catalog: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """Named h3.c ``--schedule`` for active LoRAs (Flex → ``pika-flex``)."""
+    catalog = catalog or []
+    by_leaf: dict[str, dict[str, Any]] = {}
+    for item in catalog:
+        for key in (item.get("spec"), item.get("path")):
+            if not key:
+                continue
+            by_leaf[Path(str(key)).name.lower()] = item
+    for spec, _scale in specs:
+        leaf = Path(normalize_lora_spec(spec)).name.lower()
+        entry = by_leaf.get(leaf)
+        if entry and entry.get("schedule"):
+            return str(entry["schedule"])
+        if "pika_h3_flex" in leaf or "pika-h3-flex" in leaf:
+            return "pika-flex"
+        try:
+            path = Path(spec)
+            if path.is_file():
+                hit = _builtin_match_for_path(path) or _hint_for_lora_path(path)
+                if hit and hit.get("schedule"):
+                    return str(hit["schedule"])
+        except OSError:
+            pass
+    return None
+
+
+def schedule_for_loras(loras: list[Any]) -> str | None:
+    """Resolve schedule from resolved ``LoraRef``-like objects (``.path``)."""
+    specs: list[tuple[str, float]] = []
+    for item in loras:
+        path = getattr(item, "path", None)
+        if path is None and isinstance(item, dict):
+            path = item.get("path") or item.get("spec")
+        if path is None:
+            continue
+        scale = float(getattr(item, "scale", 1.0) if not isinstance(item, dict) else item.get("scale", 1.0))
+        specs.append((str(path), scale))
+    return schedule_for_lora_specs(specs, lora_catalog())

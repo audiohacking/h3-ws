@@ -67,6 +67,8 @@ export const TURBO_CONFIG = {
     "taomate",
     "dmad",
     "tutu",
+    "pika_h3_flex",
+    "pika-h3-flex",
     "ref2v_turbo",
     "fl2v_turbo",
     "lightx2v",
@@ -100,8 +102,9 @@ export const TURBO_CONFIG = {
 
   /** Guidance text */
   GUIDANCE:
-    "Uses a turbo/distill LoRA from your models/loras folder (TaoMate, DMAD, Tutu, LightX2V, …). " +
+    "Uses a turbo/distill LoRA from your models/loras folder (TaoMate, DMAD, Tutu, Pika Flex, LightX2V, …). " +
     "DMAD is the 4-step FL2VA/T2VA paper student; TaoMate is the fastest 3-step default. " +
+    "Pika Flex starts at 6 steps with its knot schedule. " +
     "Pick another in the chevron menu before you generate — settings lock while a run is in progress.",
 } as const;
 
