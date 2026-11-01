@@ -119,6 +119,12 @@ double h3_time_shift_slope(double sigma, double from_shift, double to_shift);
 int h3_schedule_build(int steps, h3_sigma_schedule *schedule);
 /* Released linear base grid: evaluations model forwards plus terminal zero. */
 int h3_serving_schedule_build(int evaluations, h3_sigma_schedule *schedule);
+/* Knot schedule: integer knots in [0,1000], descending, final knot must be 0.
+ * Emits (knot_count-1) denoising evaluations with video/audio time-shift. */
+int h3_knot_schedule_build(const int *knots, int knot_count,
+                           h3_sigma_schedule *schedule);
+/* Pika H3 Flex six-NFE contract: knots 1000/750/500/250/100/40/0. */
+int h3_pika_flex_schedule_build(h3_sigma_schedule *schedule);
 
 int h3_layout_build(const h3_layout_spec *spec, h3_layout *layout,
                     char *error, size_t error_size);

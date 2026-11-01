@@ -29,6 +29,7 @@ static void usage(const char *program) {
         "      --frames N         Requested frames (default: 56)\n"
         "      --seconds N        Requested duration at 24 fps (instead of --frames)\n"
         "      --steps N          Denoising passes (default: 20)\n"
+        "      --schedule NAME    Sigma schedule: serving (default) or pika-flex\n"
         "      --reuse N          Denoiser reuse: 1 close, 2 fast, 3 aggressive\n"
         "      --layers N         DiT blocks: 50 exact, 45 fast, 40 aggressive\n"
         "      --core-reuse N     Core refresh: 1 exact, 4 fast, 6 aggressive\n"
@@ -238,7 +239,7 @@ static int cli_frame(const h3_frame *frame, void *opaque) {
 
 int main(int argc, char **argv) {
     enum { OPT_WIDTH = 1000, OPT_HEIGHT, OPT_RENDER_WIDTH, OPT_RENDER_HEIGHT,
-           OPT_FRAMES, OPT_SECONDS, OPT_STEPS, OPT_REUSE,
+           OPT_FRAMES, OPT_SECONDS, OPT_STEPS, OPT_SCHEDULE, OPT_REUSE,
            OPT_LAYERS,
            OPT_CORE_REUSE,
            OPT_TOKEN_REDUCTION,
@@ -275,6 +276,7 @@ int main(int argc, char **argv) {
         {"frames", required_argument, NULL, OPT_FRAMES},
         {"seconds", required_argument, NULL, OPT_SECONDS},
         {"steps", required_argument, NULL, OPT_STEPS},
+        {"schedule", required_argument, NULL, OPT_SCHEDULE},
         {"reuse", required_argument, NULL, OPT_REUSE},
         {"layers", required_argument, NULL, OPT_LAYERS},
         {"core-reuse", required_argument, NULL, OPT_CORE_REUSE},
@@ -407,6 +409,7 @@ int main(int argc, char **argv) {
                 seconds_given = 1;
                 break;
             case OPT_STEPS: params.steps = parse_int(optarg, "steps"); break;
+            case OPT_SCHEDULE: params.schedule = optarg; break;
             case OPT_REUSE:
                 params.denoise_reuse = parse_int(optarg, "reuse");
                 break;

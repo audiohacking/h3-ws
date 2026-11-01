@@ -1317,13 +1317,25 @@ def _clip_settings_from_body(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _loras_from_body(state: AppState, body: dict[str, Any]) -> list[LoraRef]:
-    from h3_lora import lora_catalog, parse_lora_specs, resolve_lora_path
-
-    specs = parse_lora_specs(
-        body.get("loras") or body.get("lora_specs"),
-        lora_catalog(state.output_dir),
+def _loras_from_body(
+    state: AppState,
+    body: dict[str, Any],
+    *,
+    mode: str | None = None,
+) -> list[LoraRef]:
+    from h3_lora import (
+        lora_catalog,
+        parse_lora_specs,
+        resolve_lora_path,
+        rewrite_lora_items_for_mode,
     )
+
+    catalog = lora_catalog(state.output_dir)
+    raw = body.get("loras") or body.get("lora_specs")
+    mode_hint = str(mode or body.get("mode") or "").strip().lower()
+    if mode_hint:
+        raw = rewrite_lora_items_for_mode(raw, mode_hint, catalog)
+    specs = parse_lora_specs(raw, catalog)
     return [
         LoraRef(spec=spec, path=resolve_lora_path(spec), scale=scale)
         for spec, scale in specs
@@ -1452,7 +1464,13 @@ def _request_from_body(
         raise ValueError("ref2va requires at least one image, video, or audio reference")
     rw = settings.get("render_width")
     rh = settings.get("render_height")
-    loras = _loras_from_body(state, body) if state is not None else []
+    loras = _loras_from_body(state, body, mode=mode) if state is not None else []
+    # Recipe default only when the client omitted schedule (e.g. Flex → pika-flex).
+    schedule = str(body.get("schedule") or "").strip() or None
+    if not schedule and loras:
+        from h3_lora import schedule_for_loras
+
+        schedule = schedule_for_loras(loras)
     return GenerateRequest(
         prompt=prompt,
         output_path=output,
@@ -1476,6 +1494,7 @@ def _request_from_body(
         refs=refs,
         loras=loras,
         mode=mode,
+        schedule=schedule,
     )
 
 
@@ -2898,6 +2917,22 @@ def create_app(
         tao_spec = str(tao["spec"]) if tao else ""
         tao_path = lora_cached_path(tao_spec) if tao_spec else None
         tao_ok = tao_path is not None and tao_path.is_file()
+        pika_recipes = [
+            p
+            for p in BUILTIN_LORAS
+            if p.get("id") in ("pika_h3_flex_fl2va", "pika_h3_flex_ref2va")
+        ]
+        pika_paths = [
+            lora_cached_path(str(p["spec"]))
+            for p in pika_recipes
+            if p.get("spec")
+        ]
+        pika_ok = bool(pika_paths) and all(
+            path is not None and path.is_file() for path in pika_paths
+        )
+        pika_present = sum(
+            1 for path in pika_paths if path is not None and path.is_file()
+        )
 
         from h3_redetail import latent_upscaler_path
         from h3_sam import sam3_status
@@ -2943,6 +2978,30 @@ def create_app(
                 "path": str(tao_path) if tao_path else tao_spec,
                 "size_gib": round(_file_gib(tao_path), 2) if tao_path else 2.4,
                 "note": "3-step turbo LoRA (~2.4 GB). Optional — enables Turbo quality.",
+                "essential": False,
+            },
+            {
+                "id": "pika_flex",
+                "label": "Pika H3 Flex turbo",
+                "present": pika_ok,
+                "path": (
+                    str(pika_paths[0])
+                    if pika_paths and pika_paths[0] is not None
+                    else "models/loras/Pika-Labs__Pika-H3-Flex/comfy/loras/"
+                ),
+                "size_gib": (
+                    round(sum(_file_gib(p) for p in pika_paths if p), 1)
+                    if pika_present
+                    else 3.6
+                ),
+                "note": (
+                    "Optional 6-step Flex turbo (FL2VA + Ref2VA Comfy BF16, ~3.6 GB). "
+                    + (
+                        "Ready."
+                        if pika_ok
+                        else f"{pika_present}/2 files on disk — download installs both."
+                    )
+                ),
                 "essential": False,
             },
             {
@@ -3107,18 +3166,19 @@ def create_app(
         "ref2va": 61.7 * 1024**3,   # ~62 GB (transformer only)
         "taeh3": 22 * 1024**2,      # ~22 MB
         "taomate": 2.4 * 1024**3,   # ~2.4 GB
+        "pika_flex": 3.6 * 1024**3,  # ~1.8 GB × FL2VA + Ref2VA
         "dmad": 1.4 * 1024**3,      # API-compat only (not listed in Models UI)
         "film_net": 69 * 1024**2,    # ~69 MB FILM
         "latent_upscale": 500 * 1024**2,  # ~0.5 GB estimate; optional
         "sam3": 3.3 * 1024**3,      # ~3.3 GB mlx-community/sam3.1-bf16
     }
     _DOWNLOAD_COMPONENT_HELP = (
-        "fl2va, ref2va, taeh3, taomate, film_net, latent_upscale, sam3"
+        "fl2va, ref2va, taeh3, taomate, pika_flex, film_net, latent_upscale, sam3"
     )
 
     _COMPONENT_DIR = {"fl2va": "FL2VA", "ref2va": "Ref2VA"}
     _LIGHT_COMPONENTS = frozenset(
-        {"taeh3", "taomate", "film_net", "latent_upscale", "sam3"}
+        {"taeh3", "taomate", "pika_flex", "film_net", "latent_upscale", "sam3"}
     )
     _ALL_DOWNLOAD_COMPONENTS = frozenset(
         {
@@ -3126,6 +3186,7 @@ def create_app(
             "ref2va",
             "taeh3",
             "taomate",
+            "pika_flex",
             "dmad",
             "film_net",
             "latent_upscale",
@@ -3202,19 +3263,33 @@ def create_app(
                             total = 0
                 return total, 0
             return _sum_hf_local_progress(root)
-        if component in ("taomate", "dmad"):
+        if component in ("taomate", "dmad", "pika_flex"):
             from h3_lora import BUILTIN_LORAS, lora_cached_path, lora_download_dir
 
-            lid = "taomate_h3_3step" if component == "taomate" else "dmad_h3_4step"
-            recipe = next((p for p in BUILTIN_LORAS if p.get("id") == lid), None)
-            if not recipe:
+            if component == "pika_flex":
+                recipes = [
+                    p
+                    for p in BUILTIN_LORAS
+                    if p.get("id") in ("pika_h3_flex_fl2va", "pika_h3_flex_ref2va")
+                ]
+            else:
+                lid = "taomate_h3_3step" if component == "taomate" else "dmad_h3_4step"
+                recipes = [p for p in BUILTIN_LORAS if p.get("id") == lid]
+            if not recipes:
                 return 0, 0
-            hit = lora_cached_path(str(recipe["spec"]))
-            if hit is not None and hit.is_file():
-                return hit.stat().st_size, 0
-            # Partials land under models/loras/<repo>/.cache while hf_hub_download runs.
-            dest = lora_download_dir(str(recipe["spec"]))
-            return _sum_hf_local_progress(dest) if dest is not None else (0, 0)
+            complete = 0
+            incomplete = 0
+            for recipe in recipes:
+                hit = lora_cached_path(str(recipe["spec"]))
+                if hit is not None and hit.is_file():
+                    complete += hit.stat().st_size
+                    continue
+                dest = lora_download_dir(str(recipe["spec"]))
+                if dest is not None:
+                    c, i = _sum_hf_local_progress(dest)
+                    complete += c
+                    incomplete += i
+            return complete, incomplete
         comp_dir = _COMPONENT_DIR.get(component)
         if not comp_dir:
             return 0, 0
@@ -3271,6 +3346,19 @@ def create_app(
                 if not tao:
                     raise RuntimeError("TaoMate builtin recipe missing")
                 await asyncio.to_thread(ensure_lora, str(tao["spec"]))
+                _download_state["error"] = None
+            elif component == "pika_flex":
+                from h3_lora import BUILTIN_LORAS, ensure_lora
+
+                recipes = [
+                    p
+                    for p in BUILTIN_LORAS
+                    if p.get("id") in ("pika_h3_flex_fl2va", "pika_h3_flex_ref2va")
+                ]
+                if len(recipes) < 2:
+                    raise RuntimeError("Pika Flex builtin recipes missing")
+                for recipe in recipes:
+                    await asyncio.to_thread(ensure_lora, str(recipe["spec"]))
                 _download_state["error"] = None
             elif component == "dmad":
                 from h3_lora import BUILTIN_LORAS, ensure_lora

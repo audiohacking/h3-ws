@@ -876,6 +876,8 @@ class GenerateRequest:
     denoise_video_strengths_file: Path | None = None
     # ReDetail refine: allow canvases above the one-pass UI allowlist (still ≤ MAX_PIXELS).
     allow_expanded_canvas: bool = False
+    # Named sigma schedule for h3.c (--schedule). Flex turbo → "pika-flex".
+    schedule: str | None = None
 
 
 def uses_ref2va(req: GenerateRequest) -> bool:
@@ -917,6 +919,12 @@ def build_h3_argv(
         raise ValueError("Ref2VA references cannot be mixed with first/last-frame anchors")
     if req.mode == "ref2va" and not req.refs:
         raise ValueError("ref2va requires at least one image, video, or audio reference")
+
+    schedule = (req.schedule or "").strip() or None
+    if not schedule and req.loras:
+        from h3_lora import schedule_for_loras
+
+        schedule = schedule_for_loras(req.loras)
 
     from h3_session import MAX_PROMPT_CHARS, PROMPT_FILE_THRESHOLD, write_session_prompt_file
 
@@ -979,6 +987,8 @@ def build_h3_argv(
         cmd.append("--use-slower-bf16-attention-output")
     for lora in req.loras:
         cmd.extend(["--lora", f"{lora.path}:{lora.scale:.4g}"])
+    if schedule:
+        cmd.extend(["--schedule", schedule])
     if req.profile:
         cmd.append("--profile")
     if req.first_frame:

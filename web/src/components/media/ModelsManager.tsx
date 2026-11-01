@@ -51,8 +51,10 @@ const SIZE_HINT: Record<string, string> = {
   ref2va: "~62 GB",
   taeh3: "~22 MB",
   taomate: "~2.4 GB",
+  pika_flex: "~3.6 GB",
   film_net: "~69 MB",
   latent_upscale: "optional",
+  sam3: "~3.3 GB",
 };
 
 /**
@@ -217,7 +219,12 @@ export function ModelsManager({ api, onClose, onDownloadStateChange, onPathAppli
   function startDownload(component: ModelComponent) {
     if (busyId !== null) return;
     const sizeHint = SIZE_HINT[component.id] || "~? GB";
-    const needsConfirm = component.id === "fl2va" || component.id === "ref2va" || component.id === "taomate";
+    const needsConfirm =
+      component.id === "fl2va" ||
+      component.id === "ref2va" ||
+      component.id === "taomate" ||
+      component.id === "pika_flex" ||
+      component.id === "sam3";
     if (
       !component.present &&
       needsConfirm &&

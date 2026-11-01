@@ -126,6 +126,31 @@ static void test_schedule(void) {
     }
     CHECK(!h3_serving_schedule_build(1, &schedule));
     CHECK(!h3_serving_schedule_build(H3_MAX_STEPS + 1, &schedule));
+
+    /* Pika H3 Flex six-NFE knots match Comfy ManualSigmas (video shift 12). */
+    CHECK(h3_pika_flex_schedule_build(&schedule));
+    CHECK(schedule.steps == 6);
+    CHECK(schedule.video[0] == 1.0f && schedule.audio[0] == 1.0f);
+    CHECK(close_enough(schedule.video[1], 0.972972973, 1e-6));
+    CHECK(close_enough(schedule.video[2], 0.923076923, 1e-6));
+    CHECK(close_enough(schedule.video[3], 0.8, 1e-6));
+    CHECK(close_enough(schedule.video[4], 0.571428571, 1e-6));
+    CHECK(close_enough(schedule.video[5], 0.333333333, 1e-6));
+    CHECK(schedule.video[6] == 0.0f && schedule.audio[6] == 0.0f);
+    CHECK(close_enough(schedule.audio[1], 3.0f * 0.75f / (1.0f + 2.0f * 0.75f), 1e-6));
+    CHECK(close_enough(schedule.audio[5], 3.0f * 0.04f / (1.0f + 2.0f * 0.04f), 1e-6));
+    for (int index = 0; index < schedule.steps; index++) {
+        CHECK(schedule.video[index] > schedule.video[index + 1]);
+        CHECK(schedule.audio[index] > schedule.audio[index + 1]);
+    }
+    /* Uniform serving-6 must differ from Flex knots (product gap). */
+    h3_sigma_schedule serving6;
+    CHECK(h3_serving_schedule_build(6, &serving6));
+    CHECK(!close_enough(serving6.video[1], schedule.video[1], 1e-4));
+    {
+        static const int bad_knots[] = {1000, 500, 750, 0};
+        CHECK(!h3_knot_schedule_build(bad_knots, 4, &schedule));
+    }
 }
 
 static void test_dit_reuse_schedule(void) {

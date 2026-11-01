@@ -11,6 +11,7 @@ import { captureVideoFrame, formatVideoTime } from "./frameCapture";
 import { refsAreValid } from "./components/composer/RefListEnhanced";
 import { generateId } from "./utils";
 import { FEATURES, TURBO_CONFIG, type TurboTier } from "./config";
+import { isTurboPreset, pickDefaultTurboId, recipeScaleForTurbo, turboIdForMode } from "./components/composer/TurboToggle";
 import { LoraModal } from "./components/lora/LoraModal";
 import { TimelineStrip } from "./components/timeline/TimelineStrip";
 import { ModelsManager } from "./components/media/ModelsManager";
@@ -27,7 +28,6 @@ import {
   resolveCanvas,
   sampleEdgeOf,
 } from "./h3Canvas";
-import { isTurboPreset, pickDefaultTurboId, recipeScaleForTurbo } from "./components/composer/TurboToggle";
 import { FeaturesPopup } from "./components/composer/FeaturesPopup";
 import { DebugModal } from "./components/DebugModal";
 import { RefinePanel } from "./components/composer/RefinePanel";
@@ -907,9 +907,13 @@ export default function App() {
       });
       return withoutTurbo.includes(chosen.id) ? withoutTurbo : [...withoutTurbo, chosen.id];
     });
+    // Recipe step contract wins (TaoMate 3, DMAD 4, Pika Flex 6, LightX2V/Tutu 8).
+    // Tier draft/medium/good only applies when the adapter has no fixed NFE.
     const fixedSteps = chosen.steps;
     const tierConfig = TURBO_CONFIG.TIERS[turboTier];
-    setNumSteps(fixedSteps && fixedSteps <= 4 ? fixedSteps : tierConfig.steps);
+    setNumSteps(
+      typeof fixedSteps === "number" && fixedSteps > 0 ? fixedSteps : tierConfig.steps,
+    );
     setLayers(chosen.layers ?? TURBO_CONFIG.LAYERS);
     setReuse(chosen.reuse ?? TURBO_CONFIG.REUSE);
     setTokenReduction(false);
@@ -1007,7 +1011,7 @@ export default function App() {
     setTurboTier(tier);
     if (turboEnabled) {
       const active = loraPresets.find((p) => p.id === turboLoraId);
-      if (active?.steps && active.steps <= 4) {
+      if (typeof active?.steps === "number" && active.steps > 0) {
         setNumSteps(active.steps);
       } else {
         setNumSteps(TURBO_CONFIG.TIERS[tier].steps);
@@ -1024,6 +1028,17 @@ export default function App() {
     void handleTurboToggle(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- boot once when catalog arrives
   }, [loraPresets]);
+
+  // Keep paired Flex/LightX2V turbo on the mode-matching FL↔Ref adapter.
+  useEffect(() => {
+    if (!turboEnabled || !turboLoraId || busy) return;
+    const mate = turboIdForMode(turboLoraId, effectiveMode);
+    if (mate === turboLoraId) return;
+    const chosen = loraPresets.find((p) => p.id === mate);
+    if (!chosen || !isTurboPreset(chosen)) return;
+    void applyTurboPreset(chosen);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mode/turbo pair sync only
+  }, [effectiveMode, turboEnabled, turboLoraId, loraPresets, busy]);
 
   function addToSceneQueue() {
     const scene: SceneQueueItem = {
@@ -2191,11 +2206,26 @@ export default function App() {
       autoconcat: multi,
       ssd_streaming: opts.loraPresetIds.length ? false : opts.ssdStreaming,
       token_reduction: tokenLocked ? false : opts.tokenReduction,
-      loras: loraPresets
-        .filter((p) => opts.loraPresetIds.includes(p.id))
-        .map((p) => ({ id: p.id, spec: p.spec, scale: p.scale })),
+      loras: (() => {
+        const ids = opts.loraPresetIds.map((id) => turboIdForMode(id, opts.modeHint));
+        return loraPresets
+          .filter((p) => ids.includes(p.id))
+          .map((p) => ({ id: p.id, spec: p.spec, scale: p.scale }));
+      })(),
       project_id: activeProjectId || undefined,
     };
+    // Named schedule from the active turbo recipe when present (steps stay user-editable).
+    {
+      const turboIds = new Set(
+        opts.loraPresetIds.map((id) => turboIdForMode(id, opts.modeHint)),
+      );
+      const activeTurbo = loraPresets.find(
+        (p) => turboIds.has(p.id) && isTurboPreset(p),
+      );
+      if (activeTurbo?.schedule) {
+        body.schedule = activeTurbo.schedule;
+      }
+    }
     if (opts.generation) body.generation = opts.generation;
     if (res?.render_width) body.render_width = res.render_width;
     if (res?.render_height) body.render_height = res.render_height;

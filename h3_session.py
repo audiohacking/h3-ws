@@ -171,6 +171,11 @@ def session_boot_key(req: GenerateRequest) -> tuple[Any, ...]:
     preview_path = (
         str(Path(req.preview_latent_dir).resolve()) if req.preview_latent_dir else ""
     )
+    schedule = (getattr(req, "schedule", None) or "").strip() or None
+    if not schedule and req.loras:
+        from h3_lora import schedule_for_loras
+
+        schedule = schedule_for_loras(req.loras)
     return (
         family,
         lora_fingerprint(req),
@@ -181,6 +186,7 @@ def session_boot_key(req: GenerateRequest) -> tuple[Any, ...]:
         bool(req.use_slower_bf16_mlp),
         bool(req.use_slower_bf16_qkv),
         bool(req.use_slower_bf16_attention_output),
+        schedule or "",
     )
 
 
@@ -226,6 +232,11 @@ def session_commands_for_request(req: GenerateRequest) -> list[str]:
         render_width=req.render_width,
         render_height=req.render_height,
     )
+    schedule = (getattr(req, "schedule", None) or "").strip() or None
+    if not schedule and req.loras:
+        from h3_lora import schedule_for_loras
+
+        schedule = schedule_for_loras(req.loras)
     sticky = refs_need_sticky_argv(req.refs)
     image_refs = refs_are_image_only(req.refs)
 
@@ -306,6 +317,11 @@ def build_session_argv(
     )
     if req.loras and req.ssd_streaming:
         raise ValueError("LoRA cannot be combined with --ssd-streaming")
+    schedule = (getattr(req, "schedule", None) or "").strip() or None
+    if not schedule and req.loras:
+        from h3_lora import schedule_for_loras
+
+        schedule = schedule_for_loras(req.loras)
     cmd = [
         str(h3_bin),
         "-d",
@@ -342,6 +358,8 @@ def build_session_argv(
         cmd.append("--use-slower-bf16-attention-output")
     for lora in req.loras:
         cmd.extend(["--lora", f"{lora.path}:{lora.scale:.4g}"])
+    if schedule:
+        cmd.extend(["--schedule", schedule])
     if req.profile:
         cmd.append("--profile")
     if req.preview_latent_dir:

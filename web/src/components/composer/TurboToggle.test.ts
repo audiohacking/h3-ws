@@ -1,5 +1,11 @@
 import type { LoraPreset } from "../../types";
-import { isTurboPreset, pickDefaultTurboId, rankTurboPreset, recipeScaleForTurbo } from "./TurboToggle";
+import {
+  isTurboPreset,
+  pickDefaultTurboId,
+  rankTurboPreset,
+  recipeScaleForTurbo,
+  turboIdForMode,
+} from "./TurboToggle";
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
@@ -96,6 +102,39 @@ export function runTurboToggleSelfTest() {
     ) === 0.8,
     "taomate recipe scale 0.8",
   );
+
+  assert(
+    isTurboPreset(
+      preset({
+        id: "pika_h3_flex_fl2va",
+        label: "Pika H3 Flex FL2VA 6-step",
+        spec: "/Pika-Labs__Pika-H3-Flex/comfy/loras/pika_h3_flex_fl2va_comfy_bf16.safetensors",
+        turbo: true,
+        steps: 6,
+      }),
+    ),
+    "pika flex turbo",
+  );
+  assert(
+    recipeScaleForTurbo(
+      preset({
+        id: "pika_h3_flex_ref2va",
+        label: "Pika H3 Flex Ref2VA 6-step",
+        spec: "/pika_h3_flex_ref2va_comfy_bf16.safetensors",
+        scale: 0.6,
+      }),
+    ) === 1.0,
+    "pika flex recipe scale 1.0",
+  );
+  assert(
+    turboIdForMode("pika_h3_flex_fl2va", "ref2va") === "pika_h3_flex_ref2va",
+    "pika fl→ref for ref2va",
+  );
+  assert(
+    turboIdForMode("pika_h3_flex_ref2va", "t2va") === "pika_h3_flex_fl2va",
+    "pika ref→fl for t2va",
+  );
+  assert(turboIdForMode("taomate_h3_3step", "ref2va") === "taomate_h3_3step", "taomate unpaired");
 }
 
 runTurboToggleSelfTest();
