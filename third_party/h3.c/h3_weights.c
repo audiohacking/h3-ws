@@ -245,6 +245,80 @@ h3_gpu_tensor *h3_weight_load_f32(const h3_weight_store *store, h3_gpu *gpu,
                        error, error_size);
 }
 
+h3_gpu_tensor *h3_weight_load_f32_as_bf16(const h3_weight_store *store,
+                                           h3_gpu *gpu, const char *name,
+                                           int ndim, const uint64_t *shape,
+                                           char *error, size_t error_size) {
+    const h3_st_header *header = NULL;
+    const h3_st_tensor *tensor = h3_weight_find(store, name, &header);
+    if (!tensor) {
+        fail(error, error_size, "required weight is absent: %s", name);
+        return NULL;
+    }
+    if (tensor->ndim != ndim) {
+        fail(error, error_size, "weight %s has rank %d, expected %d",
+             name, tensor->ndim, ndim);
+        return NULL;
+    }
+    if (tensor->dtype != H3_DTYPE_F32 && tensor->dtype != H3_DTYPE_BF16) {
+        fail(error, error_size, "weight %s has dtype %s, expected F32 or BF16",
+             name, h3_dtype_name(tensor->dtype));
+        return NULL;
+    }
+    uint64_t elements = 1;
+    for (int dimension = 0; dimension < ndim; dimension++) {
+        if (tensor->shape[dimension] != shape[dimension]) {
+            fail(error, error_size, "weight %s shape mismatch at dimension %d",
+                 name, dimension);
+            return NULL;
+        }
+        if (shape[dimension] && elements > UINT64_MAX / shape[dimension]) {
+            fail(error, error_size, "weight %s shape overflows", name);
+            return NULL;
+        }
+        elements *= shape[dimension];
+    }
+    if (elements > SIZE_MAX) {
+        fail(error, error_size, "weight %s is too large for this process", name);
+        return NULL;
+    }
+    size_t count = (size_t)elements;
+    if (tensor->dtype == H3_DTYPE_BF16) {
+        h3_gpu_tensor *result = h3_gpu_tensor_load_bf16(gpu, header->path,
+                                                         tensor->file_offset,
+                                                         count);
+        if (!result)
+            fail(error, error_size, "cannot load %s: %s", name,
+                 h3_gpu_error(gpu));
+        /* Intentionally no h3_lora_fuse — VAE decoder weights only. */
+        return result;
+    }
+    /* Load F32 straight into Metal, then cast on GPU — avoids a host-side
+     * F32→BF16 loop that dominated BF16 VAE load time on M3 Ultra (~0.8 s
+     * extra vs the F32 path for the full 9.7 GiB decoder). */
+    h3_gpu_tensor *f32 = h3_gpu_tensor_load_f32(gpu, header->path,
+                                                tensor->file_offset, count);
+    if (!f32) {
+        fail(error, error_size, "cannot load F32 %s: %s", name,
+             h3_gpu_error(gpu));
+        return NULL;
+    }
+    h3_gpu_tensor *result = h3_gpu_tensor_new_bf16(gpu, count);
+    if (!result ||
+        !h3_gpu_begin(gpu) ||
+        !h3_gpu_cast_f32_to_bf16(gpu, result, f32, (uint32_t)count) ||
+        !h3_gpu_submit(gpu)) {
+        fail(error, error_size, "cannot convert F32 to BF16 for %s: %s",
+             name, h3_gpu_error(gpu));
+        h3_gpu_tensor_free(f32);
+        h3_gpu_tensor_free(result);
+        return NULL;
+    }
+    h3_gpu_tensor_free(f32);
+    /* Intentionally no h3_lora_fuse — VAE decoder weights only. */
+    return result;
+}
+
 h3_gpu_tensor *h3_weight_load_int8(const h3_weight_store *store, h3_gpu *gpu,
                                    const char *name, int ndim,
                                    const uint64_t *shape,

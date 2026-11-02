@@ -65,7 +65,7 @@ h3_ref_cache_tests: tests/test_ref_cache.o $(LIB_OBJ)
 
 # Binaries the desktop app bundles for its built-in self-test.
 SELFTEST_BINS = h3_tests h3_gqa_tests h3_conv3d_tests h3_sdpa_split_tests \
-	h3_cache_invalidate_tests h3_ref_cache_tests h3_bench
+	h3_cache_invalidate_tests h3_ref_cache_tests h3_gpu_bf16_ops_tests h3_bench
 
 selftest: $(SELFTEST_BINS)
 
@@ -118,11 +118,18 @@ tests/bench_dit_864.o: tests/bench_dit.c
 h3_real_video_vae_test: tests/test_real_video_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
+h3_video_vae_tests: tests/test_video_vae.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
+h3_gpu_bf16_ops_tests: tests/test_gpu_bf16_ops.o $(LIB_OBJ)
+	$(CC) -o $@ $^ $(LDLIBS)
+
 h3_semantic_vae_test: tests/test_semantic_vae.o $(LIB_OBJ)
 	$(CC) -o $@ $^ $(LDLIBS)
 
 test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	h3_audio_gpu_tests h3_gqa_tests h3_cache_invalidate_tests h3_conv3d_tests h3_sdpa_split_tests \
+	h3_video_vae_tests h3_gpu_bf16_ops_tests \
 	h3_real_audio_vae_test \
 	h3_real_audio_encoder_test \
 	h3_av_mux_test \
@@ -130,6 +137,7 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	h3_real_multimodal_text_test h3_real_ref_video_text_test
 
 	./h3_tests
+	./h3_gpu_bf16_ops_tests
 	@if test -f misc/fixtures/h3_dit.safetensors && \
 	         test -f misc/fixtures/h3_dit_bf16.safetensors; then \
 		./h3_metal_tests misc/fixtures/h3_dit.safetensors; \
@@ -196,6 +204,11 @@ test: h3_tests h3_metal_tests h3_bf16_tests h3_tokenizer_tests h3_text_tests \
 	else \
 		echo "skip: released Qwen video-pair fixture is not installed"; \
 	fi
+	@if test -f MiniMax-H3/FL2VA/video_vae/source/model.safetensors; then \
+		./h3_video_vae_tests MiniMax-H3; \
+	else \
+		echo "skip: released video VAE weights are not installed"; \
+	fi
 	@if test -f MiniMax-H3/FL2VA/text_encoder/model-00001-of-00014.safetensors && \
 	         test -f misc/fixtures/h3_real_multimodal_text_64.safetensors; then \
 		./h3_real_multimodal_text_test; \
@@ -243,6 +256,7 @@ clean:
 		h3_real_video_encoder_test h3_real_qwen_vision_test \
 		h3_real_multimodal_text_test h3_real_ref_video_text_test \
 		h3_real_dit_schedule_test h3_real_dit_test h3_semantic_dit_test \
-		h3_real_video_vae_test h3_semantic_vae_test \
+		h3_real_video_vae_test h3_semantic_vae_test h3_video_vae_tests \
+		h3_gpu_bf16_ops_tests \
 	h3_dit_bench h3_dit_bench_864 \
 	libh3.a *.o *.d tests/*.o tests/*.d

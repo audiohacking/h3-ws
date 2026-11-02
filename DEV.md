@@ -36,18 +36,20 @@ Upstream triage plan (antirez/h3.c PRs) → ported into `third_party/h3.c`:
 | #4 + #63 | Causal GQA: keep Q×scale in F32; barrier before reusing `reductions[]` |
 | #44 | Round GQA threadgroup `score_bytes` to 16 bytes (`MTL_DEBUG_LAYER`) |
 | #9 | Finite VAE RGB clamp (`fminf(fmaxf)`) |
-| #68 | `h3_cache_invalidate_inputs()` — warm Ref2VA keeps ~9 GiB Video VAE across ref/anchor edits |
+| #68 | `h3_cache_invalidate_inputs()` — warm Ref2VA keeps Video VAE across ref/anchor edits (BF16 ≈4.6 GiB; F32 ≈9 GiB) |
+| #80 | BF16 video VAE ViT decoder; `H3_VAE_PRECISION=f32` kill-switch; warm key includes `|vae-bf16`/`|vae-f32`. Ultra extras: GPU F32↔BF16 casts, `H3_VAE_CONTINUE_BLOCKS` (default 6), GCD unpack/stitch. Keep 256 px tiles. |
 | #64 | Split long non-causal SDPA queries (`H3_SDPA_MAX_QUERY_ROWS` / `--sdpa-query-block`) |
 | (test) | `tests/test_h3.c` safetensors fixture padded to 8-byte header alignment |
 
-**Skipped / already ours:** #1 (256 tiles — locked in `beb9d93`), #14 (runtime LoRA fuse), #34 (preview estimate). **Deferred:** #55 `H3_ATTENTION_CACHE` → Models/product phase.
+**Skipped / already ours:** #1 (256 tiles — locked in `beb9d93`), #14 (runtime LoRA fuse), #34 (preview estimate), #80 (BF16 video VAE decoder). **Deferred:** #55 `H3_ATTENTION_CACHE` → Models/product phase.
 
 **Verify after rebuild:**
 
 ```
 ./scripts/build_h3.sh
-cd third_party/h3.c && make h3_tests h3_gqa_tests h3_cache_invalidate_tests
-./h3_tests && ./h3_gqa_tests && ./h3_cache_invalidate_tests
+cd third_party/h3.c && make h3_tests h3_gqa_tests h3_cache_invalidate_tests h3_gpu_bf16_ops_tests
+./h3_tests && ./h3_gqa_tests && ./h3_cache_invalidate_tests && ./h3_gpu_bf16_ops_tests
+# with weights: ./h3_video_vae_tests ../../models/MiniMax-H3
 ```
 
 GQA expected ballpark: max abs ~0.0039, BF16 mismatch ≪1%. Then rebuild

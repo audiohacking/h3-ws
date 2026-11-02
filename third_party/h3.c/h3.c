@@ -1134,8 +1134,9 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         goto cleanup;
     }
     h3_key decoder_cache_key = {0};
-    if (!h3_key_append(&decoder_cache_key, "%s|%dx%d", vae_path,
-                       latent_h, latent_w)) {
+    if (!h3_key_append(&decoder_cache_key, "%s|%dx%d|vae-%s", vae_path,
+                       latent_h, latent_w,
+                       h3_video_vae_prefers_bf16() ? "bf16" : "f32")) {
         h3_set_error(ctx, "out of memory constructing decoder cache key");
         goto cleanup;
     }
