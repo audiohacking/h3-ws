@@ -19,6 +19,12 @@ typedef void (*h3_video_vae_progress)(int completed_blocks, int total_blocks,
 
 typedef struct h3_video_vae_decoder h3_video_vae_decoder;
 
+/* 1 when the video VAE decoder uses BF16 tensor cores (default); 0 for the
+ * legacy F32 path. Driven by H3_VAE_PRECISION (f32 / bf16). Included in the
+ * warm-session decoder cache key so flipping the env cannot reuse wrong
+ * resident weights. */
+int h3_video_vae_prefers_bf16(void);
+
 /* Resident tiled decoder used by live denoising previews. It decodes one
  * representative middle frame per preview call and can then produce the final
  * complete video without loading the 9.7 GiB weight set again. */

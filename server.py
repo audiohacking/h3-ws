@@ -32,6 +32,7 @@ ensure_python_requirements()
 import websockets  # noqa: E402
 
 from h3_backend import (  # noqa: E402
+    DEFAULT_IDLE_UNLOAD_S,
     H3_DEFAULT_LAYERS,
     H3_DEFAULT_REUSE,
     H3_DEFAULT_STEPS,
@@ -43,6 +44,7 @@ from h3_backend import (  # noqa: E402
     apple_silicon_class,
     parse_refs_payload,
     ram_gb,
+    resolve_idle_unload_s,
 )
 from h3_media import require_ui_canvas, snap_frames  # noqa: E402
 from h3_paths import (  # noqa: E402
@@ -419,6 +421,16 @@ def build_parser() -> argparse.ArgumentParser:
     ui.add_argument("--web-ui", action=argparse.BooleanOptionalAction, default=True)
     ui.add_argument("--web-output-dir", type=Path, default=default_output_dir())
     misc = p.add_argument_group("misc")
+    misc.add_argument(
+        "--idle-unload-seconds",
+        type=float,
+        default=None,
+        metavar="S",
+        help=(
+            "Stop the warm h3 session after S seconds with no generation "
+            f"(default: {int(DEFAULT_IDLE_UNLOAD_S)}; env H3_IDLE_UNLOAD_S; 0 disables)."
+        ),
+    )
     misc.add_argument("--verbose", action="store_true")
     return p
 
@@ -449,6 +461,7 @@ def main() -> None:
         model_dir=args.model_dir,
         default_ssd_streaming=bool(ssd),
     )
+    idle_unload_s = resolve_idle_unload_s(args.idle_unload_seconds)
     defaults = {
         "width": width,
         "height": height,
@@ -459,6 +472,7 @@ def main() -> None:
         "fps": 24,
         "quality": args.quality,
         "ssd_streaming": bool(ssd),
+        "idle_unload_s": idle_unload_s,
     }
     spill_dir = Path(args.web_output_dir) / ".spill"
     video_server = VideoServer(
@@ -497,6 +511,10 @@ def main() -> None:
         print(f"  GPU      : {brand}")
     mux = real_ffmpeg()
     print(f"  Muxer    : {mux or 'h3-av (PyAV shim)'}")
+    if idle_unload_s > 0:
+        print(f"  Idle     : unload warm h3 after {idle_unload_s / 60.0:.0f} min")
+    else:
+        print("  Idle     : warm h3 unload disabled")
     print(f"  Endpoint : {ws_url}")
     if args.web_ui:
         print(f"  Web UI   : {http_url}")

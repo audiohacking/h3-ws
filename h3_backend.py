@@ -36,6 +36,36 @@ log = logging.getLogger("h3-backend")
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 
+# Stop the warm interactive ``./h3`` after this many idle seconds (no generate).
+# Override with ``H3_IDLE_UNLOAD_S`` / ``--idle-unload-seconds``; ``0`` disables.
+DEFAULT_IDLE_UNLOAD_S = 1800.0
+IDLE_UNLOAD_ENV = "H3_IDLE_UNLOAD_S"
+
+
+def resolve_idle_unload_s(
+    configured: float | int | None = None,
+    *,
+    environ: dict[str, str] | None = None,
+) -> float:
+    """Seconds of post-generate idle before unloading the warm session.
+
+    Preference: explicit ``configured`` → env ``H3_IDLE_UNLOAD_S`` → 1800.
+    ``0`` (or negative) disables unload.
+    """
+    if configured is not None:
+        try:
+            return max(0.0, float(configured))
+        except (TypeError, ValueError):
+            pass
+    env = environ if environ is not None else os.environ
+    raw = env.get(IDLE_UNLOAD_ENV)
+    if raw is not None and str(raw).strip() != "":
+        try:
+            return max(0.0, float(raw))
+        except (TypeError, ValueError):
+            pass
+    return float(DEFAULT_IDLE_UNLOAD_S)
+
 
 class GenerationCancelledError(RuntimeError):
     """Raised when the user or SIGINT cancelled an in-flight ``h3`` process."""
@@ -1047,6 +1077,52 @@ class H3Engine:
         self._session_boot_key: tuple[Any, ...] | None = None
         self._preview_latent_dir: Path | None = None
         self._eta = ProgressEta()
+        self._last_activity_mono = time.monotonic()
+        self._gen_depth = 0
+
+    def touch_activity(self) -> None:
+        """Stamp last generate activity (resets the idle-unload clock)."""
+        self._last_activity_mono = time.monotonic()
+
+    def idle_for_s(self) -> float:
+        return max(0.0, time.monotonic() - self._last_activity_mono)
+
+    def warm_session_alive(self) -> bool:
+        session = self._session
+        return bool(session is not None and getattr(session, "alive", False))
+
+    def generation_busy(self) -> bool:
+        if self._gen_depth > 0:
+            return True
+        proc = self._proc
+        return proc is not None and proc.poll() is None
+
+    def unload_warm_if_idle(self, idle_s: float) -> bool:
+        """Stop the warm ``./h3`` session when idle past ``idle_s`` seconds.
+
+        Returns True if a warm session was stopped. No-op when ``idle_s <= 0``,
+        a generation is in flight, or there is no warm session.
+        """
+        try:
+            limit = float(idle_s)
+        except (TypeError, ValueError):
+            return False
+        if limit <= 0:
+            return False
+        if self.generation_busy():
+            return False
+        if not self.warm_session_alive():
+            return False
+        if self.idle_for_s() < limit:
+            return False
+        idle = self.idle_for_s()
+        log.info(
+            "Idle %.0f min — unloading warm h3 session (freeing resident weights)",
+            idle / 60.0,
+        )
+        self._stop_session()
+        self._destroy_preview_latent_dir()
+        return True
 
     def model_progress_for_ws(self) -> dict[str, Any] | None:
         p = dict(self._progress)
@@ -1127,7 +1203,9 @@ class H3Engine:
             "metal4": self.metal4,
             "chip_class": apple_silicon_class(),
             "chip_brand": apple_chip_brand(),
-            "warm_session": bool(self._session and getattr(self._session, "alive", False)),
+            "warm_session": self.warm_session_alive(),
+            "generation_busy": self.generation_busy(),
+            "idle_for_s": round(self.idle_for_s(), 1),
         }
 
     def _parse_line(self, line: str, steps: int) -> None:
@@ -1202,6 +1280,8 @@ class H3Engine:
         outcome = "failed"
         heartbeat = Heartbeat(self)
         heartbeat.start()
+        self.touch_activity()
+        self._gen_depth += 1
         # init-video / denoise-strength are one-shot CLI flags (no !session cmds yet).
         force_oneshot = req.init_video is not None
         try:
@@ -1233,6 +1313,8 @@ class H3Engine:
             self._cleanup_job_temps(req)
             raise
         finally:
+            self._gen_depth = max(0, self._gen_depth - 1)
+            self.touch_activity()
             heartbeat.stop()
             self.last_timings = self._phases.summary(outcome=outcome)
             log.info("%s", timings_console_line(self.last_timings))

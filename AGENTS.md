@@ -29,12 +29,13 @@ Already in this fork (do not re-port):
 | Topic | Notes |
 |-------|--------|
 | VAE tiles | Locked to **256** px (`configured_tile_pixels`); Metal 320 auto-pick caused 16px quilt seams ([antirez/h3.c#1](https://github.com/antirez/h3.c/pull/1) lesson). Keep 256. |
+| VAE decoder BF16 | Port of [antirez/h3.c#80](https://github.com/antirez/h3.c/pull/80): ViT decoder runs BF16 (default). Peak VAE weights ~9.2 → ~4.6 GiB. Kill-switch: `H3_VAE_PRECISION=f32`. Encoder / ref-latent cache unchanged. **M5** gets the big matmul win (tensor cores / MPS). **M3 Ultra** is closer to ALU-bound (~1.2× decode in A/B) — we still take the RAM cut, GPU F32↔BF16 casts on load/unpack, mid-tile `h3_gpu_continue` (`H3_VAE_CONTINUE_BLOCKS`, default 6), and GCD-parallel unpack/stitch. Keep tiles at 256 (512 was slower on Ultra and risks seams). Tests: `./h3_gpu_bf16_ops_tests`, `./h3_video_vae_tests MiniMax-H3`. |
 | LoRA | Runtime `--lora PATH:SCALE` fuse in `h3_lora.c` (up to 8). Offline Turbo fold PRs are redundant. |
 | Preview latents | `--preview-latent` / `preview_estimate` already present. |
 | GQA precision | Causal GQA keeps Q×scale in F32; barrier before reusing reduction scratch (#4, #63). |
 | Metal TG align | GQA `score_bytes` rounded to 16 bytes (#44) — required under `MTL_DEBUG_LAYER`. |
 | VAE RGB | Unpack clamps with `fminf(fmaxf(...))` so NaNs become 0 (#9). |
-| Warm VAE cache | `h3_cache_invalidate_inputs()` drops conditioning/DiT but keeps Video VAE when latent WxH unchanged (#68). CLI `!ref-*` / first-last use it; `!cache clear` still full-clears. |
+| Warm VAE cache | `h3_cache_invalidate_inputs()` drops conditioning/DiT but keeps Video VAE when latent WxH **and** `H3_VAE_PRECISION` unchanged (#68). Key is `vae_path\|HxW\|vae-bf16\|f32`. CLI `!ref-*` / first-last use it; `!cache clear` still full-clears. |
 | Long SDPA | Non-causal MPSGraph SDPA splits when `sequence > 12288` (block **4096**). Kill-switch: `H3_SDPA_MAX_QUERY_ROWS=0` or `--sdpa-query-block 0`. Needed on M2/M3 Ultra (#64 / Apple FB24605554). Do not go back to 2048: at 97k Ref2VA tokens it runs 29.2 s/attention vs 15.1 s (MLX fused ceiling 15.2 s). Test: `./h3_sdpa_split_tests [seq] [heads]`. |
 | SDPA alignment | MPSGraph SDPA is ~2× slower when the sequence isn't a multiple of 8 (105377-row Ref2VA attention: 39.0 s vs 18.4 s). Non-causal graphs pad Q/K/V to a multiple of 32 (`H3_SDPA_PAD_ROWS`, 0 disables), mask padded keys with −∞, and slice rows back. Covered by `h3_sdpa_split_tests` (odd default length, BF16 + F32). |
 | DiT op profile | `H3_DIT_OP_PROFILE=N` waits after each op of the first N blocks and prints ms/block per op; h3 also logs the DiT sequence composition at load. Use it before guessing where denoise time goes. |
@@ -45,7 +46,7 @@ Already in this fork (do not re-port):
 
 **Deferred:** [antirez/h3.c#55](https://github.com/antirez/h3.c/pull/55) `H3_ATTENTION_CACHE` int8 stream — later product/Models phase for lower-RAM Macs; not urgent on 128–512 GB Studio.
 
-**Tests (in `third_party/h3.c`):** `./h3_tests`, `./h3_gqa_tests`, `./h3_cache_invalidate_tests`. Skip CUDA / GUI / packaging upstream PRs.
+**Tests (in `third_party/h3.c`):** `./h3_tests`, `./h3_gqa_tests`, `./h3_cache_invalidate_tests`, `./h3_gpu_bf16_ops_tests`, `./h3_video_vae_tests MiniMax-H3` (weights). Skip CUDA / GUI / packaging upstream PRs.
 
 ## Weights (mandatory)
 

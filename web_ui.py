@@ -15,7 +15,7 @@ import time
 import uuid
 import zipfile
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -43,6 +43,7 @@ from h3_backend import (
     ram_gb,
     recommend_ssd_streaming,
     ref2va_dir,
+    resolve_idle_unload_s,
     validate_refs,
 )
 from h3_media import (
@@ -2542,8 +2543,44 @@ def create_app(
                 log.exception("background SAM adopt failed")
 
         loop.run_in_executor(None, _boot_light_models)
-        yield
-        state.engine.shutdown(wait=True)
+
+        idle_unload_s = resolve_idle_unload_s(
+            state.runtime_defaults.get("idle_unload_s")
+        )
+        state.runtime_defaults["idle_unload_s"] = idle_unload_s
+
+        async def _idle_unload_watch() -> None:
+            # Poll often enough that a 30 min default fires within ~30s of expiry.
+            interval = 30.0
+            while True:
+                await asyncio.sleep(interval)
+                if not state.is_pipeline_idle() or state.selftest.running:
+                    continue
+                try:
+                    state.engine.unload_warm_if_idle(idle_unload_s)
+                except Exception:
+                    log.exception("idle unload watchdog failed")
+
+        idle_task: asyncio.Task[None] | None = None
+        if idle_unload_s > 0:
+            idle_task = asyncio.create_task(
+                _idle_unload_watch(), name="h3-idle-unload"
+            )
+            log.info(
+                "Warm h3 idle unload: %.0f min (H3_IDLE_UNLOAD_S / --idle-unload-seconds)",
+                idle_unload_s / 60.0,
+            )
+        else:
+            log.info("Warm h3 idle unload disabled")
+
+        try:
+            yield
+        finally:
+            if idle_task is not None:
+                idle_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await idle_task
+            state.engine.shutdown(wait=True)
 
     app = FastAPI(title="h3-ws", lifespan=lifespan)
     app.add_middleware(
@@ -2679,12 +2716,14 @@ def create_app(
         if http_url:
             state.http_url = http_url
         info = state.engine.info()
+        idle_s = float(state.runtime_defaults.get("idle_unload_s", resolve_idle_unload_s()))
         return {
             "ok": True,
             "engine_ok": bool(info.get("ok")),
             "server_url": state.server_url,
             "web_url": state.http_url,
             "engine": info,
+            "idle_unload_s": idle_s,
         }
 
     @app.get("/api/console")
