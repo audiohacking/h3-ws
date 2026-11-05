@@ -1690,9 +1690,16 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
                             "(ignoring --steps %d)\n",
                             sigmas.steps, params->steps);
                 }
+            } else if (!strcmp(schedule_name, "viggle-swap") ||
+                       !strcmp(schedule_name, "viggle_swap")) {
+                schedule_ok = h3_viggle_swap_schedule_build(&sigmas);
+            } else if (!strcmp(schedule_name, "viggle-edit") ||
+                       !strcmp(schedule_name, "viggle_edit")) {
+                schedule_ok = h3_viggle_edit_schedule_build(&sigmas);
             } else {
                 h3_set_error(ctx, "unknown --schedule '%s' "
-                             "(try serving or pika-flex)",
+                             "(try serving, pika-flex, viggle-swap, "
+                             "viggle-edit)",
                              schedule_name);
                 goto cleanup;
             }

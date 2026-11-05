@@ -147,6 +147,20 @@ static void test_schedule(void) {
     h3_sigma_schedule serving6;
     CHECK(h3_serving_schedule_build(6, &serving6));
     CHECK(!close_enough(serving6.video[1], schedule.video[1], 1e-4));
+
+    /* Viggle Remake ManualSigmas invert back to the same video σ grid. */
+    CHECK(h3_viggle_swap_schedule_build(&schedule));
+    CHECK(schedule.steps == 6);
+    CHECK(close_enough(schedule.video[0], 1.0f, 1e-6));
+    CHECK(close_enough(schedule.video[1], 0.990476f, 1e-5));
+    CHECK(close_enough(schedule.video[4], 0.8f, 1e-5));
+    CHECK(close_enough(schedule.video[5], 0.631579f, 1e-5));
+    CHECK(schedule.video[6] == 0.0f);
+    CHECK(h3_viggle_edit_schedule_build(&schedule));
+    CHECK(schedule.steps == 6);
+    CHECK(close_enough(schedule.video[1], 0.983607f, 1e-5));
+    CHECK(close_enough(schedule.video[4], 0.857143f, 1e-5));
+    CHECK(close_enough(schedule.video[5], 0.705882f, 1e-5));
     {
         static const int bad_knots[] = {1000, 500, 750, 0};
         CHECK(!h3_knot_schedule_build(bad_knots, 4, &schedule));

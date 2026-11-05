@@ -1325,6 +1325,7 @@ def _loras_from_body(
     mode: str | None = None,
 ) -> list[LoraRef]:
     from h3_lora import (
+        is_remake_lora_id_or_spec,
         lora_catalog,
         parse_lora_specs,
         resolve_lora_path,
@@ -1337,6 +1338,10 @@ def _loras_from_body(
     if mode_hint:
         raw = rewrite_lora_items_for_mode(raw, mode_hint, catalog)
     specs = parse_lora_specs(raw, catalog)
+    # Remake adapters are exclusive — never fuse with Turbo / creative LoRAs.
+    remake = [(s, sc) for s, sc in specs if is_remake_lora_id_or_spec(s)]
+    if remake:
+        specs = remake[:1]
     return [
         LoraRef(spec=spec, path=resolve_lora_path(spec), scale=scale)
         for spec, scale in specs
@@ -2972,6 +2977,22 @@ def create_app(
         pika_present = sum(
             1 for path in pika_paths if path is not None and path.is_file()
         )
+        viggle_recipes = [
+            p
+            for p in BUILTIN_LORAS
+            if p.get("id") in ("viggle_remake_swap", "viggle_remake_edit")
+        ]
+        viggle_paths = [
+            lora_cached_path(str(p["spec"]))
+            for p in viggle_recipes
+            if p.get("spec")
+        ]
+        viggle_ok = bool(viggle_paths) and all(
+            path is not None and path.is_file() for path in viggle_paths
+        )
+        viggle_present = sum(
+            1 for path in viggle_paths if path is not None and path.is_file()
+        )
 
         from h3_redetail import latent_upscaler_path
         from h3_sam import sam3_status
@@ -3039,6 +3060,31 @@ def create_app(
                         "Ready."
                         if pika_ok
                         else f"{pika_present}/2 files on disk — download installs both."
+                    )
+                ),
+                "essential": False,
+            },
+            {
+                "id": "viggle_remake",
+                "label": "Viggle Remake",
+                "present": viggle_ok,
+                "path": (
+                    str(viggle_paths[0])
+                    if viggle_paths and viggle_paths[0] is not None
+                    else "models/loras/Viggle__Viggle-Remake/comfyui/"
+                ),
+                "size_gib": (
+                    round(sum(_file_gib(p) for p in viggle_paths if p), 1)
+                    if viggle_present
+                    else 7.0
+                ),
+                "note": (
+                    "Remake workspace adapters (Swap + Edit Comfy packs, ~7 GB). "
+                    "Powered by Viggle Remake. "
+                    + (
+                        "Ready."
+                        if viggle_ok
+                        else f"{viggle_present}/2 files on disk — download installs both."
                     )
                 ),
                 "essential": False,
@@ -3206,18 +3252,28 @@ def create_app(
         "taeh3": 22 * 1024**2,      # ~22 MB
         "taomate": 2.4 * 1024**3,   # ~2.4 GB
         "pika_flex": 3.6 * 1024**3,  # ~1.8 GB × FL2VA + Ref2VA
+        "viggle_remake": 7.0 * 1024**3,  # ~3.5 GB × Swap + Edit
         "dmad": 1.4 * 1024**3,      # API-compat only (not listed in Models UI)
         "film_net": 69 * 1024**2,    # ~69 MB FILM
         "latent_upscale": 500 * 1024**2,  # ~0.5 GB estimate; optional
         "sam3": 3.3 * 1024**3,      # ~3.3 GB mlx-community/sam3.1-bf16
     }
     _DOWNLOAD_COMPONENT_HELP = (
-        "fl2va, ref2va, taeh3, taomate, pika_flex, film_net, latent_upscale, sam3"
+        "fl2va, ref2va, taeh3, taomate, pika_flex, viggle_remake, film_net, "
+        "latent_upscale, sam3"
     )
 
     _COMPONENT_DIR = {"fl2va": "FL2VA", "ref2va": "Ref2VA"}
     _LIGHT_COMPONENTS = frozenset(
-        {"taeh3", "taomate", "pika_flex", "film_net", "latent_upscale", "sam3"}
+        {
+            "taeh3",
+            "taomate",
+            "pika_flex",
+            "viggle_remake",
+            "film_net",
+            "latent_upscale",
+            "sam3",
+        }
     )
     _ALL_DOWNLOAD_COMPONENTS = frozenset(
         {
@@ -3226,6 +3282,7 @@ def create_app(
             "taeh3",
             "taomate",
             "pika_flex",
+            "viggle_remake",
             "dmad",
             "film_net",
             "latent_upscale",
@@ -3302,7 +3359,7 @@ def create_app(
                             total = 0
                 return total, 0
             return _sum_hf_local_progress(root)
-        if component in ("taomate", "dmad", "pika_flex"):
+        if component in ("taomate", "dmad", "pika_flex", "viggle_remake"):
             from h3_lora import BUILTIN_LORAS, lora_cached_path, lora_download_dir
 
             if component == "pika_flex":
@@ -3310,6 +3367,12 @@ def create_app(
                     p
                     for p in BUILTIN_LORAS
                     if p.get("id") in ("pika_h3_flex_fl2va", "pika_h3_flex_ref2va")
+                ]
+            elif component == "viggle_remake":
+                recipes = [
+                    p
+                    for p in BUILTIN_LORAS
+                    if p.get("id") in ("viggle_remake_swap", "viggle_remake_edit")
                 ]
             else:
                 lid = "taomate_h3_3step" if component == "taomate" else "dmad_h3_4step"
@@ -3396,6 +3459,19 @@ def create_app(
                 ]
                 if len(recipes) < 2:
                     raise RuntimeError("Pika Flex builtin recipes missing")
+                for recipe in recipes:
+                    await asyncio.to_thread(ensure_lora, str(recipe["spec"]))
+                _download_state["error"] = None
+            elif component == "viggle_remake":
+                from h3_lora import BUILTIN_LORAS, ensure_lora
+
+                recipes = [
+                    p
+                    for p in BUILTIN_LORAS
+                    if p.get("id") in ("viggle_remake_swap", "viggle_remake_edit")
+                ]
+                if len(recipes) < 2:
+                    raise RuntimeError("Viggle Remake builtin recipes missing")
                 for recipe in recipes:
                     await asyncio.to_thread(ensure_lora, str(recipe["spec"]))
                 _download_state["error"] = None

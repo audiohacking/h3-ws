@@ -208,6 +208,46 @@ int h3_pika_flex_schedule_build(h3_sigma_schedule *schedule) {
     return h3_knot_schedule_build(knots, 7, schedule);
 }
 
+/* Remake ManualSigmas live in video-stream σ space (shift 12). Invert to the
+ * linear base u = x / (12 - 11x), then re-apply video/audio shifts — same as
+ * Viggle sample.py / Comfy ManualSigmas grids. */
+static int h3_viggle_manual_sigma_schedule_build(const float *video_sigmas,
+                                                 int count,
+                                                 h3_sigma_schedule *schedule) {
+    if (!schedule || !video_sigmas || count < 2 || count > H3_MAX_STEPS + 1) {
+        return 0;
+    }
+    if (video_sigmas[count - 1] != 0.0f) return 0;
+    memset(schedule, 0, sizeof(*schedule));
+    int steps = count - 1;
+    schedule->steps = steps;
+    const float vs = (float)H3_VIDEO_SIGMA_SHIFT;
+    const float as = (float)H3_AUDIO_SIGMA_SHIFT;
+    for (int index = 0; index < steps; index++) {
+        float x = video_sigmas[index];
+        float denom = vs - (vs - 1.0f) * x;
+        if (!(denom > 0.0f) || !(x >= 0.0f)) return 0;
+        float u = x / denom;
+        schedule->video[index] = vs * u / (1.0f + (vs - 1.0f) * u);
+        schedule->audio[index] = as * u / (1.0f + (as - 1.0f) * u);
+    }
+    schedule->video[steps] = 0.0f;
+    schedule->audio[steps] = 0.0f;
+    return 1;
+}
+
+int h3_viggle_swap_schedule_build(h3_sigma_schedule *schedule) {
+    static const float sigmas[] = {
+        1.0f, 0.990476f, 0.965243f, 0.923077f, 0.8f, 0.631579f, 0.0f};
+    return h3_viggle_manual_sigma_schedule_build(sigmas, 7, schedule);
+}
+
+int h3_viggle_edit_schedule_build(h3_sigma_schedule *schedule) {
+    static const float sigmas[] = {
+        1.0f, 0.983607f, 0.96f, 0.923077f, 0.857143f, 0.705882f, 0.0f};
+    return h3_viggle_manual_sigma_schedule_build(sigmas, 7, schedule);
+}
+
 typedef struct {
     h3_layout *layout;
     size_t position_capacity;

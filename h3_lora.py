@@ -63,6 +63,18 @@ PIKA_FLEX_GUIDANCE = (
     "TaoMate remains the Continuity Turbo default until bake-off."
 )
 
+# Viggle Remake — specialty adapters (Remake workspace only; never Turbo).
+VIGGLE_REMAKE_REPO = "Viggle/Viggle-Remake"
+VIGGLE_REMAKE_SWAP_FILE = "comfyui/viggle_remake_swap_comfyui.safetensors"
+VIGGLE_REMAKE_EDIT_FILE = "comfyui/viggle_remake_edit_comfyui.safetensors"
+VIGGLE_REMAKE_GUIDANCE = (
+    "Viggle Remake LoRA on MiniMax-H3 (Comfy pack). Use the Remake workspace: "
+    "Swap replaces people; Edit changes objects/scene/weather. Locked to 6 steps "
+    "with the matching viggle-swap / viggle-edit ManualSigmas schedule. "
+    "Painted keyframe pins + clean audio hold land with the Remake engine path. "
+    "Powered by Viggle Remake — see HF card for prompting."
+)
+
 # Mode-aware turbo pairs: (fl_id, ref_id). Frontend/backend swap by mode.
 TURBO_MODE_PAIRS: tuple[tuple[str, str], ...] = (
     ("pika_h3_flex_fl2va", "pika_h3_flex_ref2va"),
@@ -170,6 +182,26 @@ _DISK_LORA_HINTS: tuple[dict[str, Any], ...] = (
         "turbo": True,
         "category": "turbo",
         "card_url": _hf_card(PIKA_FLEX_REPO),
+    },
+    {
+        "match": re.compile(r"viggle[_-]?remake[_-]?swap|remake[_-]?swap", re.I),
+        "scale": 1.0,
+        "steps": 6,
+        "schedule": "viggle-swap",
+        "guidance": VIGGLE_REMAKE_GUIDANCE,
+        "turbo": False,
+        "category": "remake",
+        "card_url": _hf_card(VIGGLE_REMAKE_REPO),
+    },
+    {
+        "match": re.compile(r"viggle[_-]?remake[_-]?edit|remake[_-]?edit", re.I),
+        "scale": 1.0,
+        "steps": 6,
+        "schedule": "viggle-edit",
+        "guidance": VIGGLE_REMAKE_GUIDANCE,
+        "turbo": False,
+        "category": "remake",
+        "card_url": _hf_card(VIGGLE_REMAKE_REPO),
     },
     {
         "match": re.compile(r"(?:fasth3|3step|3[_-]?nfe).*(?:h3|minimax)|(?:h3|minimax).*(?:fasth3|3step|3[_-]?nfe)", re.I),
@@ -437,6 +469,34 @@ BUILTIN_LORAS: list[dict[str, Any]] = [
         guidance=PIKA_FLEX_GUIDANCE,
         category="turbo",
         turbo=True,
+    ),
+    _recipe(
+        id="viggle_remake_swap",
+        label="Viggle Remake · Swap",
+        repo=VIGGLE_REMAKE_REPO,
+        filename=VIGGLE_REMAKE_SWAP_FILE,
+        scale=1.0,
+        steps=6,
+        layers=50,
+        reuse=1,
+        schedule="viggle-swap",
+        guidance=VIGGLE_REMAKE_GUIDANCE,
+        category="remake",
+        turbo=False,
+    ),
+    _recipe(
+        id="viggle_remake_edit",
+        label="Viggle Remake · Edit",
+        repo=VIGGLE_REMAKE_REPO,
+        filename=VIGGLE_REMAKE_EDIT_FILE,
+        scale=1.0,
+        steps=6,
+        layers=50,
+        reuse=1,
+        schedule="viggle-edit",
+        guidance=VIGGLE_REMAKE_GUIDANCE,
+        category="remake",
+        turbo=False,
     ),
     # —— Creative / effect library (non-turbo; HF cards have prompt recipes) ——
     _recipe(
@@ -1437,6 +1497,11 @@ def schedule_for_lora_specs(
         except OSError:
             pass
     return None
+
+
+def is_remake_lora_id_or_spec(text: str) -> bool:
+    hay = str(text or "").lower()
+    return "viggle_remake" in hay or "viggle-remake" in hay or "viggle/remake" in hay
 
 
 def schedule_for_loras(loras: list[Any]) -> str | None:

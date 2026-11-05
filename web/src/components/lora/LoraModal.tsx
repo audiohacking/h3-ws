@@ -58,11 +58,14 @@ export function LoraModal({
     return () => document.removeEventListener("keydown", handler);
   }, [open, onClose]);
 
-  // Filter presets by search
+  // Filter presets by search. Remake adapters live in the Remake workspace only.
   const filteredPresets = useMemo(() => {
-    if (!search.trim()) return presets;
+    const usable = presets.filter(
+      (p) => p.category !== "remake" && !/viggle[_-]?remake/i.test(`${p.id} ${p.spec}`),
+    );
+    if (!search.trim()) return usable;
     const q = search.toLowerCase();
-    return presets.filter(
+    return usable.filter(
       (p) =>
         p.label.toLowerCase().includes(q) ||
         p.spec.toLowerCase().includes(q) ||

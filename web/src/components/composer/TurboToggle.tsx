@@ -8,6 +8,10 @@ import type { LoraPreset } from "../../types";
  * tight filename needles — never bare "minimax_h3" (that matches every H3 LoRA).
  */
 export function isTurboPreset(p: LoraPreset): boolean {
+  // Remake adapters are workspace-locked — never Turbo.
+  if (p.category === "remake" || /viggle[_-]?remake/.test(`${p.id} ${p.spec}`.toLowerCase())) {
+    return false;
+  }
   if (p.turbo === true || p.category === "turbo") return true;
   const hay = `${p.id} ${p.label} ${p.spec}`.toLowerCase();
   if (/\b(taomate|dmad|fasth3)\b/.test(hay)) return true;

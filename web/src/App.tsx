@@ -17,6 +17,16 @@ import { TimelineStrip } from "./components/timeline/TimelineStrip";
 import { ModelsManager } from "./components/media/ModelsManager";
 import { ComposerPanel } from "./components/composer/ComposerPanel";
 import {
+  WorkspaceTabs,
+  type WorkspaceId,
+} from "./components/workspaces/WorkspaceTabs";
+import {
+  RemakePanel,
+  remakeRefsFromDraft,
+  type RemakeDraft,
+} from "./components/workspaces/RemakePanel";
+import { EnhancePanel } from "./components/workspaces/EnhancePanel";
+import {
   defaultResolutionCanvas,
   type ResolutionCanvasState,
 } from "./components/composer/ResolutionPill";
@@ -446,6 +456,17 @@ export default function App() {
     kind: LibraryPassKind;
   } | null>(null);
   const [loraModalOpen, setLoraModalOpen] = useState(false);
+  const [workspace, setWorkspace] = useState<WorkspaceId>("full");
+  const [remakeDraft, setRemakeDraft] = useState<RemakeDraft>({
+    mode: "swap",
+    prompt: "",
+    sourcePath: null,
+    sourceName: null,
+    painted: [],
+  });
+  const [enhanceClipId, setEnhanceClipId] = useState<string | null>(null);
+  const [enhanceUpframe, setEnhanceUpframe] = useState(true);
+  const [enhanceRedetail, setEnhanceRedetail] = useState(false);
   const [sceneQueue, setSceneQueue] = useState<SceneQueueItem[]>([]);
   const [queueRunning, setQueueRunning] = useState(false);
   const [generationPresets, setGenerationPresets] = useState<GenerationPreset[]>([]);
@@ -1583,7 +1604,7 @@ export default function App() {
     clip: Clip,
     kind: LibraryPassKind,
     params: LibraryPassParams,
-  ): Promise<void> {
+  ): Promise<Clip | null> {
     const labels = {
       redetail: "ReDetail",
       upframe: "Upframe",
@@ -1684,7 +1705,7 @@ export default function App() {
         if (kind === "upframe" && /film_net|FILM|weights/i.test(detail)) {
           setError(detail);
           openModels();
-          return;
+          return null;
         }
         throw new Error(detail);
       }
@@ -1696,9 +1717,12 @@ export default function App() {
         selectClipId(created.id);
         setChainId(created.chain_id);
         setWatchLive(false);
+        return created;
       }
+      return null;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return null;
     } finally {
       window.clearInterval(tickElapsed);
       window.clearInterval(pollProgress);
@@ -2214,16 +2238,16 @@ export default function App() {
       })(),
       project_id: activeProjectId || undefined,
     };
-    // Named schedule from the active turbo recipe when present (steps stay user-editable).
+    // Named schedule from the active LoRA recipe when present (turbo / remake).
     {
-      const turboIds = new Set(
+      const activeIds = new Set(
         opts.loraPresetIds.map((id) => turboIdForMode(id, opts.modeHint)),
       );
-      const activeTurbo = loraPresets.find(
-        (p) => turboIds.has(p.id) && isTurboPreset(p),
+      const withSchedule = loraPresets.find(
+        (p) => activeIds.has(p.id) && Boolean(p.schedule),
       );
-      if (activeTurbo?.schedule) {
-        body.schedule = activeTurbo.schedule;
+      if (withSchedule?.schedule) {
+        body.schedule = withSchedule.schedule;
       }
     }
     if (opts.generation) body.generation = opts.generation;
@@ -2439,6 +2463,113 @@ export default function App() {
         setLivePreviewMime("image/webp");
         setWatchLive(false);
       }
+    }
+  }
+
+  const remakeSwapPreset = useMemo(
+    () => loraPresets.find((p) => p.id === "viggle_remake_swap") ?? null,
+    [loraPresets],
+  );
+  const remakeEditPreset = useMemo(
+    () => loraPresets.find((p) => p.id === "viggle_remake_edit") ?? null,
+    [loraPresets],
+  );
+  const remakeActivePreset =
+    remakeDraft.mode === "swap" ? remakeSwapPreset : remakeEditPreset;
+  const remakeAdaptersReady = Boolean(remakeActivePreset?.cached);
+  const remakeCanSubmit = Boolean(
+    config?.server_connected &&
+      remakeActivePreset?.spec &&
+      remakeDraft.prompt.trim() &&
+      remakeDraft.sourcePath &&
+      remakeDraft.painted.length >= 1 &&
+      !busy,
+  );
+
+  async function handleRemakeGenerate() {
+    if (!remakeCanSubmit) return;
+    const preset = remakeDraft.mode === "swap" ? remakeSwapPreset : remakeEditPreset;
+    if (!preset?.spec) {
+      setError("Remake adapter missing — open Models and download Viggle Remake.");
+      return;
+    }
+    if (!preset.cached) {
+      try {
+        await ensureLoraSpec(preset.spec, preset.label);
+        const cfg = await fetchConfig();
+        setConfig(cfg);
+        setLoraPresets(cfg.lora_presets ?? []);
+      } catch (e) {
+        setError(String(e));
+        return;
+      }
+    }
+    const remakeRefs = remakeRefsFromDraft(remakeDraft);
+    await ensureNotifyPermission();
+    const follow = !activeRunIdRef.current;
+    try {
+      await postGenerate(
+        generateBody({
+          compiledPrompt: remakeDraft.prompt.trim(),
+          fallbackPrompt: remakeDraft.prompt.trim(),
+          modeHint: "ref2va",
+          refs: remakeRefs,
+          quality: "fast",
+          resolutionId,
+          durationId,
+          numSteps: preset.steps ?? 6,
+          layers: preset.layers ?? 50,
+          reuse: preset.reuse ?? 1,
+          seed,
+          clipMultiplier: 1,
+          tokenReduction: false,
+          ssdStreaming: false,
+          loraPresetIds: [preset.id],
+          imagePath: null,
+          endImagePath: null,
+          upscale: false,
+          redetail: false,
+          upframe: false,
+          longtake: false,
+          faces: false,
+        }),
+        { follow },
+      );
+    } catch (e) {
+      setError(String(e));
+      if (follow) {
+        setBusy(false);
+        setProgress(null);
+        setLivePreviewUrl(null);
+        setWatchLive(false);
+      }
+    }
+  }
+
+  async function handleEnhanceRun() {
+    const clip = clips.find((c) => c.id === enhanceClipId);
+    if (!clip) {
+      setError("Pick a finished library clip.");
+      return;
+    }
+    if (!enhanceUpframe && !enhanceRedetail) {
+      setError("Enable Upframe and/or ReDetail.");
+      return;
+    }
+    let working: Clip = clip;
+    if (enhanceRedetail) {
+      const created = await executeLibraryPass(working, "redetail", {
+        denoise: redetailDenoise,
+        seed: redetailSeed,
+      });
+      if (created) working = created;
+      else if (enhanceUpframe) return; // stop chain on failure
+    }
+    if (enhanceUpframe) {
+      const created = await executeLibraryPass(working, "upframe", {
+        multiplier: upframeMultiplier,
+      });
+      if (created) setEnhanceClipId(created.id);
     }
   }
 
@@ -2692,7 +2823,55 @@ export default function App() {
             )}
           </section>
 
-          {config && (
+          <WorkspaceTabs
+            value={workspace}
+            onChange={(next) => {
+              setWorkspace(next);
+              // Keep Full free of Remake adapters if any leaked into selection.
+              if (next === "full") {
+                setLoraPresetIds((prev) =>
+                  prev.filter((id) => !id.startsWith("viggle_remake_")),
+                );
+              }
+            }}
+            disabled={busy}
+          />
+
+          {config && workspace === "remake" && (
+            <RemakePanel
+              draft={remakeDraft}
+              onChange={(patch) => setRemakeDraft((prev) => ({ ...prev, ...patch }))}
+              busy={busy}
+              canSubmit={remakeCanSubmit}
+              onGenerate={() => void handleRemakeGenerate()}
+              onUpload={async (file, kind) => uploadFile(file, kind)}
+              swapPreset={remakeSwapPreset}
+              editPreset={remakeEditPreset}
+              adaptersReady={remakeAdaptersReady}
+              onDownloadAdapters={openModels}
+            />
+          )}
+
+          {config && workspace === "enhance" && (
+            <EnhancePanel
+              clips={clips}
+              selectedClipId={enhanceClipId}
+              onSelectClip={setEnhanceClipId}
+              upframe={enhanceUpframe}
+              onUpframe={setEnhanceUpframe}
+              upframeMultiplier={upframeMultiplier}
+              onUpframeMultiplier={setUpframeMultiplier}
+              redetail={enhanceRedetail}
+              onRedetail={setEnhanceRedetail}
+              redetailDenoise={redetailDenoise}
+              onRedetailDenoise={setRedetailDenoise}
+              busy={busy}
+              canRun={Boolean(enhanceClipId) && (enhanceUpframe || enhanceRedetail) && !busy}
+              onRun={() => void handleEnhanceRun()}
+            />
+          )}
+
+          {config && workspace === "full" && (
             <ComposerPanel
               busy={busy}
               pipelineActive={pipelineActive}
