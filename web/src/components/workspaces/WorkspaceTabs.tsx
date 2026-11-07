@@ -1,30 +1,46 @@
-export type WorkspaceId = "full" | "remake" | "enhance";
+import type { WorkspaceManifest } from "../../types";
 
-const TABS: { id: WorkspaceId; label: string; hint: string }[] = [
-  { id: "full", label: "Full", hint: "Open Continuity composer" },
-  { id: "remake", label: "Remake", hint: "Viggle swap / edit — locked presets" },
-  { id: "enhance", label: "Enhance", hint: "Upframe / ReDetail on a library clip" },
+type Props = {
+  workspaces: WorkspaceManifest[];
+  value: string;
+  onChange: (next: string) => void;
+  disabled?: boolean;
+};
+
+const FALLBACK: WorkspaceManifest[] = [
+  {
+    id: "full",
+    label: "Create",
+    hint: "Text, references, and first/last frames",
+    order: 10,
+    enabled: true,
+    panel: "composer",
+  },
+  {
+    id: "enhance",
+    label: "Enhance",
+    hint: "Upframe and ReDetail on a finished clip",
+    order: 20,
+    enabled: true,
+    panel: "enhance",
+  },
 ];
 
-export function WorkspaceTabs({
-  value,
-  onChange,
-  disabled,
-}: {
-  value: WorkspaceId;
-  onChange: (next: WorkspaceId) => void;
-  disabled?: boolean;
-}) {
+export function WorkspaceTabs({ workspaces, value, onChange, disabled }: Props) {
+  const tabs = (workspaces.length > 0 ? workspaces : FALLBACK).filter((w) => w.enabled !== false);
+
+  if (tabs.length <= 1) return null;
+
   return (
-    <div className="workspace-tabs" role="tablist" aria-label="Workspace">
-      {TABS.map((tab) => (
+    <div className="workspace-tabs" role="tablist" aria-label="Mode">
+      {tabs.map((tab) => (
         <button
           key={tab.id}
           type="button"
           role="tab"
           aria-selected={value === tab.id}
           className={`workspace-tabs__tab${value === tab.id ? " is-on" : ""}`}
-          title={tab.hint}
+          title={tab.hint || tab.label}
           disabled={disabled}
           onClick={() => onChange(tab.id)}
         >
@@ -33,4 +49,15 @@ export function WorkspaceTabs({
       ))}
     </div>
   );
+}
+
+export function workspacePanel(
+  workspaces: WorkspaceManifest[],
+  id: string,
+): WorkspaceManifest["panel"] {
+  const hit = workspaces.find((w) => w.id === id);
+  if (hit?.panel) return hit.panel;
+  if (id === "enhance") return "enhance";
+  if (id === "recipe") return "recipe";
+  return "composer";
 }

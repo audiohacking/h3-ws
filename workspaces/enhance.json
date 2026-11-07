@@ -1,0 +1,48 @@
+{
+  "id": "enhance",
+  "label": "Enhance",
+  "hint": "Faces, ReDetail, and Upframe on a finished clip",
+  "order": 20,
+  "enabled": true,
+  "panel": "enhance",
+  "isolation": {
+    "lora_categories": [],
+    "forbid": ["turbo", "loras"]
+  },
+  "engine": {
+    "mode": "enhance"
+  },
+  "fields": [
+    {
+      "id": "clip",
+      "type": "library_clip",
+      "required": true,
+      "label": "Library clip"
+    },
+    {
+      "id": "faces",
+      "type": "toggle",
+      "label": "Faces",
+      "default": false
+    },
+    {
+      "id": "redetail",
+      "type": "toggle",
+      "label": "ReDetail",
+      "default": false
+    },
+    {
+      "id": "upframe",
+      "type": "toggle",
+      "label": "Upframe",
+      "default": true
+    }
+  ],
+  "submit": {
+    "clip": "clip",
+    "faces": "faces",
+    "upframe": "upframe",
+    "redetail": "redetail"
+  },
+  "docs": null
+}

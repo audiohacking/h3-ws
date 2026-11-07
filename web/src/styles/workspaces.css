@@ -1,33 +1,37 @@
 .workspace-tabs {
   display: flex;
-  gap: 4px;
-  margin: 8px 0 4px;
+  gap: 2px;
+  margin: 10px 0 2px;
   padding: 3px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--color-text) 6%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-text) 7%, transparent);
+  align-self: stretch;
+  max-width: 280px;
 }
 
 .workspace-tabs__tab {
   flex: 1;
-  min-height: 34px;
+  min-height: 32px;
   border: none;
-  border-radius: 9px;
+  border-radius: 999px;
   background: transparent;
   color: var(--color-text-muted, var(--color-text));
   font: inherit;
-  font-size: 0.85rem;
+  font-size: 0.82rem;
   font-weight: 650;
+  letter-spacing: 0.01em;
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .workspace-tabs__tab:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--color-text) 8%, transparent);
+  color: var(--color-text);
 }
 
 .workspace-tabs__tab.is-on {
   background: var(--color-surface, #fff);
   color: var(--color-text);
-  box-shadow: 0 1px 2px color-mix(in srgb, var(--color-text) 12%, transparent);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--color-text) 14%, transparent);
 }
 
 .workspace-tabs__tab:disabled {
@@ -38,9 +42,21 @@
 .focus-panel {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-top: 8px;
-  padding: 12px 4px 8px;
+  gap: 14px;
+  margin-top: 10px;
+  padding: 4px 2px 10px;
+  animation: focus-in 0.22s ease;
+}
+
+@keyframes focus-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .focus-panel__head {
@@ -51,22 +67,24 @@
 
 .focus-panel__title {
   margin: 0;
-  font-size: 1.15rem;
+  font-size: 1.05rem;
   font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .focus-panel__sub {
   margin: 0;
-  font-size: 0.85rem;
-  opacity: 0.75;
-  line-height: 1.35;
+  font-size: 0.84rem;
+  opacity: 0.72;
+  line-height: 1.4;
+  max-width: 42rem;
 }
 
 .focus-panel__hint,
 .focus-panel__status {
   margin: 0;
   font-size: 0.8rem;
-  opacity: 0.8;
+  opacity: 0.78;
   line-height: 1.4;
 }
 
@@ -99,22 +117,40 @@
 .focus-field {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .focus-field__label {
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
-  opacity: 0.65;
+  opacity: 0.55;
 }
 
 .focus-field__row {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
+}
+
+.focus-thumb {
+  width: 80px;
+  height: 52px;
+  object-fit: cover;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-text) 8%, transparent);
+}
+
+.focus-thumb--sm {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+}
+
+.focus-thumb--empty {
+  display: inline-block;
 }
 
 .focus-list {
@@ -142,24 +178,6 @@
   font-size: 0.85rem;
 }
 
-.focus-pin {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-  font-size: 0.75rem;
-  font-weight: 650;
-}
-
-.focus-pin input {
-  width: 72px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  border: 1px solid color-mix(in srgb, var(--color-text) 18%, transparent);
-  background: var(--color-surface, #fff);
-  color: inherit;
-  font: inherit;
-}
-
 .focus-prompt,
 .focus-select {
   width: 100%;
@@ -175,19 +193,67 @@
   resize: vertical;
 }
 
-.focus-checks {
+.focus-pass-grid {
+  display: grid;
+  gap: 8px;
+}
+
+@media (min-width: 720px) {
+  .focus-pass-grid {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+}
+
+.focus-pass__controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 10px;
   align-items: center;
+  width: 100%;
+}
+
+.focus-pass {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--color-text) 10%, transparent);
+  background: color-mix(in srgb, var(--color-text) 3%, transparent);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.focus-pass.is-on {
+  border-color: color-mix(in srgb, var(--color-accent, #c45) 35%, transparent);
+  background: color-mix(in srgb, var(--color-accent, #c45) 8%, transparent);
 }
 
 .focus-check {
   display: inline-flex;
-  gap: 8px;
-  align-items: center;
+  gap: 10px;
+  align-items: flex-start;
   font-size: 0.9rem;
   font-weight: 600;
+  cursor: pointer;
+}
+
+.focus-check span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.focus-check strong {
+  font-weight: 700;
+}
+
+.focus-check em {
+  font-style: normal;
+  font-size: 0.75rem;
+  font-weight: 500;
+  opacity: 0.65;
 }
 
 .focus-inline {
@@ -222,7 +288,7 @@
 .focus-actions {
   display: flex;
   justify-content: flex-end;
-  padding-top: 4px;
+  padding-top: 2px;
 }
 
 .btn-ghost {

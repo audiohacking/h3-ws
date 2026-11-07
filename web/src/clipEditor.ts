@@ -413,3 +413,49 @@ export function buildGenerationSnapshot(scene: Pick<
     facesCanvas: scene.facesCanvas,
   };
 }
+
+/** Short default name when saving a clip/composer recipe as a preset. */
+export function suggestedPresetName(prompt: string, fallback = "Preset"): string {
+  const line = clipDisplayPrompt(prompt).split(/\n/)[0]?.trim() || fallback;
+  return line.length > 48 ? `${line.slice(0, 45).trimEnd()}…` : line;
+}
+
+/**
+ * Thin list-card fields + full ``generation`` blob so Presets → Saved can
+ * restore the same state as clicking the source library clip.
+ */
+export function generationPresetFields(snap: GenerationSnapshot): {
+  prompt: string;
+  mode: string;
+  quality: string;
+  resolutionId: string;
+  durationId: string;
+  numSteps: number;
+  layers: number;
+  reuse: number;
+  loraIds: string[];
+  turboEnabled: boolean;
+  tokenReduction: boolean;
+  ssdStreaming: boolean;
+  generation: Record<string, unknown>;
+} {
+  const generation: GenerationSnapshot = {
+    ...snap,
+    refs: snap.refs.map((r) => ({ ...r, previewUrl: undefined })),
+  };
+  return {
+    prompt: snap.prompt,
+    mode: snap.mode,
+    quality: snap.quality,
+    resolutionId: snap.resolutionId,
+    durationId: snap.durationId,
+    numSteps: snap.numSteps,
+    layers: snap.layers,
+    reuse: snap.reuse,
+    loraIds: [...snap.loraPresetIds],
+    turboEnabled: Boolean(snap.turboEnabled),
+    tokenReduction: Boolean(snap.tokenReduction),
+    ssdStreaming: Boolean(snap.ssdStreaming),
+    generation: generation as unknown as Record<string, unknown>,
+  };
+}

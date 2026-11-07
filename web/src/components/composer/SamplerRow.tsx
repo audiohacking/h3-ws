@@ -171,6 +171,9 @@ export function SamplerRow({
 }: Props) {
   const tokenOn = tokenReduction && !tokenReductionLocked;
   const ssdOn = ssdStreaming && !ssdLocked;
+  const tokenTitle = tokenReductionLocked
+    ? "Unavailable for this canvas / layers+reuse combo (h3.c)"
+    : "h3.c --token-reduction — pair video tokens in middle DiT blocks";
 
   return (
     <>
@@ -199,10 +202,7 @@ export function SamplerRow({
           unit="steps"
           disabled={disabled}
           title="h3.c --steps"
-          onChange={(next) => {
-            onNumSteps(next);
-            if (next <= 7) onReuse(1);
-          }}
+          onChange={onNumSteps}
         />
         <ParamStepper
           value={layers}
@@ -216,10 +216,10 @@ export function SamplerRow({
         <ParamStepper
           value={reuse}
           min={1}
-          max={8}
+          max={3}
           unit="reuse"
           disabled={disabled || reuseLocked}
-          title="h3.c --reuse"
+          title="h3.c --reuse (1 close · 2 fast · 3 aggressive)"
           onChange={onReuse}
         />
         <div className="config-card__tail">
@@ -313,6 +313,8 @@ export function SamplerRow({
             type="button"
             className={`chip-btn${tokenOn ? " is-on" : ""}`}
             disabled={disabled || tokenReductionLocked}
+            title={tokenTitle}
+            aria-pressed={tokenOn}
             onClick={() => onTokenReduction(!tokenReduction)}
           >
             token {tokenOn ? "on" : "off"}

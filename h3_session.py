@@ -105,10 +105,12 @@ def _echo_pty(chunk: str, *, on_progress: ProgressCallback | None = None) -> Non
         if on_progress and text != last_status and len(text) >= 6:
             last_status = text
             # Weight load / tokenizer init often print lines without N/M counters.
+            # Keep full ``h3 profile:`` lines so PhaseTimer can parse wall/attention.
+            label = text if text.startswith("h3 profile:") else text[:160]
             on_progress(
                 {
                     "stage": "loading",
-                    "label": text[:160],
+                    "label": label,
                 }
             )
 

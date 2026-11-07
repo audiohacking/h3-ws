@@ -126,10 +126,20 @@ class QualityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "token-reduction"):
             expand_quality("aggressive", token_reduction=True, width=512, height=512)
 
-    def test_expand_quality_small_steps_forces_reuse_1(self) -> None:
+    def test_expand_quality_four_step_defaults_reuse_1(self) -> None:
         q = expand_quality("four_step")
         self.assertEqual(q["steps"], 4)
         self.assertEqual(q["reuse"], 1)
+
+    def test_expand_quality_keeps_reuse_at_low_step_counts(self) -> None:
+        """Turbo/TaoMate budgets may still pick reuse 2–3 — h3.c allows [1, 3]."""
+        q = expand_quality("fast", steps=3, layers=50, reuse=2)
+        self.assertEqual(q["steps"], 3)
+        self.assertEqual(q["reuse"], 2)
+
+    def test_expand_quality_clamps_reuse_to_h3_range(self) -> None:
+        q = expand_quality("fast", reuse=8)
+        self.assertEqual(q["reuse"], 3)
 
     def test_close_keeps_fifty_full_blocks(self) -> None:
         q = expand_quality("close")
@@ -432,6 +442,30 @@ class AudioDurationTests(unittest.TestCase):
         from h3_media import assert_audio_durations
 
         assert_audio_durations([2.0, 5.0, 7.0])
+
+    def test_clamp_keeps_in_point(self) -> None:
+        from h3_media import clamp_audio_segment
+
+        start, end = clamp_audio_segment(18.6, None, None, max_span_s=15.0)
+        self.assertAlmostEqual(start, 0.0)
+        self.assertAlmostEqual(end, 15.0)
+
+    def test_clamp_keeps_in_point_and_shortens(self) -> None:
+        from h3_media import clamp_audio_segment
+
+        start, end = clamp_audio_segment(20.0, 2.0, 20.0, max_span_s=15.0)
+        self.assertAlmostEqual(start, 2.0)
+        self.assertAlmostEqual(end, 17.0)
+
+    def test_allocate_total_budget(self) -> None:
+        from h3_media import REF_AUDIO_BAKE_CAP_S, allocate_audio_budgets
+
+        # Bake cap is strictly under h3.c's 15.000 s sample wall.
+        self.assertEqual(
+            allocate_audio_budgets([10.0, 10.0]),
+            [10.0, round(REF_AUDIO_BAKE_CAP_S - 10.0, 10)],
+        )
+        self.assertEqual(allocate_audio_budgets([18.6]), [REF_AUDIO_BAKE_CAP_S])
 
 
 class SessionCommandTests(unittest.TestCase):

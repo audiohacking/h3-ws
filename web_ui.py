@@ -804,11 +804,13 @@ def _spawn_processed_clip(
     num_frames: int | None = None,
     seed: int | None = None,
     run_id: str | None = None,
+    elapsed_s: float | None = None,
 ) -> "ClipRecord":
     """Register a new standalone library clip. Source clip/file stay untouched.
 
     Own ``chain_id`` so the UI never treats this as a parent/child of the source.
     ``label`` tags the pass (UPFRAME / REDETAIL / …) so cards are not anonymous copies.
+    ``elapsed_s`` is wall-clock for this pass when known (library card footer).
     """
     new_id = str(uuid.uuid4())
     filename = out_path.name
@@ -848,6 +850,7 @@ def _spawn_processed_clip(
         reuse=source.reuse,
         quality=source.quality,
         loras=list(source.loras) if source.loras else None,
+        elapsed_s=round(float(elapsed_s), 2) if elapsed_s is not None else None,
     )
     state.clips[new_id] = record
     return record
@@ -1325,7 +1328,6 @@ def _loras_from_body(
     mode: str | None = None,
 ) -> list[LoraRef]:
     from h3_lora import (
-        is_remake_lora_id_or_spec,
         lora_catalog,
         parse_lora_specs,
         resolve_lora_path,
@@ -1338,10 +1340,6 @@ def _loras_from_body(
     if mode_hint:
         raw = rewrite_lora_items_for_mode(raw, mode_hint, catalog)
     specs = parse_lora_specs(raw, catalog)
-    # Remake adapters are exclusive — never fuse with Turbo / creative LoRAs.
-    remake = [(s, sc) for s, sc in specs if is_remake_lora_id_or_spec(s)]
-    if remake:
-        specs = remake[:1]
     return [
         LoraRef(spec=spec, path=resolve_lora_path(spec), scale=scale)
         for spec, scale in specs
@@ -1382,14 +1380,112 @@ def _resolve_refs(state: AppState, refs: list[Any]) -> list[Any]:
     return refs
 
 
+def _audio_cap_probe_path(item: Any) -> Path | None:
+    """File whose duration counts toward h3.c's audio-reference budget."""
+    kind = (item.kind or "").strip().lower()
+    if kind == "audio":
+        return Path(item.path)
+    if kind == "video_audio":
+        return Path(item.audio_path) if item.audio_path is not None else Path(item.path)
+    if kind == "video":
+        path = Path(item.path)
+        info = probe_media(path)
+        if not info.get("has_audio"):
+            return None
+        return path
+    return None
+
+
+def _apply_audio_duration_caps(refs: list[Any]) -> None:
+    """Auto-set Continuity trims so each audio-bearing ref fits the 15 s caps.
+
+    Long files become a segment (first 15 s, or remaining total budget) instead of
+    failing generate with a raw h3.c limit error. Capsules can still edit the door.
+    """
+    from h3_media import (
+        MIN_REF_AUDIO_S,
+        REF_AUDIO_BAKE_CAP_S,
+        allocate_audio_budgets,
+        clamp_audio_segment,
+    )
+
+    indexed: list[tuple[int, float, float | None, float | None]] = []
+    for index, item in enumerate(refs):
+        path = _audio_cap_probe_path(item)
+        if path is None:
+            continue
+        duration = probe_duration_seconds(path)
+        if duration is None or duration <= 0:
+            continue
+        indexed.append((index, float(duration), item.trim_start, item.trim_end))
+
+    if not indexed:
+        return
+
+    raw_spans: list[float] = []
+    for _, duration, start, end in indexed:
+        s, e = clamp_audio_segment(duration, start, end, max_span_s=duration)
+        raw_spans.append(e - s)
+
+    # Bake under h3.c's hard 15.000 s sample wall (see REF_AUDIO_BAKE_CAP_S).
+    budgets = allocate_audio_budgets(raw_spans)
+    for (index, duration, start, end), budget in zip(indexed, budgets):
+        item = refs[index]
+        if budget + 0.05 < MIN_REF_AUDIO_S:
+            raise ValueError(
+                "audio references exceed the 15s total budget even after "
+                "capping each clip — shorten a segment on the capsule door "
+                "or remove a clip"
+            )
+        new_start, new_end = clamp_audio_segment(
+            duration, start, end, max_span_s=min(REF_AUDIO_BAKE_CAP_S, budget)
+        )
+        prev_start = 0.0 if start is None else float(start)
+        prev_end = duration if end is None else float(end)
+        shortened = (new_end - new_start) + 0.05 < duration
+        moved = abs(new_start - prev_start) > 0.01 or abs(new_end - prev_end) > 0.01
+        if shortened or moved:
+            item.trim_start = round(new_start, 3)
+            item.trim_end = round(new_end, 3)
+            log.info(
+                "audio ref auto-trim %s → %.2f–%.2f s (file %.2fs, budget %.2fs)",
+                item.path,
+                new_start,
+                new_end,
+                duration,
+                budget,
+            )
+
+
+def _hard_cap_audio_file(path: Path, edit_dir: Path, budget_s: float) -> Path:
+    """Re-trim a baked audio file if probe duration still exceeds the h3.c wall."""
+    from h3_media import REF_AUDIO_BAKE_CAP_S
+
+    cap = min(float(budget_s), REF_AUDIO_BAKE_CAP_S)
+    duration = probe_duration_seconds(path)
+    if duration is None or duration <= cap + 0.01:
+        return path
+    dest = edit_dir / f"{uuid.uuid4().hex[:10]}_acap{path.suffix or '.wav'}"
+    log.info(
+        "audio hard-cap %s (%.3fs → ≤%.2fs) before h3.c",
+        path.name,
+        duration,
+        cap,
+    )
+    return trim_media(path, dest, start_s=0.0, end_s=cap)
+
+
 def _materialize_ref_edits(state: AppState, refs: list[Any]) -> list[Any]:
     """Apply Continuity trim/crop to copies under upload_dir/edited/ before generate."""
     if not refs:
         return refs
     from h3_crop import apply_still, parse as parse_crop
+    from h3_media import REF_AUDIO_BAKE_CAP_S, allocate_audio_budgets
 
     edit_dir = state.upload_dir / "edited"
     edit_dir.mkdir(parents=True, exist_ok=True)
+    # Cap long audio before baking segments so validate never sees >15 s files.
+    _apply_audio_duration_caps(refs)
     for item in refs:
         kind = (item.kind or "").strip().lower()
         # Temporal segment first so framing sees the used stretch.
@@ -1433,6 +1529,33 @@ def _materialize_ref_edits(state: AppState, refs: list[Any]) -> list[Any]:
         elif kind == "audio":
             a_dest = edit_dir / f"{uuid.uuid4().hex[:10]}_audio.wav"
             item.path = adapt_audio_for_h3(item.path, a_dest)
+
+    # Final pass: even a "15.0 s" trim can bake to 15.02 s after resampler flush —
+    # h3.c then raises "reference audio exceeds the 15 second total limit".
+    audio_paths: list[tuple[Any, str]] = []
+    for item in refs:
+        kind = (item.kind or "").strip().lower()
+        if kind == "audio":
+            audio_paths.append((item, "path"))
+        elif kind == "video_audio" and item.audio_path is not None:
+            audio_paths.append((item, "audio_path"))
+        elif kind == "video":
+            info = probe_media(item.path)
+            if info.get("has_audio"):
+                audio_paths.append((item, "path"))
+    if audio_paths:
+        spans = []
+        for item, attr in audio_paths:
+            dur = probe_duration_seconds(getattr(item, attr)) or 0.0
+            spans.append(dur)
+        budgets = allocate_audio_budgets(spans)
+        for (item, attr), budget in zip(audio_paths, budgets):
+            capped = _hard_cap_audio_file(
+                Path(getattr(item, attr)),
+                edit_dir,
+                budget if budget > 0 else REF_AUDIO_BAKE_CAP_S,
+            )
+            setattr(item, attr, capped)
     return refs
 
 
@@ -2677,6 +2800,11 @@ def create_app(
             ),
         }
 
+    def _workspaces_public() -> list[dict[str, Any]]:
+        from h3_workspaces import list_workspaces
+
+        return list_workspaces()
+
     def _faces_public(app_state: AppState) -> dict[str, Any]:
         from h3_faces import (
             ABSTAIN_FACE_PX,
@@ -2918,6 +3046,7 @@ def create_app(
             "redetail": _redetail_public(),
             "upframe": _upframe_public(),
             "faces": _faces_public(state),
+            "workspaces": _workspaces_public(),
         }
 
     # ── Models management (status + user-confirmed download) ─────────────────
@@ -2977,23 +3106,6 @@ def create_app(
         pika_present = sum(
             1 for path in pika_paths if path is not None and path.is_file()
         )
-        viggle_recipes = [
-            p
-            for p in BUILTIN_LORAS
-            if p.get("id") in ("viggle_remake_swap", "viggle_remake_edit")
-        ]
-        viggle_paths = [
-            lora_cached_path(str(p["spec"]))
-            for p in viggle_recipes
-            if p.get("spec")
-        ]
-        viggle_ok = bool(viggle_paths) and all(
-            path is not None and path.is_file() for path in viggle_paths
-        )
-        viggle_present = sum(
-            1 for path in viggle_paths if path is not None and path.is_file()
-        )
-
         from h3_redetail import latent_upscaler_path
         from h3_sam import sam3_status
         from h3_upframe import film_net_path
@@ -3060,31 +3172,6 @@ def create_app(
                         "Ready."
                         if pika_ok
                         else f"{pika_present}/2 files on disk — download installs both."
-                    )
-                ),
-                "essential": False,
-            },
-            {
-                "id": "viggle_remake",
-                "label": "Viggle Remake",
-                "present": viggle_ok,
-                "path": (
-                    str(viggle_paths[0])
-                    if viggle_paths and viggle_paths[0] is not None
-                    else "models/loras/Viggle__Viggle-Remake/comfyui/"
-                ),
-                "size_gib": (
-                    round(sum(_file_gib(p) for p in viggle_paths if p), 1)
-                    if viggle_present
-                    else 7.0
-                ),
-                "note": (
-                    "Remake workspace adapters (Swap + Edit Comfy packs, ~7 GB). "
-                    "Powered by Viggle Remake. "
-                    + (
-                        "Ready."
-                        if viggle_ok
-                        else f"{viggle_present}/2 files on disk — download installs both."
                     )
                 ),
                 "essential": False,
@@ -3252,14 +3339,13 @@ def create_app(
         "taeh3": 22 * 1024**2,      # ~22 MB
         "taomate": 2.4 * 1024**3,   # ~2.4 GB
         "pika_flex": 3.6 * 1024**3,  # ~1.8 GB × FL2VA + Ref2VA
-        "viggle_remake": 7.0 * 1024**3,  # ~3.5 GB × Swap + Edit
         "dmad": 1.4 * 1024**3,      # API-compat only (not listed in Models UI)
         "film_net": 69 * 1024**2,    # ~69 MB FILM
         "latent_upscale": 500 * 1024**2,  # ~0.5 GB estimate; optional
         "sam3": 3.3 * 1024**3,      # ~3.3 GB mlx-community/sam3.1-bf16
     }
     _DOWNLOAD_COMPONENT_HELP = (
-        "fl2va, ref2va, taeh3, taomate, pika_flex, viggle_remake, film_net, "
+        "fl2va, ref2va, taeh3, taomate, pika_flex, film_net, "
         "latent_upscale, sam3"
     )
 
@@ -3269,7 +3355,6 @@ def create_app(
             "taeh3",
             "taomate",
             "pika_flex",
-            "viggle_remake",
             "film_net",
             "latent_upscale",
             "sam3",
@@ -3282,7 +3367,6 @@ def create_app(
             "taeh3",
             "taomate",
             "pika_flex",
-            "viggle_remake",
             "dmad",
             "film_net",
             "latent_upscale",
@@ -3359,7 +3443,7 @@ def create_app(
                             total = 0
                 return total, 0
             return _sum_hf_local_progress(root)
-        if component in ("taomate", "dmad", "pika_flex", "viggle_remake"):
+        if component in ("taomate", "dmad", "pika_flex"):
             from h3_lora import BUILTIN_LORAS, lora_cached_path, lora_download_dir
 
             if component == "pika_flex":
@@ -3367,12 +3451,6 @@ def create_app(
                     p
                     for p in BUILTIN_LORAS
                     if p.get("id") in ("pika_h3_flex_fl2va", "pika_h3_flex_ref2va")
-                ]
-            elif component == "viggle_remake":
-                recipes = [
-                    p
-                    for p in BUILTIN_LORAS
-                    if p.get("id") in ("viggle_remake_swap", "viggle_remake_edit")
                 ]
             else:
                 lid = "taomate_h3_3step" if component == "taomate" else "dmad_h3_4step"
@@ -3459,19 +3537,6 @@ def create_app(
                 ]
                 if len(recipes) < 2:
                     raise RuntimeError("Pika Flex builtin recipes missing")
-                for recipe in recipes:
-                    await asyncio.to_thread(ensure_lora, str(recipe["spec"]))
-                _download_state["error"] = None
-            elif component == "viggle_remake":
-                from h3_lora import BUILTIN_LORAS, ensure_lora
-
-                recipes = [
-                    p
-                    for p in BUILTIN_LORAS
-                    if p.get("id") in ("viggle_remake_swap", "viggle_remake_edit")
-                ]
-                if len(recipes) < 2:
-                    raise RuntimeError("Viggle Remake builtin recipes missing")
                 for recipe in recipes:
                     await asyncio.to_thread(ensure_lora, str(recipe["spec"]))
                 _download_state["error"] = None
@@ -4480,6 +4545,7 @@ def create_app(
             console_h3("faces %s %s", phase, extra.get("message") or "")
             state.set_pass_progress(phase, extra, kind="faces", clip_id=clip_id)
 
+        t0 = time.time()
         async with state._submit_lock:
             if state._active_run_id is not None:
                 raise HTTPException(409, "engine is busy")
@@ -4548,6 +4614,7 @@ def create_app(
                 },
             },
             seed=seed,
+            elapsed_s=time.time() - t0,
         )
         if out_path.is_file() and media_available():
             try:
@@ -4615,6 +4682,7 @@ def create_app(
             console_h3("redetail %s %s", phase, extra.get("message") or "")
             state.set_pass_progress(phase, extra, kind="redetail", clip_id=clip_id)
 
+        t0 = time.time()
         async with state._submit_lock:
             if state._active_run_id is not None:
                 raise HTTPException(409, "engine is busy")
@@ -4670,6 +4738,7 @@ def create_app(
             },
             width=tw,
             height=th,
+            elapsed_s=time.time() - t0,
         )
         if out_path.is_file() and media_available():
             try:
@@ -4706,6 +4775,7 @@ def create_app(
             console_h3("upframe %s %s", phase, extra.get("message") or "")
             state.set_pass_progress(phase, extra, kind="upframe", clip_id=clip_id)
 
+        t0 = time.time()
         async with state._submit_lock:
             if state._active_run_id is not None:
                 raise HTTPException(409, "engine is busy")
@@ -4743,6 +4813,7 @@ def create_app(
             generation_patch={
                 "upframe": {"enabled": True, "multiplier": settings.multiplier},
             },
+            elapsed_s=time.time() - t0,
         )
         if out_path.is_file() and media_available():
             try:
@@ -4829,6 +4900,7 @@ def create_app(
             console_h3("longtake %s %s", phase, extra.get("message") or "")
             state.set_pass_progress(phase, extra, kind="longtake", clip_id=clip_id)
 
+        t0 = time.time()
         async with state._submit_lock:
             if state._active_run_id is not None:
                 raise HTTPException(409, "engine is busy")
@@ -4881,6 +4953,7 @@ def create_app(
                 },
             },
             seed=seed,
+            elapsed_s=time.time() - t0,
         )
         if out_path.is_file() and media_available():
             try:

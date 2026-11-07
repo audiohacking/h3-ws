@@ -35,9 +35,6 @@ export type LibraryPassPanelProps = {
   kind: LibraryPassKind;
   config: Config | null;
   busy?: boolean;
-  /** Live status while the pass runs (player overlay mirrors this). */
-  statusMessage?: string | null;
-  statusPct?: number | null;
   defaults?: LibraryPassDefaults;
   onClose: () => void;
   onRun: (params: LibraryPassParams) => void;
@@ -71,8 +68,6 @@ export function LibraryPassPanel({
   kind,
   config,
   busy,
-  statusMessage,
-  statusPct,
   defaults,
   onClose,
   onRun,
@@ -111,13 +106,8 @@ export function LibraryPassPanel({
     [clip.width, clip.height],
   );
 
-  useDismissable(
-    true,
-    () => {
-      if (!busy) onClose();
-    },
-    rootRef,
-  );
+  // Settings sheet only — always dismissable. Progress lives on the player overlay.
+  useDismissable(true, onClose, rootRef);
 
   useEffect(() => {
     if (kind === "upframe" && upframeCfg?.multiplier) setMultiplier(upframeCfg.multiplier);
@@ -132,19 +122,16 @@ export function LibraryPassPanel({
 
   function submit() {
     if (busy) return;
-    if (kind === "upframe") {
-      onRun({ multiplier: Math.max(2, Math.round(multiplier)) });
-      return;
-    }
-    if (kind === "redetail") {
-      onRun({ denoise, seed });
-      return;
-    }
-    if (kind === "longtake") {
-      onRun({ denoise, keyframes, seed, interpolation });
-      return;
-    }
-    onRun({ denoise, seed, canvas: faceCanvas });
+    const params: LibraryPassParams =
+      kind === "upframe"
+        ? { multiplier: Math.max(2, Math.round(multiplier)) }
+        : kind === "redetail"
+          ? { denoise, seed }
+          : kind === "longtake"
+            ? { denoise, keyframes, seed, interpolation }
+            : { denoise, seed, canvas: faceCanvas };
+    // Parent closes this sheet immediately and shows progress on the player.
+    onRun(params);
   }
 
   const denoiseMin =
@@ -177,7 +164,6 @@ export function LibraryPassPanel({
         <button
           type="button"
           className="library-pass-panel__close"
-          disabled={busy}
           onClick={onClose}
           aria-label="Close"
         >
@@ -330,30 +316,12 @@ export function LibraryPassPanel({
         )}
       </div>
 
-      {busy && (
-        <div className="library-pass-panel__status" aria-live="polite">
-          <div className="library-pass-panel__status-bar">
-            {statusPct != null ? (
-              <div
-                className="library-pass-panel__status-fill"
-                style={{ width: `${Math.min(100, statusPct)}%` }}
-              />
-            ) : (
-              <div className="library-pass-panel__status-pulse" />
-            )}
-          </div>
-          <p className="library-pass-panel__status-msg">
-            {statusMessage || `${TITLES[kind]} in progress…`}
-          </p>
-        </div>
-      )}
-
       <div className="library-pass-panel__actions">
-        <button type="button" className="btn-secondary" disabled={busy} onClick={onClose}>
+        <button type="button" className="btn-secondary" onClick={onClose}>
           Cancel
         </button>
         <button type="button" className="btn-primary" disabled={busy} onClick={submit}>
-          {busy ? `${TITLES[kind]}…` : `Run ${TITLES[kind]}`}
+          Run {TITLES[kind]}
         </button>
       </div>
     </div>

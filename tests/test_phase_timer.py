@@ -49,7 +49,26 @@ def test_profile_lines_are_kept_not_treated_as_phases():
     assert [p["phase"] for p in summary["phases"]] == ["video VAE encoder"]
     assert summary["profile"] == [{
         "name": "video VAE encoder", "mark": "total",
-        "wall_s": 164.329, "peak_gib": 50.298}]
+        "wall_s": 164.329, "encode_s": 0.229, "wait_s": 162.595,
+        "peak_gib": 50.298}]
+
+
+def test_profile_line_without_printf_padding():
+    """Log paths sometimes collapse ``%-24s`` padding to a single space."""
+    line = (
+        "h3 profile: Qwen text encoder total wall= 3.312s encode= 0.059s "
+        "wait= 1.783s root-gpu= 0.226s peak= 2.788GiB alloc= 46.923GiB "
+        "submissions=51 direct=454 linear=350 conv=0 attention=0"
+    )
+    timer = _run([
+        (101.0, {"stage": "text encoder", "step": 1, "total": 50}),
+        (104.0, {"stage": "loading", "label": line}),
+    ])
+    summary = timer.summary(outcome="done", now=105.0)
+    assert summary["profile"] == [{
+        "name": "Qwen text encoder", "mark": "total",
+        "wall_s": 3.312, "encode_s": 0.059, "wait_s": 1.783,
+        "peak_gib": 2.788, "attention": 0}]
 
 
 def test_phase_followed_by_another_counts_as_complete():

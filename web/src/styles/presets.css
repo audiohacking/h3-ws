@@ -207,6 +207,23 @@
   white-space: nowrap;
 }
 
+.preset-card__prompt {
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.preset-card__prompt--empty {
+  font-style: italic;
+  color: var(--text-tertiary);
+  display: block;
+  -webkit-line-clamp: unset;
+}
+
 .preset-card__meta {
   font-size: var(--font-size-xs);
   color: var(--text-tertiary);
@@ -258,6 +275,13 @@
 
 .preset-save-form__input::placeholder {
   color: var(--text-tertiary);
+}
+
+.preset-save-form__error {
+  margin: 0;
+  font-size: var(--font-size-xs);
+  color: var(--error-color, #ef4444);
+  line-height: 1.35;
 }
 
 .preset-save-form__actions {
