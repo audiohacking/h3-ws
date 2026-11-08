@@ -25,7 +25,13 @@ export type LibraryAsset = {
 
 type Capacity = { used: number; max: number; label: string };
 
-export type LibraryPickPurpose = "refs" | "start_frame" | "end_frame";
+export type LibraryPickPurpose =
+  | "refs"
+  | "start_frame"
+  | "end_frame"
+  | "source_video"
+  | "paint_images"
+  | "library_clip";
 
 export type LibraryPickItem = {
   kind: RefKind;
@@ -35,6 +41,14 @@ export type LibraryPickItem = {
   previewUrl?: string;
 };
 
+export type LibraryPickedMedia = {
+  path: string;
+  name: string;
+  previewUrl?: string;
+  clipId?: string;
+  durationS?: number;
+};
+
 type Props = {
   open: boolean;
   initialTab?: LibraryTab;
@@ -42,12 +56,16 @@ type Props = {
   videoAttachKind?: "video" | "silent_video";
   /**
    * ``refs`` (default) = multi-select for Ref2VA.
-   * ``start_frame`` / ``end_frame`` = single image pick for FL2VA anchors
-   * (uploads + captured frames from the Image tab).
+   * ``start_frame`` / ``end_frame`` = single image pick for FL2VA anchors.
+   * ``source_video`` = single video (uploads + renders).
+   * ``paint_images`` = multi image pick for recipe workspaces.
+   * ``library_clip`` = single finished render for Enhance / library passes.
    */
   purpose?: LibraryPickPurpose;
-  /** Current refs — drives the slot counter (ignored for frame picks). */
+  /** Current refs — drives the slot counter (ignored for single picks). */
   refs: ReferenceItem[];
+  /** Cap for purpose=paint_images (default 4). */
+  paintMax?: number;
   disabled?: boolean;
   onClose: () => void;
   onUpload: (file: File, kind: "image" | "video" | "audio") => Promise<{
@@ -56,10 +74,12 @@ type Props = {
     filename?: string;
     hasAudio?: boolean;
   }>;
-  /** Attach selected library assets as new references (purpose=refs). */
+  /** Attach selected library assets as new references (purpose=refs|paint_images). */
   onAdd: (items: LibraryPickItem[]) => void;
   /** Single image chosen as start/end frame (purpose=start_frame|end_frame). */
-  onPickImage?: (item: { path: string; name: string; previewUrl?: string }) => void;
+  onPickImage?: (item: LibraryPickedMedia) => void;
+  /** Single video / render chosen (purpose=source_video|library_clip). */
+  onPickVideo?: (item: LibraryPickedMedia) => void;
 };
 
 const TABS: { id: LibraryTab; label: string }[] = [
@@ -120,20 +140,41 @@ function uploadKindForTab(tab: LibraryTab): "image" | "video" | "audio" {
   return "video";
 }
 
+function tabsForPurpose(purpose: LibraryPickPurpose): LibraryTab[] {
+  if (purpose === "start_frame" || purpose === "end_frame" || purpose === "paint_images") {
+    return ["image"];
+  }
+  if (purpose === "source_video") return ["video", "renders"];
+  if (purpose === "library_clip") return ["renders"];
+  return TABS.map((t) => t.id);
+}
+
+function bootTabForPurpose(purpose: LibraryPickPurpose, initialTab: LibraryTab): LibraryTab {
+  const allowed = tabsForPurpose(purpose);
+  if (allowed.includes(initialTab)) return initialTab;
+  return allowed[0] ?? "image";
+}
+
 export function MediaLibraryModal({
   open,
   initialTab = "image",
   videoAttachKind = "video",
   purpose = "refs",
   refs,
+  paintMax = 4,
   disabled,
   onClose,
   onUpload,
   onAdd,
   onPickImage,
+  onPickVideo,
 }: Props) {
   const framePick = purpose === "start_frame" || purpose === "end_frame";
-  const [tab, setTab] = useState<LibraryTab>(framePick ? "image" : initialTab);
+  const paintPick = purpose === "paint_images";
+  const videoPick = purpose === "source_video" || purpose === "library_clip";
+  const singlePick = framePick || videoPick;
+
+  const [tab, setTab] = useState<LibraryTab>(() => bootTabForPurpose(purpose, initialTab));
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<LibraryAsset[]>([]);
   const [loading, setLoading] = useState(false);
@@ -143,17 +184,27 @@ export function MediaLibraryModal({
   const fileRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  const visibleTabs = useMemo(
-    () => (framePick ? TABS.filter((t) => t.id === "image") : TABS),
-    [framePick],
-  );
+  const visibleTabs = useMemo(() => {
+    const allowed = new Set(tabsForPurpose(purpose));
+    return TABS.filter((t) => allowed.has(t.id));
+  }, [purpose]);
 
   const capacity = useMemo((): Capacity => {
     if (framePick) {
       return { used: 0, max: 1, label: purpose === "end_frame" ? "end frame" : "start frame" };
     }
+    if (purpose === "source_video") {
+      return { used: 0, max: 1, label: "source video" };
+    }
+    if (purpose === "library_clip") {
+      return { used: 0, max: 1, label: "library clip" };
+    }
+    if (paintPick) {
+      const used = countSlots(refs).images;
+      return { used, max: Math.max(used, paintMax), label: "painted frame" };
+    }
     return capacityForTab(tab, refs);
-  }, [framePick, purpose, tab, refs]);
+  }, [framePick, paintPick, purpose, tab, refs, paintMax]);
   const slotsLeft = Math.max(0, capacity.max - capacity.used);
   const filled = capacity.used + selected.length;
 
@@ -176,7 +227,7 @@ export function MediaLibraryModal({
 
   useEffect(() => {
     if (!open) return;
-    const bootTab: LibraryTab = framePick ? "image" : initialTab;
+    const bootTab = bootTabForPurpose(purpose, initialTab);
     setTab(bootTab);
     setQuery("");
     setSelected([]);
@@ -184,7 +235,7 @@ export function MediaLibraryModal({
     void load(bootTab, "");
     const t = window.setTimeout(() => searchRef.current?.focus(), 50);
     return () => window.clearTimeout(t);
-  }, [open, initialTab, framePick, load]);
+  }, [open, initialTab, purpose, load]);
 
   useEffect(() => {
     if (!open) return;
@@ -203,12 +254,28 @@ export function MediaLibraryModal({
 
   if (!open) return null;
 
+  function assetMatchesPurpose(asset: LibraryAsset): boolean {
+    if (framePick || paintPick) return asset.kind === "image";
+    if (videoPick) return asset.kind === "video";
+    return true;
+  }
+
+  function toPickedMedia(a: LibraryAsset): LibraryPickedMedia {
+    return {
+      path: a.path,
+      name: a.name,
+      previewUrl: a.thumb_url || a.video_url || a.media_url || undefined,
+      clipId: a.clip_id,
+      durationS: a.duration_s ?? undefined,
+    };
+  }
+
   function toggle(asset: LibraryAsset) {
-    if (framePick && asset.kind !== "image") return;
+    if (!assetMatchesPurpose(asset)) return;
     setSelected((prev) => {
       const exists = prev.some((a) => a.id === asset.id);
       if (exists) return prev.filter((a) => a.id !== asset.id);
-      if (framePick) return [asset];
+      if (singlePick) return [asset];
       if (prev.length >= slotsLeft) return prev;
       return [...prev, asset];
     });
@@ -234,7 +301,7 @@ export function MediaLibraryModal({
       };
       setItems((prev) => [asset, ...prev.filter((a) => a.path !== asset.path)]);
       setSelected((prev) => {
-        if (framePick) return [asset];
+        if (singlePick) return [asset];
         if (prev.length >= slotsLeft) return prev;
         if (prev.some((a) => a.id === asset.id)) return prev;
         return [...prev, asset];
@@ -250,12 +317,12 @@ export function MediaLibraryModal({
   function confirmAdd() {
     if (selected.length === 0) return;
     if (framePick) {
-      const a = selected[0];
-      onPickImage?.({
-        path: a.path,
-        name: a.name,
-        previewUrl: a.thumb_url || a.media_url || undefined,
-      });
+      onPickImage?.(toPickedMedia(selected[0]));
+      onClose();
+      return;
+    }
+    if (videoPick) {
+      onPickVideo?.(toPickedMedia(selected[0]));
       onClose();
       return;
     }
@@ -284,16 +351,45 @@ export function MediaLibraryModal({
 
   const uploadLabel =
     tab === "image" ? "Upload image" : tab === "audio" ? "Upload audio" : "Upload video";
-  const confirmLabel = framePick
-    ? purpose === "end_frame"
-      ? "Use as end frame"
-      : "Use as start frame"
-    : `Add${selected.length > 0 ? ` (${selected.length})` : ""}`;
-  const dialogLabel = framePick
-    ? purpose === "end_frame"
-      ? "Choose end frame"
-      : "Choose start frame"
-    : "Media library";
+  const confirmLabel = (() => {
+    if (purpose === "end_frame") return "Use as end frame";
+    if (purpose === "start_frame") return "Use as start frame";
+    if (purpose === "source_video") return "Use as source";
+    if (purpose === "library_clip") return "Use this clip";
+    if (paintPick) return `Add${selected.length > 0 ? ` (${selected.length})` : ""}`;
+    return `Add${selected.length > 0 ? ` (${selected.length})` : ""}`;
+  })();
+  const dialogLabel = (() => {
+    if (purpose === "end_frame") return "Choose end frame";
+    if (purpose === "start_frame") return "Choose start frame";
+    if (purpose === "source_video") return "Choose source video";
+    if (purpose === "library_clip") return "Choose library clip";
+    if (paintPick) return "Choose painted frames";
+    return "Media library";
+  })();
+  const slotsHint = (() => {
+    if (framePick) {
+      return selected.length === 0
+        ? "Pick an image (uploads + captured frames)"
+        : `Selected · ${selected[0]?.name ?? "image"}`;
+    }
+    if (purpose === "source_video") {
+      return selected.length === 0
+        ? "Pick a video from uploads or renders"
+        : `Selected · ${selected[0]?.name ?? "video"}`;
+    }
+    if (purpose === "library_clip") {
+      return selected.length === 0
+        ? "Pick a finished render"
+        : `Selected · ${selected[0]?.name ?? "clip"}`;
+    }
+    if (paintPick) {
+      return `${filled} / ${capacity.max} painted frames`;
+    }
+    return `${filled} / ${capacity.max} slots filled`;
+  })();
+
+  const allowUpload = tab !== "renders" && purpose !== "library_clip";
 
   return (
     <div className="media-lib-overlay" role="presentation" onClick={onClose}>
@@ -331,11 +427,15 @@ export function MediaLibraryModal({
             ref={searchRef}
             className="media-lib__search"
             type="search"
-            placeholder="Search uploads and captured frames…"
+            placeholder={
+              purpose === "library_clip"
+                ? "Search finished renders…"
+                : "Search uploads and captured frames…"
+            }
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          {tab !== "renders" && (
+          {allowUpload && (
             <button
               type="button"
               className="media-lib__upload"
@@ -350,7 +450,7 @@ export function MediaLibraryModal({
             type="file"
             accept={acceptForTab(tab === "renders" ? "video" : tab)}
             hidden
-            multiple={!framePick}
+            multiple={!singlePick}
             onChange={(e) => {
               const files = Array.from(e.target.files ?? []);
               e.target.value = "";
@@ -384,13 +484,16 @@ export function MediaLibraryModal({
                 title={asset.name}
                 onClick={() => toggle(asset)}
                 onDoubleClick={() => {
-                  if (!framePick || asset.kind !== "image") return;
-                  onPickImage?.({
-                    path: asset.path,
-                    name: asset.name,
-                    previewUrl: asset.thumb_url || asset.media_url || undefined,
-                  });
-                  onClose();
+                  if (!assetMatchesPurpose(asset)) return;
+                  if (framePick) {
+                    onPickImage?.(toPickedMedia(asset));
+                    onClose();
+                    return;
+                  }
+                  if (videoPick) {
+                    onPickVideo?.(toPickedMedia(asset));
+                    onClose();
+                  }
                 }}
               >
                 {asset.kind === "image" && asset.thumb_url ? (
@@ -417,13 +520,7 @@ export function MediaLibraryModal({
         </div>
 
         <footer className="media-lib__foot">
-          <span className="media-lib__slots">
-            {framePick
-              ? selected.length === 0
-                ? "Pick an image (uploads + captured frames)"
-                : `Selected · ${selected[0]?.name ?? "image"}`
-              : `${filled} / ${capacity.max} slots filled`}
-          </span>
+          <span className="media-lib__slots">{slotsHint}</span>
           <button type="button" className="media-lib__ghost" onClick={onClose}>
             Cancel
           </button>

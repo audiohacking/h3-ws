@@ -1692,7 +1692,7 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
                 }
             } else {
                 h3_set_error(ctx, "unknown --schedule '%s' "
-                             "(try serving or pika-flex)",
+                             "(try serving, pika-flex)",
                              schedule_name);
                 goto cleanup;
             }

@@ -375,6 +375,9 @@ MAX_REF_AUDIO_S = 15.0
 MAX_REF_AUDIO_TOTAL_S = 15.0
 MAX_REF_AUDIO_CLIPS = 3
 _DURATION_SLACK_S = 0.05
+# h3_ffmpeg_read_audio_f32 allocates exactly 32000*15 samples and rejects even
+# 15.02 s files when truncate=0. Bake / auto-trim targets stay under that hard wall.
+REF_AUDIO_BAKE_CAP_S = 14.9
 
 
 def media_shim_ok() -> tuple[bool, str]:
@@ -928,14 +931,23 @@ def trim_media(
                         sample_fmt="s16", layout="stereo", rate=48000
                     )
 
+            # Sample-accurate audio stop so resampler flush cannot push past end.
+            audio_written = 0
+            audio_limit = None
+            if has_audio and end is not None:
+                audio_limit = max(1, int(round((end - start) * 48000)))
+
             for frame in inp.decode():
-                pts_s = float(frame.time) if frame.time is not None else 0.0
+                pts_s = float(frame.time) if frame.time is not None else None
+                if pts_s is None and isinstance(frame, AudioFrame):
+                    rate = int(frame.sample_rate or 48000) or 48000
+                    pts_s = float(audio_written) / float(rate) + start
+                elif pts_s is None:
+                    pts_s = 0.0
                 if pts_s + 1e-3 < start:
                     continue
                 if end is not None and pts_s >= end - 1e-6:
-                    if isinstance(frame, VideoFrame):
-                        break
-                    continue
+                    break
                 if isinstance(frame, VideoFrame) and v_out is not None:
                     # PyAV Time docs: encode PTS in 1/fps; keep yuv420p pixels / color tags.
                     frame = _frame_for_h264_encode(frame, fps=fps, pts=v_pts)
@@ -943,7 +955,16 @@ def trim_media(
                     for packet in v_out.encode(frame):
                         out.mux(packet)
                 elif isinstance(frame, AudioFrame) and a_out is not None and a_resampler is not None:
+                    if audio_limit is not None and audio_written >= audio_limit:
+                        break
+                    samples = int(getattr(frame, "samples", 0) or 0)
+                    if audio_limit is not None and samples > 0:
+                        remain = audio_limit - audio_written
+                        if samples > remain:
+                            # Drop the tail frame rather than overshoot h3's 15 s wall.
+                            break
                     _mux_audio_frame(out, a_out, a_resampler, frame)
+                    audio_written += samples
 
             if v_out is not None:
                 for packet in v_out.encode():
@@ -1035,8 +1056,52 @@ def upscale_video(
     return target, out_w, out_h
 
 
+def clamp_audio_segment(
+    duration_s: float,
+    start_s: float | None,
+    end_s: float | None,
+    *,
+    max_span_s: float,
+) -> tuple[float, float]:
+    """Return ``[start, end)`` inside the file with length ≤ ``max_span_s``.
+
+    Prefers keeping the in-point and pulling the out-point earlier.
+    """
+    dur = max(0.0, float(duration_s))
+    start = 0.0 if start_s is None else float(start_s)
+    end = dur if end_s is None else float(end_s)
+    start = max(0.0, min(start, dur))
+    end = max(start, min(end, dur))
+    max_span = max(0.0, float(max_span_s))
+    if (end - start) <= max_span + _DURATION_SLACK_S:
+        return start, end
+    end2 = min(dur, start + max_span)
+    start2 = max(0.0, end2 - max_span)
+    return start2, end2
+
+
+def allocate_audio_budgets(
+    spans_s: list[float],
+    *,
+    max_each_s: float = REF_AUDIO_BAKE_CAP_S,
+    max_total_s: float = REF_AUDIO_BAKE_CAP_S,
+) -> list[float]:
+    """Per-clip allowed span after the bake caps (strictly under h3.c's 15 s wall)."""
+    remaining = float(max_total_s)
+    out: list[float] = []
+    for span in spans_s:
+        allow = min(max(0.0, float(span)), float(max_each_s), remaining)
+        out.append(allow)
+        remaining = max(0.0, remaining - allow)
+    return out
+
+
 def assert_audio_durations(seconds: list[float]) -> None:
-    """Enforce h3.c audio-reference limits (2–15 s each, ≤3 clips, total ≤15 s)."""
+    """Enforce h3.c audio-reference limits (2–15 s each, ≤3 clips, total ≤15 s).
+
+    Callers should auto-trim via ``clamp_audio_segment`` / materialize first so
+    long files become a Continuity segment instead of a hard error.
+    """
     if len(seconds) > MAX_REF_AUDIO_CLIPS:
         raise ValueError(f"at most {MAX_REF_AUDIO_CLIPS} audio references")
     total = 0.0
@@ -1044,18 +1109,21 @@ def assert_audio_durations(seconds: list[float]) -> None:
         if duration + _DURATION_SLACK_S < MIN_REF_AUDIO_S:
             raise ValueError(
                 f"audio reference is {duration:.2f}s; h3.c requires at least "
-                f"{MIN_REF_AUDIO_S:.0f}s"
+                f"{MIN_REF_AUDIO_S:.0f}s — lengthen the segment (door on the "
+                f"capsule) or pick a longer clip"
             )
         if duration - _DURATION_SLACK_S > MAX_REF_AUDIO_S:
             raise ValueError(
                 f"audio reference is {duration:.2f}s; h3.c allows at most "
-                f"{MAX_REF_AUDIO_S:.0f}s"
+                f"{MAX_REF_AUDIO_S:.0f}s — open the capsule segment door and "
+                f"set an in/out range of ≤{MAX_REF_AUDIO_S:.0f}s"
             )
         total += duration
     if total - _DURATION_SLACK_S > MAX_REF_AUDIO_TOTAL_S:
         raise ValueError(
             f"audio references total {total:.2f}s; h3.c caps the sum at "
-            f"{MAX_REF_AUDIO_TOTAL_S:.0f}s"
+            f"{MAX_REF_AUDIO_TOTAL_S:.0f}s — shorten segments on the capsules "
+            f"or remove a clip"
         )
 
 

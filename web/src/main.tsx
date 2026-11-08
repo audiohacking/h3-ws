@@ -14,6 +14,7 @@ import "./styles/models.css";
 import "./styles/cast.css";
 import "./styles/style-atlas.css";
 import "./styles/composer.css";
+import "./styles/workspaces.css";
 import "./styles/picture.css";
 import "./styles/media-library.css";
 import "./index.css";

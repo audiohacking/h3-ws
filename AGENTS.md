@@ -11,6 +11,8 @@ Canonical guide for AI agents using **h3-ws** to generate video on Apple Silicon
 | `server.py` | Local MiniMax-H3 inference via native **h3.c**. One job at a time. Embeds Web UI. |
 | `h3_backend.py` | Spawns `./h3`. Warm interactive session for FL2VA **and** Ref2VA (`h3_session.py`); one-shot fallback if the session dies. |
 | `web_ui.py` + `web/` | Browser library, quality presets, SSE progress. |
+| `workspaces/*.json` | Declarative tabs (Create / Enhance / future `recipe` plugins). See [`docs/workspaces.md`](docs/workspaces.md). |
+| `mcp_server.py` | Thin stdio MCP client of the running server (`H3WS_URL`). Agent rules: [`mcp/AGENTS.md`](mcp/AGENTS.md). |
 | Weights | `models/MiniMax-H3/{FL2VA,Ref2VA}` from `MiniMaxAI/MiniMax-H3` |
 
 **Default Web UI:** http://127.0.0.1:8765/

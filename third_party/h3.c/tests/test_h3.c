@@ -147,6 +147,7 @@ static void test_schedule(void) {
     h3_sigma_schedule serving6;
     CHECK(h3_serving_schedule_build(6, &serving6));
     CHECK(!close_enough(serving6.video[1], schedule.video[1], 1e-4));
+
     {
         static const int bad_knots[] = {1000, 500, 750, 0};
         CHECK(!h3_knot_schedule_build(bad_knots, 4, &schedule));

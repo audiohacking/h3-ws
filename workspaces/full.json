@@ -1,0 +1,18 @@
+{
+  "id": "full",
+  "label": "Create",
+  "hint": "Text, references, and first/last frames",
+  "order": 10,
+  "enabled": true,
+  "panel": "composer",
+  "isolation": {
+    "lora_categories": null,
+    "forbid": []
+  },
+  "engine": {
+    "mode": "auto"
+  },
+  "fields": [],
+  "submit": {},
+  "docs": "AGENTS.md"
+}

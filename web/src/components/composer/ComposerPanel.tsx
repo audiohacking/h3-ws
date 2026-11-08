@@ -54,7 +54,7 @@ export type ComposerPanelProps = {
   onAttachCastMedia: (id: string, file: File, type: CastMediaType) => Promise<void>;
   onRemoveCastMedia: (id: string, mediaId: string) => Promise<void>;
   presets: GenerationPreset[];
-  onSavePreset: (name: string, description?: string) => void;
+  onSavePreset: (name: string, description?: string) => void | Promise<void>;
   onLoadPreset: (preset: GenerationPreset) => void;
   onDeletePreset: (id: string) => void;
   activeStyleId?: string | null;
@@ -398,7 +398,7 @@ export function ComposerPanel(props: ComposerPanelProps) {
           onLayers={props.onLayers}
           reuse={props.reuse}
           onReuse={props.onReuse}
-          reuseLocked={props.numSteps <= 7}
+          reuseLocked={false}
           quality={props.quality}
           qualityOptions={props.qualityOptions}
           onQuality={props.onQuality}

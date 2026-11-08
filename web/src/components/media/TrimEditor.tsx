@@ -4,6 +4,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { clamp, formatTime, mediaSrc } from "../../crop";
+import { MAX_REF_AUDIO_S, MIN_REF_AUDIO_S } from "../../refAudioLimits";
 import type { MediaTrim, RefKind } from "../../types";
 
 const MIN_SEGMENT = 0.25;
@@ -117,7 +118,13 @@ export function TrimEditor({
   const setDurationFit = useCallback((seconds: number) => {
     setDuration(seconds);
     setEnd((prev: number) => {
-      const nextEnd = Math.min(Number.isFinite(prev) ? prev : seconds, seconds);
+      // Standalone audio cannot be "whole" past h3.c's 15 s cap — default the
+      // first 15 s; the user can slide the window in this editor.
+      let nextEnd = Math.min(Number.isFinite(prev) ? prev : seconds, seconds);
+      if (kind === "audio" && seconds > MAX_REF_AUDIO_S && nextEnd - 0 > MAX_REF_AUDIO_S) {
+        const prevStart = Number.isFinite(initial?.start) ? Number(initial?.start) : 0;
+        nextEnd = Math.min(seconds, prevStart + MAX_REF_AUDIO_S);
+      }
       setStart((prevStart: number) => {
         const s = Math.max(0, Math.min(prevStart, Math.max(0, nextEnd - MIN_SEGMENT)));
         if (nextEnd <= s) return 0;
@@ -126,7 +133,7 @@ export function TrimEditor({
       if (nextEnd <= 0) return seconds;
       return nextEnd;
     });
-  }, []);
+  }, [kind, initial?.start]);
 
   const drawFrame = useCallback(() => {
     const stage = stageRef.current;
@@ -249,14 +256,25 @@ export function TrimEditor({
     return Math.abs(value - target) <= 2 / 24 ? target : value;
   };
 
+  const audioBudgeted = (trackChoice: TrackChoice | undefined) => {
+    if (kind === "audio") return true;
+    if (kind === "silent_video") return false;
+    // Video / video_audio: soundtrack counts unless the user picks picture-only.
+    return (trackChoice ?? "picture+sound") !== "picture";
+  };
+
   const setEdge = (edge: "start" | "end", value: number) => {
     if (duration <= MIN_SEGMENT) return;
+    const budgeted = audioBudgeted(track);
+    const maxLen = budgeted ? MAX_REF_AUDIO_S : duration;
     if (edge === "start") {
       const next = Math.min(Math.max(0, value), end - MIN_SEGMENT);
-      setStart(next);
-      seek(next, true);
+      const capped = Math.max(next, end - maxLen);
+      setStart(capped);
+      seek(capped, true);
     } else {
-      const next = Math.max(Math.min(duration, snapCard(value)), start + MIN_SEGMENT);
+      let next = Math.max(Math.min(duration, snapCard(value)), start + MIN_SEGMENT);
+      next = Math.min(next, start + maxLen);
       setEnd(next);
       seek(Math.max(start, next - 1 / 24), true);
     }
@@ -299,12 +317,21 @@ export function TrimEditor({
   };
 
   const resolvedEnd = duration ? Math.min(end, duration) : 0;
+  const shownTrack = track ?? "picture+sound";
+  const budgeted = audioBudgeted(shownTrack);
+  const segmentLen = Math.max(0, resolvedEnd - start);
+  const overAudioCap = budgeted && segmentLen - 0.05 > MAX_REF_AUDIO_S;
   const isWhole = !duration || (start <= 0.001 && resolvedEnd >= duration - 0.001);
   const fits =
     card && duration
       ? Math.abs(resolvedEnd - start - Math.min(card, duration)) <= 1 / 24
       : false;
-  const shownTrack = track ?? "picture+sound";
+  const audioCapNote =
+    budgeted && duration > MAX_REF_AUDIO_S
+      ? `h3.c allows at most ${MAX_REF_AUDIO_S}s of reference audio — pick a ≤${MAX_REF_AUDIO_S}s segment (min ${MIN_REF_AUDIO_S}s).`
+      : overAudioCap
+        ? `Segment is ${segmentLen.toFixed(1)}s — shorten to ≤${MAX_REF_AUDIO_S}s for reference audio.`
+        : "";
 
   const percent = (time: number) => (duration ? (time / duration) * 100 : 0);
 
@@ -415,8 +442,9 @@ export function TrimEditor({
                   ? `Whole clip · ${formatTime(duration)}`
                   : `${formatTime(start)} – ${formatTime(resolvedEnd)}`}
               </span>
-              <span className="mmc-trim-len">{(resolvedEnd - start).toFixed(1)} s</span>
+              <span className="mmc-trim-len">{segmentLen.toFixed(1)} s</span>
               {status ? <span className="mmc-trim-note">{status}</span> : null}
+              {audioCapNote ? <span className="mmc-trim-note">{audioCapNote}</span> : null}
             </>
           )}
         </div>
@@ -425,16 +453,43 @@ export function TrimEditor({
           <button
             type="button"
             className="mmc-ghost"
-            disabled={isWhole || !duration}
-            title="Reset to the whole file"
+            disabled={!duration || (isWhole && !(budgeted && duration > MAX_REF_AUDIO_S))}
+            title={
+              budgeted && duration > MAX_REF_AUDIO_S
+                ? `Whole file is ${duration.toFixed(1)}s — h3.c caps audio at ${MAX_REF_AUDIO_S}s. Use Take ${MAX_REF_AUDIO_S}s.`
+                : "Reset to the whole file"
+            }
             onClick={() => {
+              if (budgeted && duration > MAX_REF_AUDIO_S) {
+                setStart(0);
+                setEnd(MAX_REF_AUDIO_S);
+                seek(0, true);
+                return;
+              }
               setStart(0);
               setEnd(duration);
               seek(0, true);
             }}
           >
-            Whole clip
+            {budgeted && duration > MAX_REF_AUDIO_S ? `First ${MAX_REF_AUDIO_S}s` : "Whole clip"}
           </button>
+          {budgeted && duration > MAX_REF_AUDIO_S ? (
+            <button
+              type="button"
+              className="mmc-ghost"
+              disabled={!duration || Math.abs(segmentLen - MAX_REF_AUDIO_S) <= 1 / 24}
+              title={`Cut a ${MAX_REF_AUDIO_S}s window from the in point (h3.c audio cap).`}
+              onClick={() => {
+                const length = Math.min(MAX_REF_AUDIO_S, duration);
+                const s = Math.min(start, duration - length);
+                setStart(s);
+                setEnd(s + length);
+                seek(s, true);
+              }}
+            >
+              Take {MAX_REF_AUDIO_S}s
+            </button>
+          ) : null}
           {card ? (
             <button
               type="button"
@@ -442,14 +497,14 @@ export function TrimEditor({
               disabled={!duration || fits}
               title="Cut the segment to the length of the shot referencing it, from the in point."
               onClick={() => {
-                const length = Math.min(card, duration);
+                const length = Math.min(card, duration, budgeted ? MAX_REF_AUDIO_S : duration);
                 const s = Math.min(start, duration - length);
                 setStart(s);
                 setEnd(s + length);
                 seek(s, true);
               }}
             >
-              Take {card.toFixed(2)} s
+              Take {Math.min(card, budgeted ? MAX_REF_AUDIO_S : card).toFixed(2)} s
             </button>
           ) : null}
           {showTrack && (
@@ -479,12 +534,28 @@ export function TrimEditor({
           <button
             type="button"
             className="mmc-add"
-            disabled={!duration}
+            disabled={!duration || (budgeted && segmentLen + 0.05 < MIN_REF_AUDIO_S)}
+            title={
+              budgeted && segmentLen + 0.05 < MIN_REF_AUDIO_S
+                ? `Reference audio must be at least ${MIN_REF_AUDIO_S}s`
+                : undefined
+            }
             onClick={() => {
-              const trim = isWhole
-                ? null
-                : { start: round3(start), end: round3(resolvedEnd) };
               const chosen = hasAudio === false ? "picture" : shownTrack;
+              const keepsAudio = audioBudgeted(chosen);
+              let useStart = start;
+              let useEnd = resolvedEnd;
+              if (keepsAudio && useEnd - useStart - 0.05 > MAX_REF_AUDIO_S) {
+                useEnd = Math.min(duration, useStart + MAX_REF_AUDIO_S);
+                useStart = Math.max(0, useEnd - MAX_REF_AUDIO_S);
+              }
+              const wholeOk =
+                useStart <= 0.001
+                && useEnd >= duration - 0.001
+                && !(keepsAudio && duration > MAX_REF_AUDIO_S);
+              const trim = wholeOk
+                ? null
+                : { start: round3(useStart), end: round3(useEnd) };
               onUse({
                 trim,
                 track: showTrack ? chosen : undefined,

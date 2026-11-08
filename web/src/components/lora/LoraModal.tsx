@@ -58,7 +58,6 @@ export function LoraModal({
     return () => document.removeEventListener("keydown", handler);
   }, [open, onClose]);
 
-  // Filter presets by search
   const filteredPresets = useMemo(() => {
     if (!search.trim()) return presets;
     const q = search.toLowerCase();

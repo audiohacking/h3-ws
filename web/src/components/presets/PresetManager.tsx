@@ -5,7 +5,7 @@ import { StyleAtlas } from "../media/StyleAtlas";
 
 interface PresetManagerProps {
   presets: GenerationPreset[];
-  onSave: (name: string, description?: string) => void;
+  onSave: (name: string, description?: string) => void | Promise<void>;
   onLoad: (preset: GenerationPreset) => void;
   onDelete: (id: string) => void;
   disabled?: boolean;
@@ -27,6 +27,8 @@ export function PresetManager({
   const [showSaveForm, setShowSaveForm] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [saveDescription, setSaveDescription] = useState("");
+  const [saveBusy, setSaveBusy] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -42,15 +44,26 @@ export function PresetManager({
       setShowSaveForm(false);
       setSaveName("");
       setSaveDescription("");
+      setSaveError(null);
+      setSaveBusy(false);
     }
   }, [open]);
 
-  function handleSave() {
-    if (!saveName.trim()) return;
-    onSave(saveName.trim(), saveDescription.trim() || undefined);
-    setSaveName("");
-    setSaveDescription("");
-    setShowSaveForm(false);
+  async function handleSave() {
+    if (!saveName.trim() || saveBusy) return;
+    setSaveBusy(true);
+    setSaveError(null);
+    try {
+      await onSave(saveName.trim(), saveDescription.trim() || undefined);
+      setSaveName("");
+      setSaveDescription("");
+      setShowSaveForm(false);
+      setTab("saved");
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaveBusy(false);
+    }
   }
 
   function handleDelete(e: React.MouseEvent, id: string) {
@@ -146,13 +159,16 @@ export function PresetManager({
 
               {tab === "saved" && presets.length === 0 && !showSaveForm && (
                 <p className="preset-manager__empty">
-                  No saved presets. Save your current settings to reuse them later.
+                  No saved presets. Save the current prompt and settings here, or use
+                  Save on a library clip.
                 </p>
               )}
 
               {tab === "saved" && presets.length > 0 && (
                 <div className="presets-modal__list">
-                  {presets.map((preset) => (
+                  {presets.map((preset) => {
+                    const promptPreview = (preset.prompt || "").trim();
+                    return (
                     <div
                       key={preset.id}
                       className="preset-card"
@@ -166,6 +182,17 @@ export function PresetManager({
                         {preset.description && (
                           <span className="preset-card__description">
                             {preset.description}
+                          </span>
+                        )}
+                        {promptPreview ? (
+                          <span className="preset-card__prompt" title={promptPreview}>
+                            {promptPreview.length > 120
+                              ? `${promptPreview.slice(0, 117).trimEnd()}…`
+                              : promptPreview}
+                          </span>
+                        ) : (
+                          <span className="preset-card__prompt preset-card__prompt--empty">
+                            No prompt saved — settings only
                           </span>
                         )}
                         <span className="preset-card__meta">
@@ -182,7 +209,8 @@ export function PresetManager({
                         &times;
                       </button>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
@@ -196,6 +224,7 @@ export function PresetManager({
                       value={saveName}
                       onChange={(e) => setSaveName(e.target.value)}
                       autoFocus
+                      disabled={saveBusy}
                     />
                     <input
                       type="text"
@@ -203,23 +232,31 @@ export function PresetManager({
                       placeholder="Description (optional)"
                       value={saveDescription}
                       onChange={(e) => setSaveDescription(e.target.value)}
+                      disabled={saveBusy}
                     />
+                    {saveError ? (
+                      <p className="preset-save-form__error" role="alert">
+                        {saveError}
+                      </p>
+                    ) : null}
                     <div className="preset-save-form__actions">
                       <button
                         type="button"
                         className="preset-save-form__btn preset-save-form__btn--save"
-                        onClick={handleSave}
-                        disabled={!saveName.trim()}
+                        onClick={() => void handleSave()}
+                        disabled={!saveName.trim() || saveBusy}
                       >
-                        Save
+                        {saveBusy ? "Saving…" : "Save"}
                       </button>
                       <button
                         type="button"
                         className="preset-save-form__btn preset-save-form__btn--cancel"
+                        disabled={saveBusy}
                         onClick={() => {
                           setShowSaveForm(false);
                           setSaveName("");
                           setSaveDescription("");
+                          setSaveError(null);
                         }}
                       >
                         Cancel
@@ -230,10 +267,13 @@ export function PresetManager({
                   <button
                     type="button"
                     className="preset-manager__save-btn"
-                    onClick={() => setShowSaveForm(true)}
+                    onClick={() => {
+                      setSaveError(null);
+                      setShowSaveForm(true);
+                    }}
                     disabled={disabled}
                   >
-                    + Save Current Settings
+                    + Save current prompt &amp; settings
                   </button>
                 ))}
             </div>

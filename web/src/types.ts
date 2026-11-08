@@ -94,6 +94,42 @@ export interface Config {
   redetail?: RedetailConfigPublic;
   upframe?: UpframeConfigPublic;
   faces?: FacesConfigPublic;
+  /** Declarative workspace tabs (Create / Enhance / future recipe plugins). */
+  workspaces?: WorkspaceManifest[];
+}
+
+export type WorkspacePanel = "composer" | "recipe" | "enhance";
+
+export interface WorkspaceField {
+  id: string;
+  type: string;
+  label?: string;
+  required?: boolean;
+  options?: string[];
+  min?: number;
+  max?: number;
+  pins?: boolean;
+  template?: string;
+  placeholder?: string;
+  default?: unknown;
+}
+
+export interface WorkspaceManifest {
+  id: string;
+  label: string;
+  hint?: string;
+  order?: number;
+  enabled?: boolean;
+  panel: WorkspacePanel;
+  isolation?: {
+    lora_categories?: string[] | null;
+    forbid?: string[];
+    hide_from_full_lora?: boolean;
+  };
+  engine?: Record<string, unknown>;
+  fields?: WorkspaceField[];
+  submit?: Record<string, unknown>;
+  docs?: string | null;
 }
 
 export interface FacesConfigPublic {
@@ -311,6 +347,8 @@ export interface GenerationPreset {
   id: string;
   name: string;
   description?: string;
+  /** User prompt — saved for reuse (composer + library “Save as preset”). */
+  prompt?: string;
   mode: string;
   quality: string;
   resolutionId: string;
@@ -322,6 +360,13 @@ export interface GenerationPreset {
   turboEnabled: boolean;
   tokenReduction: boolean;
   ssdStreaming: boolean;
+  /**
+   * Full composer recipe (prompt, refs, turbo, faces, …). When present,
+   * loading the preset restores the same state as picking the source clip.
+   */
+  generation?: Record<string, unknown> | null;
+  /** Library clip this preset was saved from (provenance only). */
+  sourceClipId?: string;
   createdAt: string;
   updatedAt: string;
 }

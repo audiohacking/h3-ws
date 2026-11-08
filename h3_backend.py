@@ -221,9 +221,13 @@ class ProgressEta:
         return mp
 
 
+# h3.c prints ``%-24s %-14s`` but some log paths collapse padding to one space.
 _PROFILE_RE = re.compile(
-    r"h3 profile:\s+(?P<name>.+?)\s{2,}(?P<mark>\S+)\s+wall=\s*(?P<wall>[\d.]+)s"
+    r"h3 profile:\s+(?P<name>.+?)\s+(?P<mark>\S+)\s+wall=\s*(?P<wall>[\d.]+)s"
+    r"(?:.*?encode=\s*(?P<encode>[\d.]+)s)?"
+    r"(?:.*?wait=\s*(?P<wait>[\d.]+)s)?"
     r"(?:.*?peak=\s*(?P<peak>[\d.]+)GiB)?"
+    r"(?:.*?attention=\s*(?P<attention>\d+))?"
 )
 
 
@@ -255,8 +259,14 @@ class PhaseTimer:
                 "mark": match.group("mark"),
                 "wall_s": float(match.group("wall")),
             }
+            if match.group("encode"):
+                entry["encode_s"] = float(match.group("encode"))
+            if match.group("wait"):
+                entry["wait_s"] = float(match.group("wait"))
             if match.group("peak"):
                 entry["peak_gib"] = float(match.group("peak"))
+            if match.group("attention"):
+                entry["attention"] = int(match.group("attention"))
             self.profile.append(entry)
             return
         step, total = mp.get("step"), mp.get("total")
@@ -635,7 +645,8 @@ def expand_quality(
     if layers is not None:
         out["layers"] = max(1, min(H3_DEFAULT_LAYERS, int(layers)))
     if reuse is not None:
-        out["reuse"] = max(1, int(reuse))
+        # h3.c: denoise reuse must be in [1, 3]
+        out["reuse"] = max(1, min(3, int(reuse)))
     if core_reuse is not None:
         out["core_reuse"] = max(1, int(core_reuse))
         out["reuse"] = None
@@ -662,8 +673,6 @@ def expand_quality(
         )
     if out.get("reuse") and out.get("core_reuse"):
         raise ValueError("--reuse and --core-reuse are mutually exclusive")
-    if int(out["steps"]) <= 7 and (out.get("reuse") or 1) > 1:
-        out["reuse"] = 1
     return out
 
 
@@ -1213,10 +1222,12 @@ class H3Engine:
         if not line:
             return
         elapsed = round(time.time() - self._t0, 1)
+        # Keep full Metal profile lines — truncating drops ``wall=`` / ``attention=``.
+        label = line if line.startswith("h3 profile:") else line[:160]
         mp: dict[str, Any] = {
             "stage": "generating",
             "elapsed_s": elapsed,
-            "label": line[:160],
+            "label": label,
         }
         m = _STEP_RE.search(line)
         phase_m = re.match(r"(.{1,40}?)\s+(\d+)/(\d+)\s*$", line)
